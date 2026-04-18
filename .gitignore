@@ -1,5 +1,23 @@
+# Python
 venv/
 __pycache__/
 *.pyc
-.env
+
+# VS Code
+.vscode/
+.vscode-server/
+
+# Linux junk
+.cache/
+.local/
+
+# Launcher data
+instances/*
+!instances/.keep
+
+runtime/
+
+# OS
+.DS_Store
+Thumbs.db
 

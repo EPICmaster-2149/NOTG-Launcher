@@ -1,0 +1,131 @@
+---- Minecraft Crash Report ----
+// I bet Cylons wouldn't have this problem.
+
+Time: 2026-04-18 06:22:40
+Description: Manually triggered debug crash
+
+java.lang.Throwable: Manually triggered debug crash
+	at knot//net.minecraft.class_309.method_1474(class_309.java:644)
+	at knot//net.minecraft.class_310.method_1574(class_310.java:1996)
+	at knot//net.minecraft.class_310.method_1523(class_310.java:1354)
+	at knot//net.minecraft.class_310.method_1514(class_310.java:966)
+	at knot//net.minecraft.client.main.Main.main(Main.java:250)
+	at net.fabricmc.loader.impl.game.minecraft.MinecraftGameProvider.launch(MinecraftGameProvider.java:514)
+	at net.fabricmc.loader.impl.launch.knot.Knot.launch(Knot.java:72)
+	at net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23)
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Render thread
+Stacktrace:
+	at knot//net.minecraft.class_309.method_1474(class_309.java:644)
+
+-- Manual crash details --
+Details:
+	Modules: 
+Stacktrace:
+	at knot//net.minecraft.class_309.method_1474(class_309.java:644)
+	at knot//net.minecraft.class_310.method_1574(class_310.java:1996)
+	at knot//net.minecraft.class_310.method_1523(class_310.java:1354)
+	at knot//net.minecraft.class_310.method_1514(class_310.java:966)
+	at knot//net.minecraft.client.main.Main.main(Main.java:250)
+	at net.fabricmc.loader.impl.game.minecraft.MinecraftGameProvider.launch(MinecraftGameProvider.java:514)
+	at net.fabricmc.loader.impl.launch.knot.Knot.launch(Knot.java:72)
+	at net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23)
+
+-- Uptime --
+Details:
+	JVM uptime: 138.870s
+	Wall uptime: 136.896s
+	High-res time: 133.875s
+	Client ticks: 2607 ticks / 130.350s
+Stacktrace:
+	at knot//net.minecraft.class_310.method_1587(class_310.java:2477)
+	at knot//net.minecraft.class_310.method_54580(class_310.java:1035)
+	at knot//net.minecraft.class_310.method_1514(class_310.java:987)
+	at knot//net.minecraft.client.main.Main.main(Main.java:250)
+	at net.fabricmc.loader.impl.game.minecraft.MinecraftGameProvider.launch(MinecraftGameProvider.java:514)
+	at net.fabricmc.loader.impl.launch.knot.Knot.launch(Knot.java:72)
+	at net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23)
+
+-- Affected level --
+Details:
+	All players: 1 total; class_746{name=player1, id=19, pos=(40.5, 70.0, 42.5), mode=CREATIVE, permission=permission level: OWNERS}
+	Chunk stats: 1521, 1057
+	Level dimension: minecraft:overworld
+	Level spawn location: World: (48,71,32), Section: (at 0,7,0 in 3,4,2; chunk contains blocks 48,-64,32 to 63,319,47), Region: (0,0; contains chunks 0,0 to 31,31, blocks 0,-64,0 to 511,319,511)
+	Level time: 1234 game time, 1234 day time
+	Server brand: fabric
+	Server type: Integrated singleplayer server
+	Tracked entity count: 185
+
+-- Last reload --
+Details:
+	Reload number: 1
+	Reload reason: initial
+	Finished: Yes
+	Packs: vanilla
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.11
+	Minecraft Version ID: 1.21.11
+	Operating System: Linux (amd64) version 6.6.87.2-microsoft-standard-WSL2
+	Java Version: 21.0.7, Microsoft
+	Java VM Version: OpenJDK 64-Bit Server VM (mixed mode), Microsoft
+	Memory: 386184720 bytes (368 MiB) / 1113587712 bytes (1062 MiB) up to 2053111808 bytes (1958 MiB)
+	CPUs: 16
+	Processor Vendor: GenuineIntel
+	Processor Name: 13th Gen Intel(R) Core(TM) i5-13450HX
+	Identifier: Intel64 Family 6 Model 183 Stepping 1
+	Microarchitecture: Raptor Lake
+	Frequency (GHz): -0.00
+	Number of physical packages: 1
+	Number of physical CPUs: 8
+	Number of logical CPUs: 16
+	Graphics card #0 name: Basic Render Driver
+	Graphics card #0 vendor: Microsoft Corporation
+	Graphics card #0 VRAM (MiB): 0.00
+	Graphics card #0 deviceId: unknown
+	Graphics card #0 versionInfo: version: 00
+	Virtual memory max (MiB): 5961.09
+	Virtual memory used (MiB): 4976.39
+	Swap memory total (MiB): 2048.00
+	Swap memory used (MiB): 0.00
+	Space in storage for jna.tmpdir (MiB): available: 973022.88, total: 1031018.44
+	Space in storage for org.lwjgl.system.SharedLibraryExtractPath (MiB): available: 973022.88, total: 1031018.44
+	Space in storage for io.netty.native.workdir (MiB): available: 973022.88, total: 1031018.44
+	Space in storage for java.io.tmpdir (MiB): available: 973022.88, total: 1031018.44
+	Space in storage for workdir (MiB): available: 973022.88, total: 1031018.44
+	JVM Flags: 0 total; 
+	Debug Flags: 0 total; 
+	Launched Version: fabric-loader-0.19.2-1.21.11
+	Launcher name: NOTG Launcher
+	Backend library: LWJGL version 3.3.3-snapshot
+	Backend API: llvmpipe (LLVM 20.1.2, 256 bits) GL version 4.5 (Core Profile) Mesa 25.2.8-0ubuntu0.24.04.1, Mesa
+	Window size: 854x480
+	GFLW Platform: x11
+	Render Extensions: GL_ARB_buffer_storage, GL_KHR_debug, GL_ARB_vertex_attrib_binding, GL_ARB_direct_state_access, GL_EXT_texture_filter_anisotropic
+	GL debug messages: 
+	Is Modded: Definitely; Client brand changed to 'fabric'; Server brand changed to 'fabric'
+	Universe: 400921fb54442d18
+	Type: Integrated Server (map_client.txt)
+	Transparency: regular
+	Render Distance: 16/16 chunks
+	Resource Packs: vanilla
+	Current Language: en_us
+	Locale: en
+	System encoding: UTF-8
+	File encoding: UTF-8
+	CPU: 16x 13th Gen Intel(R) Core(TM) i5-13450HX
+	Server Running: true
+	Player Count: 1 / 8; [class_3222['player1'/19, l='ServerLevel[New World]', x=40.50, y=70.00, z=42.50]]
+	Active Data Packs: vanilla
+	Available Data Packs: minecart_improvements, redstone_experiments, trade_rebalance, vanilla
+	Enabled Feature Flags: minecraft:vanilla
+	World Generation: Stable
+	World Seed: 8571548631897922611
+	Suppressed Exceptions: ~~NONE~~
