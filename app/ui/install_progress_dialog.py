@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.launcher import InstallRequest, LauncherService, run_install_task
+from core.launcher import InstallRequest, InstallResult, LauncherService, run_install_task
 from ui.topbar import ModernButton
 
 
@@ -41,7 +41,7 @@ class InstallProgressDialog(QDialog):
         self._last_status = ""
 
         self.setObjectName("installProgressDialog")
-        self.setWindowTitle("Installing Instance")
+        self.setWindowTitle("Installing Instance" if request.operation == "create" else "Importing Instance")
         self.resize(760, 420)
         self.setMinimumSize(660, 380)
 
@@ -65,11 +65,13 @@ class InstallProgressDialog(QDialog):
 
         text_column = QVBoxLayout()
         text_column.setSpacing(6)
-        self.title_label = QLabel(f"Installing {self.request.name}")
+        title_prefix = "Installing" if self.request.operation == "create" else "Importing"
+        self.title_label = QLabel(f"{title_prefix} {self.request.name}")
         self.title_label.setObjectName("installProgressTitle")
         text_column.addWidget(self.title_label)
 
-        self.status_label = QLabel("Preparing instance directory")
+        initial_status = "Preparing instance directory" if self.request.operation == "create" else "Preparing import"
+        self.status_label = QLabel(initial_status)
         self.status_label.setObjectName("installProgressStatus")
         text_column.addWidget(self.status_label)
         header_layout.addLayout(text_column, 1)
@@ -108,7 +110,8 @@ class InstallProgressDialog(QDialog):
         )
         self._process.start()
         self._poll_timer.start()
-        self._append_log(f"Starting install for {self.request.name}")
+        prefix = "install" if self.request.operation == "create" else "import"
+        self._append_log(f"Starting {prefix} for {self.request.name}")
 
     def _poll_events(self) -> None:
         if self._queue is not None:
@@ -150,7 +153,11 @@ class InstallProgressDialog(QDialog):
             return
 
         if event_type == "complete":
-            self._handle_success(str(event.get("installed_version", self.request.vanilla_version)))
+            payload = event.get("result")
+            if not isinstance(payload, dict):
+                self._handle_failure("Installation ended without a valid result payload.")
+                return
+            self._handle_success(InstallResult.from_payload(payload))
             return
 
         if event_type == "error":
@@ -160,14 +167,14 @@ class InstallProgressDialog(QDialog):
                 self._append_log(trace)
             self._handle_failure(message)
 
-    def _handle_success(self, installed_version: str) -> None:
+    def _handle_success(self, result: InstallResult) -> None:
         if self._completed:
             return
 
         self._completed = True
         self._poll_timer.stop()
         try:
-            instance = self.service.finalize_install(self.request, installed_version)
+            instance = self.service.finalize_install(self.request, result)
         except Exception as exc:  # noqa: BLE001
             self.service.cleanup_install(self.request)
             self.installation_failed.emit(str(exc))

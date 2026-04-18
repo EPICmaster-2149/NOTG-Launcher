@@ -215,7 +215,8 @@ QLabel#emptyStateText {
 }
 
 QDialog#instanceEditor,
-QDialog#installProgressDialog {
+QDialog#installProgressDialog,
+QDialog#iconSelectorDialog {
     background-color: qradialgradient(
         cx: 0.18,
         cy: 0.06,
@@ -233,6 +234,12 @@ QFrame#installProgressHeader {
     background-color: rgba(13, 22, 37, 0.9);
     border: 1px solid rgba(92, 132, 192, 0.3);
     border-radius: 16px;
+}
+
+QFrame#iconPresentationSurface {
+    background-color: rgba(11, 18, 31, 0.88);
+    border: 1px solid rgba(84, 122, 177, 0.3);
+    border-radius: 18px;
 }
 
 QLabel#editorInstanceIcon {
@@ -253,6 +260,14 @@ QLabel#editorEyebrow {
 QLabel#editorSubtitle {
     color: #96afcf;
     font-size: 13px;
+    background: transparent;
+}
+
+QLabel#editorImportCaption {
+    color: #dcecff;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
     background: transparent;
 }
 

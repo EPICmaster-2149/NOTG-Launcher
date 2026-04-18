@@ -70,6 +70,7 @@ class ModernButton(QPushButton):
         self._hover = 0.0
         self._press = 0.0
         self._active = 0.0
+        self._invalid = 0.0
         self._icon_size = icon_size
         self._radius = 18 if role == "toolbar" else 16
 
@@ -98,6 +99,15 @@ class ModernButton(QPushButton):
             easingCurve=QEasingCurve.OutCubic,
             valueChanged=self._set_active_progress,
         )
+        self._invalid_animation = QVariantAnimation(
+            self,
+            duration=440,
+            easingCurve=QEasingCurve.InOutCubic,
+            valueChanged=self._set_invalid_progress,
+        )
+        self._invalid_animation.setStartValue(0.0)
+        self._invalid_animation.setKeyValueAt(0.42, 1.0)
+        self._invalid_animation.setEndValue(0.0)
 
     def sizeHint(self):
         font = QFont(self.font())
@@ -125,6 +135,10 @@ class ModernButton(QPushButton):
         self._active = float(value)
         self.update()
 
+    def _set_invalid_progress(self, value):
+        self._invalid = float(value)
+        self.update()
+
     def _animate(self, animation, start, end):
         animation.stop()
         animation.setStartValue(float(start))
@@ -134,6 +148,10 @@ class ModernButton(QPushButton):
     def set_active(self, active):
         target = 1.0 if active else 0.0
         self._animate(self._active_animation, self._active, target)
+
+    def flash_invalid(self):
+        self._invalid_animation.stop()
+        self._invalid_animation.start()
 
     def enterEvent(self, event):
         self._animate(self._hover_animation, self._hover, 1.0)
@@ -158,20 +176,31 @@ class ModernButton(QPushButton):
         painter.setRenderHint(QPainter.Antialiasing)
 
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        rect.translate(0, 0.8 * self._press)
 
         bg = blend_colors(self._colors["bg"], self._colors["hover"], self._hover)
         bg = blend_colors(bg, self._colors["press"], self._press)
         bg = blend_colors(bg, self._colors["active"], self._active)
+        bg = blend_colors(bg, QColor("#5c2740"), self._invalid * 0.9)
 
         border = blend_colors(self._colors["border"], self._colors["border_hover"], self._hover)
         border = blend_colors(border, self._colors["border_hover"], self._press * 0.45)
         border = blend_colors(border, self._colors["border_active"], self._active)
+        border = blend_colors(border, QColor("#ff91bc"), self._invalid)
+
+        text_color = blend_colors(self._colors["text"], QColor("#ffe2ee"), self._invalid * 0.8)
+
+        if not self.isEnabled():
+            bg.setAlpha(int(bg.alpha() * 0.4))
+            border.setAlpha(int(border.alpha() * 0.45))
+            text_color.setAlpha(int(text_color.alpha() * 0.58))
 
         painter.setPen(Qt.NoPen)
         shadow = QColor(self._colors["shadow"])
-        shadow.setAlpha(int(shadow.alpha() * (0.7 + (self._hover * 0.3))))
+        shadow_strength = 0.7 + (self._hover * 0.3) + (self._invalid * 0.2)
+        shadow.setAlpha(int(shadow.alpha() * shadow_strength))
         painter.setBrush(shadow)
-        painter.drawRoundedRect(rect.adjusted(0, 3, 0, 3), self._radius, self._radius)
+        painter.drawRoundedRect(rect.adjusted(0, 3 + self._press, 0, 3 + self._press), self._radius, self._radius)
 
         painter.setPen(QPen(border, 1.2))
         painter.setBrush(bg)
@@ -197,7 +226,7 @@ class ModernButton(QPushButton):
             painter.drawPixmap(icon_rect.topLeft(), pixmap)
             text_left += self._icon_size + gap
 
-        painter.setPen(self._colors["text"])
+        painter.setPen(text_color)
         painter.setFont(font)
         if self.icon().isNull():
             text_rect = QRectF(content_rect.left(), content_rect.top(), content_rect.width(), content_rect.height())

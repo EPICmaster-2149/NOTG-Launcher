@@ -1,6 +1,8 @@
 from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QWidget
+
+from ui.icon_utils import load_scaled_icon
 
 
 def blend_colors(start: QColor, end: QColor, factor: float) -> QColor:
@@ -20,7 +22,7 @@ class InstanceCard(QWidget):
         super().__init__()
         self.name = name
         self.version = version.replace("Minecraft ", "")
-        self.icon = QPixmap(icon_path)
+        self.icon_path = icon_path
         self._hover_progress = 0.0
         self._selected_progress = 0.0
         self._selected = False
@@ -113,7 +115,7 @@ class InstanceCard(QWidget):
         painter.setBrush(icon_bg)
         painter.drawRoundedRect(icon_box, 18, 18)
 
-        pixmap = self.icon.scaled(70, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pixmap = load_scaled_icon(self.icon_path, 70, 70)
         pix_x = icon_box.center().x() - pixmap.width() / 2
         pix_y = icon_box.center().y() - pixmap.height() / 2
         painter.drawPixmap(int(pix_x), int(pix_y), pixmap)

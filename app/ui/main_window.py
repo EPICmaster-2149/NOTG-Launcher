@@ -343,6 +343,7 @@ class MainWindow(QWidget):
             item.setData(Qt.UserRole, updated)
             card.name = updated.name
             card.version = updated.version_label
+            card.icon_path = updated.icon_path
             card.update()
             if item is self._selected_item:
                 self.sidebar.set_instance(updated)

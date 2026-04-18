@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.topbar import ModernButton
+from ui.icon_utils import load_scaled_icon
 
 
 class SideBar(QWidget):
@@ -112,20 +113,17 @@ class SideBar(QWidget):
         self.version_label.setText(_clean_version(instance.version_label))
 
         pixmap = QPixmap(instance.icon_path)
-        self.icon_label.setPixmap(
-            pixmap.scaled(78, 78, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
+        pixmap = load_scaled_icon(instance.icon_path, 78, 78)
+        self.icon_label.setPixmap(pixmap)
         self.update_status(instance.status)
 
     def clear_instance(self):
         self._current_instance = None
         self.name_label.setText("No instance")
         self.version_label.setText("Select an instance")
-        asset_root = Path(__file__).resolve().parents[2] / "assets"
-        pixmap = QPixmap(str(asset_root / "Dirt.png"))
-        self.icon_label.setPixmap(
-            pixmap.scaled(78, 78, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
+        asset_root = Path(__file__).resolve().parents[2] / "assets" / "default-instance-icons"
+        pixmap = load_scaled_icon(asset_root / "Grass Block.png", 78, 78)
+        self.icon_label.setPixmap(pixmap)
         self.update_status("Quit")
 
     def update_status(self, status):

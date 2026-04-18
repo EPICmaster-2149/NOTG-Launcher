@@ -3,13 +3,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QRectF, QSortFilterProxyModel, Qt, QVariantAnimation
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QEasingCurve,
+    QModelIndex,
+    QRectF,
+    QSortFilterProxyModel,
+    Qt,
+    QVariantAnimation,
+    Signal,
+)
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -29,6 +39,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.launcher import LauncherService
+from ui.icon_selector_dialog import IconSelectorDialog
+from ui.icon_utils import load_scaled_icon
 from ui.topbar import ModernButton, blend_colors
 
 
@@ -257,12 +269,162 @@ class LoaderPlaceholder(QWidget):
         painter.drawText(box, Qt.AlignCenter, self._text)
 
 
+class ClickableAccentLineEdit(AccentLineEdit):
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self.isReadOnly() and event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class BrowseInput(QWidget):
+    browse_requested = Signal()
+
+    def __init__(self, placeholder: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        self.line_edit = ClickableAccentLineEdit(placeholder)
+        self.line_edit.setReadOnly(True)
+        self.line_edit.clicked.connect(self.browse_requested)
+        layout.addWidget(self.line_edit, 1)
+
+        self.browse_button = ModernButton("Browse", role="sidebar", height=46, icon_size=0)
+        self.browse_button.clicked.connect(self.browse_requested)
+        layout.addWidget(self.browse_button)
+
+    def text(self) -> str:
+        return self.line_edit.text().strip()
+
+    def setText(self, text: str) -> None:
+        self.line_edit.setText(text)
+
+    def clear(self) -> None:
+        self.line_edit.clear()
+
+    def focus_field(self) -> None:
+        self.line_edit.setFocus()
+
+
+class HeaderIconButton(QWidget):
+    clicked = Signal()
+
+    def __init__(self, icon_path: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._icon_path = icon_path
+        self._hover = 0.0
+        self._press = 0.0
+
+        self.setObjectName("editorInstanceIcon")
+        self.setFixedSize(92, 92)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+
+        self._hover_animation = QVariantAnimation(
+            self,
+            duration=170,
+            easingCurve=QEasingCurve.OutCubic,
+            valueChanged=self._set_hover,
+        )
+        self._press_animation = QVariantAnimation(
+            self,
+            duration=120,
+            easingCurve=QEasingCurve.OutCubic,
+            valueChanged=self._set_press,
+        )
+
+    def set_icon_path(self, icon_path: str) -> None:
+        self._icon_path = icon_path
+        self.update()
+
+    def _set_hover(self, value: Any) -> None:
+        self._hover = float(value)
+        self.update()
+
+    def _set_press(self, value: Any) -> None:
+        self._press = float(value)
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._hover_animation.stop()
+        self._hover_animation.setStartValue(self._hover)
+        self._hover_animation.setEndValue(1.0)
+        self._hover_animation.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover_animation.stop()
+        self._hover_animation.setStartValue(self._hover)
+        self._hover_animation.setEndValue(0.0)
+        self._hover_animation.start()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._press_animation.stop()
+            self._press_animation.setStartValue(self._press)
+            self._press_animation.setEndValue(1.0)
+            self._press_animation.start()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._press_animation.stop()
+        self._press_animation.setStartValue(self._press)
+        self._press_animation.setEndValue(0.0)
+        self._press_animation.start()
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        rect.translate(0, -1.0 * self._hover + 0.8 * self._press)
+
+        top_fill = blend_colors(QColor("#17263d"), QColor("#1d3354"), self._hover)
+        bottom_fill = blend_colors(QColor("#112036"), QColor("#182c47"), self._hover)
+        border = blend_colors(QColor("#43618c"), QColor("#7bc4ff"), self._hover)
+        border = blend_colors(border, QColor("#9bd4ff"), self._press * 0.5)
+
+        painter.setPen(QPen(border, 1.25))
+        painter.setBrush(top_fill)
+        painter.drawRoundedRect(rect, 16, 16)
+
+        inner = rect.adjusted(10, 10, -10, -10)
+        painter.setPen(QPen(QColor("#2e4669"), 1.0))
+        painter.setBrush(bottom_fill)
+        painter.drawRoundedRect(inner, 14, 14)
+
+        icon = load_scaled_icon(self._icon_path, 74, 74)
+        if not icon.isNull():
+            icon_x = inner.center().x() - (icon.width() / 2)
+            icon_y = inner.center().y() - (icon.height() / 2)
+            painter.drawPixmap(int(icon_x), int(icon_y), icon)
+
+        if self._hover > 0.04:
+            glow = rect.adjusted(2, 2, -2, -2)
+            accent = QColor(126, 194, 255, int(54 * self._hover))
+            painter.setPen(QPen(accent, 2.0))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(glow, 14, 14)
+
+
 class AddInstanceDialog(QDialog):
+    PAGE_CREATE = 0
+    PAGE_IMPORT = 1
+
     def __init__(self, service: LauncherService, parent: QWidget | None = None):
         super().__init__(parent)
         self.service = service
         self.selection: dict[str, Any] | None = None
         self._current_loader_id: str | None = None
+        self._selected_icon_path = self.service.default_icon
 
         self.setObjectName("instanceEditor")
         self.setWindowTitle("Create New Instance")
@@ -270,9 +432,10 @@ class AddInstanceDialog(QDialog):
         self.resize(1120, 780)
         self.setMinimumSize(1040, 720)
 
-        self._asset_root = Path(__file__).resolve().parents[2] / "assets"
         self._build_ui()
         self._load_versions(force_refresh=False)
+        self._sync_header_icon()
+        self._update_page_state(self.PAGE_CREATE)
 
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
@@ -285,28 +448,24 @@ class AddInstanceDialog(QDialog):
         header_layout.setContentsMargins(22, 18, 22, 18)
         header_layout.setSpacing(18)
 
-        self.icon_label = QLabel()
-        self.icon_label.setObjectName("editorInstanceIcon")
-        self.icon_label.setFixedSize(92, 92)
-        icon = QPixmap(str(self._asset_root / "Dirt.png"))
-        self.icon_label.setPixmap(icon.scaled(74, 74, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self.icon_label.setAlignment(Qt.AlignCenter)
-        header_layout.addWidget(self.icon_label)
+        self.icon_button = HeaderIconButton(self.service.resolve_icon_path(self._selected_icon_path))
+        self.icon_button.clicked.connect(self._open_icon_selector)
+        header_layout.addWidget(self.icon_button)
 
         name_column = QVBoxLayout()
         name_column.setSpacing(10)
 
-        header_title = QLabel("Create A New Instance")
-        header_title.setObjectName("editorEyebrow")
-        name_column.addWidget(header_title)
+        self.header_title = QLabel("Create A New Instance")
+        self.header_title.setObjectName("editorEyebrow")
+        name_column.addWidget(self.header_title)
 
         self.name_edit = AccentLineEdit("Enter a name or use the selected version", large=True)
         self.name_edit.setMinimumHeight(66)
         name_column.addWidget(self.name_edit)
 
-        subtitle = QLabel("Isolated installs, real version metadata, and live mod-loader integration.")
-        subtitle.setObjectName("editorSubtitle")
-        name_column.addWidget(subtitle)
+        self.subtitle_label = QLabel("Isolated installs, real version metadata, and live mod-loader integration.")
+        self.subtitle_label.setObjectName("editorSubtitle")
+        name_column.addWidget(self.subtitle_label)
         header_layout.addLayout(name_column, 1)
         root_layout.addWidget(header)
 
@@ -334,10 +493,11 @@ class AddInstanceDialog(QDialog):
         self.nav_list.setFrameShape(QFrame.NoFrame)
         self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.nav_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        create_item = QListWidgetItem("Create")
-        create_item.setSizeHint(create_item.sizeHint().expandedTo(create_item.sizeHint()))
-        self.nav_list.addItem(create_item)
-        self.nav_list.setCurrentRow(0)
+        for title in ("Create", "Import"):
+            item = QListWidgetItem(title)
+            item.setSizeHint(item.sizeHint().expandedTo(item.sizeHint()))
+            self.nav_list.addItem(item)
+        self.nav_list.currentRowChanged.connect(self._update_page_state)
         nav_layout.addWidget(self.nav_list, 1)
         shell_layout.addWidget(nav_frame)
 
@@ -355,6 +515,28 @@ class AddInstanceDialog(QDialog):
         divider.setObjectName("editorPrimaryDivider")
         content_layout.addWidget(divider)
 
+        self.page_stack = QStackedWidget()
+        self.page_stack.addWidget(self._build_create_page())
+        self.page_stack.addWidget(self._build_import_page())
+        content_layout.addWidget(self.page_stack, 1)
+
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(12)
+        footer.addStretch()
+
+        self.cancel_button = ModernButton("Cancel", role="sidebar", height=44, icon_size=0)
+        self.cancel_button.clicked.connect(self.reject)
+        footer.addWidget(self.cancel_button)
+
+        self.ok_button = ModernButton("OK", role="accent", height=44, icon_size=0)
+        self.ok_button.clicked.connect(self._accept_selection)
+        footer.addWidget(self.ok_button)
+        content_layout.addLayout(footer)
+        shell_layout.addWidget(content, 1)
+        self.nav_list.setCurrentRow(0)
+
+    def _build_create_page(self) -> QWidget:
         scroll_area = QScrollArea()
         scroll_area.setObjectName("instanceEditorScroll")
         scroll_area.setWidgetResizable(True)
@@ -383,22 +565,64 @@ class AddInstanceDialog(QDialog):
 
         scroll_layout.addWidget(selection_surface)
         scroll_area.setWidget(scroll_widget)
-        content_layout.addWidget(scroll_area, 1)
+        return scroll_area
 
-        footer = QHBoxLayout()
-        footer.setContentsMargins(0, 0, 0, 0)
-        footer.setSpacing(12)
-        footer.addStretch()
+    def _build_import_page(self) -> QWidget:
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName("instanceEditorScroll")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        self.cancel_button = ModernButton("Cancel", role="sidebar", height=44, icon_size=0)
-        self.cancel_button.clicked.connect(self.reject)
-        footer.addWidget(self.cancel_button)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(0, 0, 6, 0)
+        scroll_layout.setSpacing(14)
 
-        self.ok_button = ModernButton("OK", role="accent", height=44, icon_size=0)
-        self.ok_button.clicked.connect(self._accept_selection)
-        footer.addWidget(self.ok_button)
-        content_layout.addLayout(footer)
-        shell_layout.addWidget(content, 1)
+        import_surface = QFrame()
+        import_surface.setObjectName("editorSelectionSurface")
+        import_layout = QVBoxLayout(import_surface)
+        import_layout.setContentsMargins(22, 22, 22, 22)
+        import_layout.setSpacing(20)
+
+        self.modpack_input = BrowseInput("Select a modpack archive (.mrpack or .zip)")
+        self.modpack_input.browse_requested.connect(self._browse_modpack)
+        import_layout.addWidget(self.modpack_input)
+
+        modpack_caption = QLabel("EXPORT MODPACKS")
+        modpack_caption.setObjectName("editorImportCaption")
+        modpack_caption.setAlignment(Qt.AlignLeft)
+        import_layout.addWidget(modpack_caption)
+
+        import_divider = QFrame()
+        import_divider.setObjectName("editorSectionDivider")
+        import_layout.addWidget(import_divider)
+
+        self.minecraft_input = BrowseInput("Select a .minecraft folder to import")
+        self.minecraft_input.browse_requested.connect(self._browse_minecraft_folder)
+        import_layout.addWidget(self.minecraft_input)
+
+        minecraft_caption = QLabel("IMPORT .minecraft folder")
+        minecraft_caption.setObjectName("editorImportCaption")
+        minecraft_caption.setAlignment(Qt.AlignLeft)
+        import_layout.addWidget(minecraft_caption)
+        import_layout.addStretch()
+
+        scroll_layout.addWidget(import_surface)
+        scroll_area.setWidget(scroll_widget)
+        return scroll_area
+
+    def _update_page_state(self, index: int) -> None:
+        target_index = self.PAGE_CREATE if index < 0 else index
+        self.page_stack.setCurrentIndex(target_index)
+        page_name = self.nav_list.item(target_index).text()
+        self.page_title.setText(page_name)
+        self.header_title.setText(f"{page_name.upper()} A NEW INSTANCE")
+        if target_index == self.PAGE_CREATE:
+            self.subtitle_label.setText("Isolated installs, real version metadata, and live mod-loader integration.")
+        else:
+            self.subtitle_label.setText("Import real modpacks or an existing .minecraft folder with live progress logs.")
+        self._update_name_placeholder()
 
     def _build_version_section(self) -> QWidget:
         section = QFrame()
@@ -774,13 +998,21 @@ class AddInstanceDialog(QDialog):
         table.selectRow(target_row)
 
     def _update_name_placeholder(self) -> None:
-        version = self.current_version_id() or "New Instance"
-        placeholder = self.service.default_instance_name(version, self._current_loader_id)
+        if self.page_stack.currentIndex() == self.PAGE_IMPORT:
+            placeholder = "Leave blank to use the imported pack or folder name"
+        else:
+            version = self.current_version_id() or "New Instance"
+            placeholder = self.service.default_instance_name(version, self._current_loader_id)
         self.name_edit.setPlaceholderText(placeholder)
 
     def _accept_selection(self) -> None:
+        if self.page_stack.currentIndex() == self.PAGE_IMPORT:
+            self._accept_import_selection()
+            return
+
         version_row = self.current_version_row()
         if version_row is None:
+            self.ok_button.flash_invalid()
             QMessageBox.warning(self, "Missing Version", "Select a Minecraft version to continue.")
             return
 
@@ -788,6 +1020,7 @@ class AddInstanceDialog(QDialog):
         if self._current_loader_id:
             loader_row = self.current_loader_row()
             if loader_row is None:
+                self.ok_button.flash_invalid()
                 QMessageBox.warning(
                     self,
                     "Missing Loader Version",
@@ -801,5 +1034,106 @@ class AddInstanceDialog(QDialog):
             "vanilla_version": str(version_row["id"]),
             "mod_loader_id": self._current_loader_id,
             "mod_loader_version": loader_version,
+            "icon_path": self._selected_icon_path,
+            "operation": "create",
+            "modpack_path": None,
+            "minecraft_import_dir": None,
         }
         self.accept()
+
+    def _accept_import_selection(self) -> None:
+        modpack_path = self.modpack_input.text()
+        minecraft_path = self.minecraft_input.text()
+
+        if modpack_path and minecraft_path:
+            self.ok_button.flash_invalid()
+            QMessageBox.warning(
+                self,
+                "Choose One Import Source",
+                "Select either a modpack archive or a .minecraft folder, not both at the same time.",
+            )
+            return
+
+        if not modpack_path and not minecraft_path:
+            self.ok_button.flash_invalid()
+            self.modpack_input.focus_field()
+            return
+
+        if modpack_path:
+            if not Path(modpack_path).is_file():
+                self.ok_button.flash_invalid()
+                QMessageBox.warning(self, "Missing Modpack", "Select a valid modpack archive to continue.")
+                return
+            self.selection = {
+                "name": self.name_edit.text().strip(),
+                "vanilla_version": None,
+                "mod_loader_id": None,
+                "mod_loader_version": None,
+                "icon_path": self._selected_icon_path,
+                "operation": "import_modpack",
+                "modpack_path": modpack_path,
+                "minecraft_import_dir": None,
+            }
+            self.accept()
+            return
+
+        valid, message = self.service.is_valid_minecraft_dir(minecraft_path)
+        if not valid:
+            self.ok_button.flash_invalid()
+            QMessageBox.warning(self, "Invalid .minecraft Folder", message)
+            return
+
+        self.selection = {
+            "name": self.name_edit.text().strip(),
+            "vanilla_version": None,
+            "mod_loader_id": None,
+            "mod_loader_version": None,
+            "icon_path": self._selected_icon_path,
+            "operation": "import_minecraft",
+            "modpack_path": None,
+            "minecraft_import_dir": minecraft_path,
+        }
+        self.accept()
+
+    def _open_icon_selector(self) -> None:
+        dialog = IconSelectorDialog(self.service, self._selected_icon_path, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._selected_icon_path = dialog.selected_icon_path
+        self._sync_header_icon()
+
+    def _sync_header_icon(self) -> None:
+        resolved_icon = self.service.resolve_icon_path(self._selected_icon_path)
+        self.icon_button.set_icon_path(resolved_icon)
+
+    def _browse_modpack(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Modpack",
+            str(self.service.project_root),
+            "Modpack Archives (*.mrpack *.zip)",
+        )
+        if not file_path:
+            return
+        self.modpack_input.setText(file_path)
+        if self.minecraft_input.text():
+            self.minecraft_input.clear()
+
+    def _browse_minecraft_folder(self) -> None:
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Import .minecraft Folder",
+            str(self.service.project_root),
+        )
+        if not folder_path:
+            return
+
+        valid, message = self.service.is_valid_minecraft_dir(folder_path)
+        if not valid:
+            self.ok_button.flash_invalid()
+            QMessageBox.warning(self, "Invalid .minecraft Folder", message)
+            return
+
+        self.minecraft_input.setText(folder_path)
+        if self.modpack_input.text():
+            self.modpack_input.clear()

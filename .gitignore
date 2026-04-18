@@ -1,5 +1,5 @@
 # Python
-venv/
+.venv/
 __pycache__/
 *.pyc
 
@@ -7,9 +7,7 @@ __pycache__/
 .vscode/
 .vscode-server/
 
-# Linux junk
-.cache/
-.local/
+
 
 # Launcher data
 instances/*
