@@ -4,23 +4,14 @@ from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (
-    QDialog,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QMessageBox,
-    QStackedWidget,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 from core.launcher import InstanceRecord, LauncherService
+from ui.accounts_dialog import AccountsDialog
 from ui.add_instance_dialog import AddInstanceDialog
 from ui.install_progress_dialog import InstallProgressDialog
 from ui.instance_card import InstanceCard
+from ui.responsive import fitted_window_size, scaled_px
 from ui.sidebar import SideBar
 from ui.topbar import TopBar
 
@@ -58,10 +49,12 @@ class MainWindow(QWidget):
 
         self.setObjectName("appRoot")
         self.setWindowTitle("NOTG Launcher")
-        self.setMinimumSize(1320, 820)
-        self.resize(1420, 860)
+        self.setMinimumSize(980, 640)
+        self.resize(fitted_window_size(self, 1420, 860, minimum_width=980, minimum_height=640))
+        self._screen_connected = False
 
         self._build_ui()
+        self._apply_responsive_layout()
         self.refresh_instances()
 
         self.process_monitor = QTimer(self)
@@ -69,37 +62,29 @@ class MainWindow(QWidget):
         self.process_monitor.timeout.connect(self._poll_running_processes)
         self.process_monitor.start()
 
+    def showEvent(self, event) -> None:
+        self._ensure_screen_tracking()
+        self._apply_responsive_layout()
+        super().showEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        self._apply_responsive_layout()
+        super().resizeEvent(event)
+
+    def _ensure_screen_tracking(self) -> None:
+        handle = self.windowHandle()
+        if handle is None or self._screen_connected:
+            return
+        handle.screenChanged.connect(lambda *_: self._apply_responsive_layout())
+        self._screen_connected = True
+
     def _build_ui(self) -> None:
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(8)
 
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(10)
-
-        self.brand_panel = QFrame()
-        self.brand_panel.setObjectName("brandPanel")
-        brand_layout = QHBoxLayout(self.brand_panel)
-        brand_layout.setContentsMargins(14, 10, 16, 10)
-        brand_layout.setSpacing(10)
-
-        self.brand_mark = QFrame()
-        self.brand_mark.setObjectName("brandMark")
-        brand_layout.addWidget(self.brand_mark)
-
-        self.branding_label = QLabel("NOTGlauncher")
-        self.branding_label.setObjectName("brandWordmark")
-        brand_layout.addWidget(self.branding_label)
-        brand_layout.addStretch()
-
-        header_row.addWidget(self.brand_panel)
-        header_row.addStretch()
-        main_layout.addLayout(header_row)
-
         self.topbar = TopBar()
-        self.topbar.account_name.setText(self.service.get_player_name())
-        self.topbar.account_avatar.setText(self.service.get_player_name()[:1].upper())
+        self.topbar.set_accounts(self.service.list_accounts(), self.service.get_player_name())
         self.topbar.action_requested.connect(self._handle_topbar_action)
         main_layout.addWidget(self.topbar)
 
@@ -112,6 +97,7 @@ class MainWindow(QWidget):
         content_layout.setSpacing(16)
         content_layout.setAlignment(Qt.AlignTop)
         main_layout.addLayout(content_layout, 1)
+        self.content_layout = content_layout
 
         self.sidebar = SideBar()
         self.sidebar.action_requested.connect(self._handle_sidebar_action)
@@ -145,7 +131,8 @@ class MainWindow(QWidget):
         self.instance_list.setSelectionMode(QListWidget.SingleSelection)
         self.instance_list.setFrameShape(QFrame.NoFrame)
         self.instance_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.instance_list.setGridSize(QSize(202, 226))
+        self.instance_list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.instance_list.setGridSize(QSize(218, 234))
         self.instance_list.currentItemChanged.connect(self._handle_current_item_changed)
         self.instance_list.itemDoubleClicked.connect(self._handle_instance_double_clicked)
         list_layout.addWidget(self.instance_list, 1)
@@ -177,6 +164,32 @@ class MainWindow(QWidget):
         empty_layout.addWidget(empty_card, alignment=Qt.AlignCenter)
         empty_layout.addStretch()
         self.content_stack.addWidget(empty_page)
+
+    def _apply_responsive_layout(self) -> None:
+        outer_margin = scaled_px(self, 20, minimum=12, maximum=24)
+        content_spacing = scaled_px(self, 16, minimum=10, maximum=18)
+
+        root_layout = self.layout()
+        if isinstance(root_layout, QVBoxLayout):
+            root_layout.setContentsMargins(outer_margin, outer_margin, outer_margin, outer_margin)
+            root_layout.setSpacing(scaled_px(self, 8, minimum=6, maximum=10))
+
+        self.sidebar.setFixedWidth(scaled_px(self, 284, minimum=220, maximum=300))
+        self.instance_list.setSpacing(scaled_px(self, 18, minimum=12, maximum=20))
+        self.instance_list.setGridSize(
+            QSize(
+                scaled_px(self, 212, minimum=186, maximum=220),
+                scaled_px(self, 228, minimum=196, maximum=236),
+            )
+        )
+
+        surface_layout = self.content_surface.layout()
+        if isinstance(surface_layout, QVBoxLayout):
+            surface_margin = scaled_px(self, 22, minimum=14, maximum=24)
+            surface_layout.setContentsMargins(surface_margin, surface_margin, surface_margin, surface_margin)
+            surface_layout.setSpacing(scaled_px(self, 8, minimum=6, maximum=10))
+
+        self.content_layout.setSpacing(content_spacing)
 
     def refresh_instances(self, select_instance_id: str | None = None) -> None:
         instances = self.service.load_instances()
@@ -225,6 +238,20 @@ class MainWindow(QWidget):
 
         if action == "Settings":
             QMessageBox.information(self, "Settings", "Settings are not implemented yet.")
+            return
+
+        if action == "Manage Accounts":
+            self._open_manage_accounts_dialog()
+            return
+
+        if action.startswith("Account:"):
+            account_name = action.split(":", 1)[1]
+            try:
+                self.service.set_active_account(account_name)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Accounts", str(exc))
+                return
+            self._sync_accounts_ui()
 
     def _open_add_instance_dialog(self) -> None:
         dialog = AddInstanceDialog(self.service, self)
@@ -285,7 +312,7 @@ class MainWindow(QWidget):
             return
 
         if action == "Delete":
-            QMessageBox.information(self, "Delete", "Delete is not implemented yet.")
+            self._delete_selected_instance()
             return
 
     def _launch_selected_instance(self) -> None:
@@ -317,6 +344,31 @@ class MainWindow(QWidget):
             self.service.terminate_process_tree(process.pid)
         self._running_processes.pop(instance.instance_id, None)
         self._set_instance_status(instance.instance_id, "Quit")
+
+    def _delete_selected_instance(self) -> None:
+        if self._selected_item is None:
+            return
+
+        instance = self._selected_item.data(Qt.UserRole)
+        if instance.instance_id in self._launch_threads or instance.instance_id in self._running_processes:
+            QMessageBox.warning(self, "Delete Instance", "Stop the instance before deleting it.")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Delete Instance",
+            f"Delete '{instance.name}' and all of its files?",
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            self.service.delete_instance(instance)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Delete Instance", str(exc))
+            return
+
+        self.refresh_instances()
 
     def _handle_launch_success(self, instance: InstanceRecord, process: Any) -> None:
         self._running_processes[instance.instance_id] = process
@@ -361,6 +413,14 @@ class MainWindow(QWidget):
             if item is self._selected_item:
                 self.sidebar.update_status(status)
             break
+
+    def _sync_accounts_ui(self) -> None:
+        self.topbar.set_accounts(self.service.list_accounts(), self.service.get_player_name())
+
+    def _open_manage_accounts_dialog(self) -> None:
+        dialog = AccountsDialog(self.service, self)
+        dialog.exec()
+        self._sync_accounts_ui()
 
     def _poll_running_processes(self) -> None:
         finished: list[tuple[str, int]] = []

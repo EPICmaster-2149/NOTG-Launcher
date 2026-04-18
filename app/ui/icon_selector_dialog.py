@@ -12,12 +12,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMessageBox,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from core.launcher import IconRecord, LauncherService
 from ui.icon_utils import load_scaled_icon
+from ui.responsive import fitted_window_size, scaled_px, screen_scale
 from ui.topbar import ModernButton, blend_colors
 
 
@@ -27,6 +29,7 @@ class IconTile(QWidget):
     def __init__(self, icon_record: IconRecord, parent: QWidget | None = None):
         super().__init__(parent)
         self.icon_record = icon_record
+        self._side_length = 140
         self._hover = 0.0
         self._press = 0.0
         self._selected = 0.0
@@ -55,10 +58,16 @@ class IconTile(QWidget):
         )
 
     def sizeHint(self) -> QSize:
-        return QSize(132, 132)
+        return QSize(self._side_length, self._side_length)
 
     def minimumSizeHint(self) -> QSize:
         return self.sizeHint()
+
+    def set_side_length(self, side_length: int) -> None:
+        self._side_length = side_length
+        self.setFixedSize(side_length, side_length)
+        self.updateGeometry()
+        self.update()
 
     def set_selected(self, selected: bool) -> None:
         self._selected_animation.stop()
@@ -113,14 +122,16 @@ class IconTile(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        scale = screen_scale(self, minimum=0.9, maximum=1.05)
 
-        rect = QRectF(self.rect()).adjusted(8, 8, -8, -8)
-        rect.translate(0, -1.3 * self._hover + 0.9 * self._press)
+        inset = 8 * scale
+        rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
+        rect.translate(0, -1.1 * self._hover + 0.8 * self._press)
 
-        shadow_rect = rect.adjusted(0, 6 + self._press, 0, 8 + self._press)
+        shadow_rect = rect.adjusted(0, 5 * scale + self._press, 0, 7 * scale + self._press)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(4, 8, 17, int(44 + (28 * self._hover))))
-        painter.drawRoundedRect(shadow_rect, 22, 22)
+        painter.drawRoundedRect(shadow_rect, 18 * scale, 18 * scale)
 
         fill_top = blend_colors(QColor("#101a2d"), QColor("#162540"), self._hover)
         fill_top = blend_colors(fill_top, QColor("#1b345d"), self._selected)
@@ -129,29 +140,30 @@ class IconTile(QWidget):
         border = blend_colors(QColor("#253a5d"), QColor("#4f7dd0"), self._selected)
         border = blend_colors(border, QColor("#6a9cff"), self._hover * 0.4)
 
-        painter.setPen(QPen(border, 1.25))
+        painter.setPen(QPen(border, max(1.0, 1.15 * scale)))
         painter.setBrush(fill_top)
-        painter.drawRoundedRect(rect, 22, 22)
+        painter.drawRoundedRect(rect, 18 * scale, 18 * scale)
 
-        inner = rect.adjusted(10, 10, -10, -10)
+        inner = rect.adjusted(10 * scale, 10 * scale, -10 * scale, -10 * scale)
         inner_fill = blend_colors(QColor("#15243a"), QColor("#1a2e4b"), self._hover * 0.5)
         inner_fill = blend_colors(inner_fill, QColor("#1d3760"), self._selected * 0.7)
-        painter.setPen(QPen(QColor("#2f486f"), 1.0))
+        painter.setPen(QPen(QColor("#2f486f"), max(1.0, scale)))
         painter.setBrush(inner_fill)
-        painter.drawRoundedRect(inner, 18, 18)
+        painter.drawRoundedRect(inner, 16 * scale, 16 * scale)
 
-        pixmap = load_scaled_icon(self.icon_record.absolute_path, 74, 74)
+        icon_side = scaled_px(self, 74, minimum=66, maximum=78, scale_min=0.9, scale_max=1.05)
+        pixmap = load_scaled_icon(self.icon_record.absolute_path, icon_side, icon_side)
         if not pixmap.isNull():
             pix_x = inner.center().x() - (pixmap.width() / 2)
             pix_y = inner.center().y() - (pixmap.height() / 2)
             painter.drawPixmap(int(pix_x), int(pix_y), pixmap)
 
         if self._selected > 0.02:
-            glow = rect.adjusted(2, 2, -2, -2)
+            glow = rect.adjusted(2 * scale, 2 * scale, -2 * scale, -2 * scale)
             accent = blend_colors(QColor(92, 162, 255, 0), QColor(128, 201, 255, 72), self._selected)
-            painter.setPen(QPen(accent, 2.0))
+            painter.setPen(QPen(accent, max(1.2, 1.8 * scale)))
             painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(glow, 20, 20)
+            painter.drawRoundedRect(glow, 16 * scale, 16 * scale)
 
 
 class IconSelectorDialog(QDialog):
@@ -169,11 +181,20 @@ class IconSelectorDialog(QDialog):
         self.setObjectName("iconSelectorDialog")
         self.setWindowTitle("Pick Icon")
         self.setModal(True)
-        self.resize(560, 620)
-        self.setMinimumSize(520, 560)
+        self.setMinimumSize(760, 700)
+        self.resize(fitted_window_size(self.parentWidget() or self, 920, 860, minimum_width=760, minimum_height=700))
 
         self._build_ui()
+        self._apply_responsive_layout()
         self._reload_icons(self.selected_icon_path)
+
+    def showEvent(self, event) -> None:
+        self._apply_responsive_layout()
+        super().showEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        self._apply_responsive_layout()
+        super().resizeEvent(event)
 
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
@@ -199,6 +220,7 @@ class IconSelectorDialog(QDialog):
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
         self.grid_layout.setHorizontalSpacing(12)
         self.grid_layout.setVerticalSpacing(12)
+        self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.scroll_area.setWidget(self.grid_holder)
 
         footer = QHBoxLayout()
@@ -207,24 +229,29 @@ class IconSelectorDialog(QDialog):
         root_layout.addLayout(footer)
 
         self.add_icon_button = ModernButton("Add Icon", role="sidebar", height=44, icon_size=0)
+        self.add_icon_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.add_icon_button.clicked.connect(self._add_icon)
         footer.addWidget(self.add_icon_button)
 
         self.remove_icon_button = ModernButton("Remove Icon", role="danger", height=44, icon_size=0)
+        self.remove_icon_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.remove_icon_button.clicked.connect(self._remove_selected_icon)
         footer.addWidget(self.remove_icon_button)
 
         self.open_folder_button = ModernButton("Open Folder", role="sidebar", height=44, icon_size=0)
+        self.open_folder_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.open_folder_button.clicked.connect(self._open_folder)
         footer.addWidget(self.open_folder_button)
 
         footer.addStretch()
 
         self.ok_button = ModernButton("OK", role="accent", height=44, icon_size=0)
+        self.ok_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.ok_button.clicked.connect(self._confirm_selection)
         footer.addWidget(self.ok_button)
 
         self.cancel_button = ModernButton("Cancel", role="sidebar", height=44, icon_size=0)
+        self.cancel_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.cancel_button.clicked.connect(self.reject)
         footer.addWidget(self.cancel_button)
 
@@ -245,15 +272,32 @@ class IconSelectorDialog(QDialog):
         for index, icon in enumerate(icons):
             tile = IconTile(icon, self.grid_holder)
             tile.clicked.connect(self._select_icon)
-            row = index // 3
-            column = index % 3
+            row = index // 4
+            column = index % 4
             self.grid_layout.addWidget(tile, row, column)
             self._tiles[icon.relative_path] = tile
 
-        self.grid_layout.setColumnStretch(0, 1)
-        self.grid_layout.setColumnStretch(1, 1)
-        self.grid_layout.setColumnStretch(2, 1)
+        for column in range(4):
+            self.grid_layout.setColumnStretch(column, 0)
         self._select_icon(selected_icon)
+
+    def _apply_responsive_layout(self) -> None:
+        layout = self.layout()
+        if isinstance(layout, QVBoxLayout):
+            margin = scaled_px(self, 20, minimum=16, maximum=24)
+            layout.setContentsMargins(margin, margin, margin, margin)
+            layout.setSpacing(scaled_px(self, 14, minimum=12, maximum=18))
+
+        self.grid_layout.setHorizontalSpacing(scaled_px(self, 12, minimum=10, maximum=14))
+        self.grid_layout.setVerticalSpacing(scaled_px(self, 12, minimum=10, maximum=14))
+        tile_side = scaled_px(self, 156, minimum=132, maximum=164, scale_min=0.92, scale_max=1.0)
+        for tile in self._tiles.values():
+            tile.set_side_length(tile_side)
+        self.add_icon_button.set_metrics(height=scaled_px(self, 46, minimum=42, maximum=48), icon_size=0)
+        self.remove_icon_button.set_metrics(height=scaled_px(self, 46, minimum=42, maximum=48), icon_size=0)
+        self.open_folder_button.set_metrics(height=scaled_px(self, 46, minimum=42, maximum=48), icon_size=0)
+        self.ok_button.set_metrics(height=scaled_px(self, 46, minimum=42, maximum=48), icon_size=0)
+        self.cancel_button.set_metrics(height=scaled_px(self, 46, minimum=42, maximum=48), icon_size=0)
 
     def _select_icon(self, relative_path: str) -> None:
         if relative_path not in self._tiles:

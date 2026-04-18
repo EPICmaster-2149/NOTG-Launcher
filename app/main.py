@@ -1,12 +1,15 @@
 import multiprocessing
 from pathlib import Path
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 from ui.main_window import MainWindow
 
 
 def main():
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication([])
     app.setApplicationName("NOTG Launcher")
 

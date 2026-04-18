@@ -1,8 +1,10 @@
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QRectF, QSize, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPen
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+
+from ui.responsive import scaled_px
 
 
 def blend_colors(start: QColor, end: QColor, factor: float) -> QColor:
@@ -18,15 +20,15 @@ def blend_colors(start: QColor, end: QColor, factor: float) -> QColor:
 class ModernButton(QPushButton):
     ROLE_COLORS = {
         "toolbar": {
-            "bg": QColor(0, 0, 0, 0),
-            "hover": QColor(104, 154, 255, 30),
-            "press": QColor(104, 154, 255, 46),
-            "active": QColor(104, 154, 255, 54),
-            "border": QColor(140, 178, 255, 0),
-            "border_hover": QColor(140, 178, 255, 84),
-            "border_active": QColor(140, 178, 255, 120),
+            "bg": QColor(22, 35, 56, 214),
+            "hover": QColor(40, 62, 94, 230),
+            "press": QColor(28, 46, 74, 238),
+            "active": QColor(54, 84, 126, 232),
+            "border": QColor("#39557e"),
+            "border_hover": QColor("#7aa6e3"),
+            "border_active": QColor("#aac9f4"),
             "text": QColor("#e6efff"),
-            "shadow": QColor(0, 0, 0, 0),
+            "shadow": QColor(8, 17, 31, 74),
         },
         "sidebar": {
             "bg": QColor(34, 50, 80, 208),
@@ -72,7 +74,7 @@ class ModernButton(QPushButton):
         self._active = 0.0
         self._invalid = 0.0
         self._icon_size = icon_size
-        self._radius = 18 if role == "toolbar" else 16
+        self._radius = 12 if role == "toolbar" else 14
 
         if icon is not None:
             self.setIcon(icon)
@@ -114,14 +116,25 @@ class ModernButton(QPushButton):
         font.setPointSize(12 if self._role == "toolbar" else 11)
         font.setWeight(QFont.DemiBold)
         metrics = QFontMetrics(font)
-        gap = 14 if not self.icon().isNull() else 0
+        gap = 12 if not self.icon().isNull() else 0
         icon_width = self._icon_size if not self.icon().isNull() else 0
-        width = metrics.horizontalAdvance(self.text()) + icon_width + gap + 48
-        minimum_width = 156 if self._role == "toolbar" else 134
-        return QSize(max(width, minimum_width), self.minimumHeight())
+        horizontal_padding = 58 if self._role == "toolbar" else 54
+        width = metrics.horizontalAdvance(self.text()) + icon_width + gap + horizontal_padding
+        minimum_width = 176 if self._role == "toolbar" else 152
+        return QSize(max(width, minimum_width), self.minimumHeight() + 5)
 
     def minimumSizeHint(self):
         return self.sizeHint()
+
+    def set_metrics(self, *, height: int | None = None, icon_size: int | None = None) -> None:
+        if icon_size is not None:
+            self._icon_size = icon_size
+        if height is not None:
+            self.setMinimumHeight(height)
+            self.setMaximumHeight(height + 5)
+        self.setMinimumWidth(self.sizeHint().width())
+        self.updateGeometry()
+        self.update()
 
     def _set_hover_progress(self, value):
         self._hover = float(value)
@@ -175,7 +188,8 @@ class ModernButton(QPushButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        shadow_offset = 3 + self._press
+        rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -(shadow_offset + 1.5))
         rect.translate(0, 0.8 * self._press)
 
         bg = blend_colors(self._colors["bg"], self._colors["hover"], self._hover)
@@ -200,40 +214,103 @@ class ModernButton(QPushButton):
         shadow_strength = 0.7 + (self._hover * 0.3) + (self._invalid * 0.2)
         shadow.setAlpha(int(shadow.alpha() * shadow_strength))
         painter.setBrush(shadow)
-        painter.drawRoundedRect(rect.adjusted(0, 3 + self._press, 0, 3 + self._press), self._radius, self._radius)
+        painter.drawRoundedRect(rect.adjusted(0, shadow_offset, 0, shadow_offset), self._radius, self._radius)
 
         painter.setPen(QPen(border, 1.2))
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, self._radius, self._radius)
 
         content_rect = rect.adjusted(18, 0, -18, 0)
-        icon_rect = QRectF()
         font = QFont(self.font())
         font.setPointSize(12 if self._role == "toolbar" else 11)
         font.setWeight(QFont.DemiBold)
+        painter.setFont(font)
         metrics = QFontMetrics(font)
-        gap = 14 if not self.icon().isNull() else 0
+        gap = 12 if not self.icon().isNull() else 0
+        available_width = max(0.0, content_rect.width())
+        icon_width = self._icon_size if not self.icon().isNull() else 0
         text_width = metrics.horizontalAdvance(self.text())
-        total_width = text_width
+        reserved_width = icon_width + gap if not self.icon().isNull() else 0
+        max_text_width = max(0, int(available_width - reserved_width))
+        text_value = metrics.elidedText(self.text(), Qt.ElideRight, max_text_width)
+        rendered_text_width = metrics.horizontalAdvance(text_value)
+        rendered_total_width = rendered_text_width
         if not self.icon().isNull():
-            total_width += self._icon_size + gap
+            rendered_total_width += icon_width + gap
 
-        text_left = content_rect.center().x() - (total_width / 2)
+        text_left = content_rect.center().x() - (rendered_total_width / 2)
         if not self.icon().isNull():
             pixmap = self.icon().pixmap(self._icon_size, self._icon_size)
             icon_y = content_rect.center().y() - self._icon_size / 2
-            icon_rect = QRectF(text_left, icon_y, self._icon_size, self._icon_size)
-            painter.drawPixmap(icon_rect.topLeft(), pixmap)
+            painter.drawPixmap(int(text_left), int(icon_y), pixmap)
             text_left += self._icon_size + gap
 
         painter.setPen(text_color)
-        painter.setFont(font)
         if self.icon().isNull():
             text_rect = QRectF(content_rect.left(), content_rect.top(), content_rect.width(), content_rect.height())
-            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignHCenter, self.text())
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignHCenter, text_value)
         else:
-            text_rect = QRectF(text_left, content_rect.top(), content_rect.right() - text_left, content_rect.height())
-            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.text())
+            text_rect = QRectF(text_left, content_rect.top(), content_rect.right() - text_left + 1, content_rect.height())
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text_value)
+
+
+class ClickableFrame(QFrame):
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class AccountPopup(QWidget):
+    account_selected = Signal(str)
+    manage_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setObjectName("accountPopup")
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(12, 12, 12, 12)
+        self._layout.setSpacing(8)
+        self._account_buttons: list[ModernButton] = []
+        self._manage_button = ModernButton("Manage Accounts", role="sidebar", height=40, icon_size=0)
+        self._manage_button.clicked.connect(self._handle_manage)
+
+    def set_accounts(self, accounts: list[str], active_account: str) -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                if widget is self._manage_button:
+                    widget.setParent(None)
+                    continue
+                widget.deleteLater()
+        self._account_buttons.clear()
+
+        for account_name in accounts:
+            button = ModernButton(account_name, role="sidebar", height=40, icon_size=0)
+            button.set_active(account_name == active_account)
+            button.clicked.connect(lambda _=False, name=account_name: self._handle_account(name))
+            self._layout.addWidget(button)
+            self._account_buttons.append(button)
+
+        self._layout.addWidget(self._manage_button)
+        self.adjustSize()
+
+    def show_below(self, widget: QWidget) -> None:
+        global_pos = widget.mapToGlobal(QPoint(0, widget.height() + 8))
+        self.move(global_pos)
+        self.show()
+        self.raise_()
+
+    def _handle_account(self, account_name: str) -> None:
+        self.hide()
+        self.account_selected.emit(account_name)
+
+    def _handle_manage(self) -> None:
+        self.hide()
+        self.manage_requested.emit()
 
 
 class TopBar(QWidget):
@@ -268,8 +345,10 @@ class TopBar(QWidget):
 
         layout.addStretch()
 
-        self.account_chip = QFrame()
+        self.account_chip = ClickableFrame()
         self.account_chip.setObjectName("accountChip")
+        self.account_chip.setCursor(Qt.PointingHandCursor)
+        self.account_chip.clicked.connect(self._toggle_account_popup)
         account_layout = QHBoxLayout(self.account_chip)
         account_layout.setContentsMargins(12, 8, 12, 8)
         account_layout.setSpacing(10)
@@ -284,6 +363,53 @@ class TopBar(QWidget):
         account_layout.addWidget(self.account_name)
 
         layout.addWidget(self.account_chip)
+        self.account_popup = AccountPopup(self)
+        self.account_popup.account_selected.connect(lambda account: self.action_requested.emit(f"Account:{account}"))
+        self.account_popup.manage_requested.connect(lambda: self.action_requested.emit("Manage Accounts"))
+        self._layout = layout
+        self._account_layout = account_layout
+        self._apply_responsive_metrics()
+
+    def showEvent(self, event) -> None:
+        self._apply_responsive_metrics()
+        super().showEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        self._apply_responsive_metrics()
+        super().resizeEvent(event)
+
+    def _apply_responsive_metrics(self) -> None:
+        margins = scaled_px(self, 18, minimum=12, maximum=22)
+        vertical_margin = scaled_px(self, 12, minimum=8, maximum=16)
+        spacing = scaled_px(self, 12, minimum=8, maximum=16)
+        self._layout.setContentsMargins(margins, vertical_margin, margins, vertical_margin)
+        self._layout.setSpacing(spacing)
+        self._account_layout.setContentsMargins(
+            scaled_px(self, 12, minimum=10, maximum=16),
+            scaled_px(self, 8, minimum=6, maximum=10),
+            scaled_px(self, 12, minimum=10, maximum=16),
+            scaled_px(self, 8, minimum=6, maximum=10),
+        )
+        self._account_layout.setSpacing(scaled_px(self, 10, minimum=8, maximum=12))
+        avatar_size = scaled_px(self, 28, minimum=24, maximum=32)
+        self.account_avatar.setFixedSize(avatar_size, avatar_size)
+
+        for button in self.buttons.values():
+            button.set_metrics(
+                height=scaled_px(self, 52, minimum=42, maximum=56),
+                icon_size=scaled_px(self, 30, minimum=20, maximum=30),
+            )
+
+    def set_accounts(self, accounts: list[str], active_account: str) -> None:
+        self.account_name.setText(active_account)
+        self.account_avatar.setText(active_account[:1].upper())
+        self.account_popup.set_accounts(accounts, active_account)
 
     def _handle_click(self, action):
         self.action_requested.emit(action)
+
+    def _toggle_account_popup(self):
+        if self.account_popup.isVisible():
+            self.account_popup.hide()
+            return
+        self.account_popup.show_below(self.account_chip)

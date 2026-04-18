@@ -9,6 +9,8 @@ from PySide6.QtCore import (
     QModelIndex,
     QRectF,
     QSortFilterProxyModel,
+    QThread,
+    QTimer,
     Qt,
     QVariantAnimation,
     Signal,
@@ -41,6 +43,7 @@ from PySide6.QtWidgets import (
 from core.launcher import LauncherService
 from ui.icon_selector_dialog import IconSelectorDialog
 from ui.icon_utils import load_scaled_icon
+from ui.responsive import fitted_window_size, scaled_px, screen_scale
 from ui.topbar import ModernButton, blend_colors
 
 
@@ -231,6 +234,50 @@ class SearchFilterProxyModel(QSortFilterProxyModel):
         return self._search_text in search_blob
 
 
+class CatalogWorker(QThread):
+    loaded = Signal(str, int, object)
+    failed = Signal(str, int, str)
+
+    def __init__(
+        self,
+        service: LauncherService,
+        job: str,
+        request_id: int,
+        *,
+        force_refresh: bool = False,
+        loader_id: str | None = None,
+        minecraft_version: str | None = None,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._service = service
+        self._job = job
+        self._request_id = request_id
+        self._force_refresh = force_refresh
+        self._loader_id = loader_id
+        self._minecraft_version = minecraft_version
+
+    def run(self) -> None:
+        try:
+            if self._job == "versions":
+                payload = self._service.get_version_catalog(force_refresh=self._force_refresh)
+            elif self._job == "loader_versions":
+                if not self._loader_id or not self._minecraft_version:
+                    raise ValueError("Missing mod loader request context.")
+                payload = self._service.get_loader_versions(
+                    self._loader_id,
+                    self._minecraft_version,
+                    force_refresh=self._force_refresh,
+                )
+            else:
+                raise ValueError(f"Unsupported catalog job: {self._job}")
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(self._job, self._request_id, str(exc))
+            return
+
+        self.loaded.emit(self._job, self._request_id, payload)
+
+
 class LoaderPlaceholder(QWidget):
     def __init__(self, text: str, parent: QWidget | None = None):
         super().__init__(parent)
@@ -317,9 +364,10 @@ class HeaderIconButton(QWidget):
         self._icon_path = icon_path
         self._hover = 0.0
         self._press = 0.0
+        self._side_length = 104
 
         self.setObjectName("editorInstanceIcon")
-        self.setFixedSize(92, 92)
+        self.setFixedSize(self._side_length, self._side_length)
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
 
@@ -338,6 +386,11 @@ class HeaderIconButton(QWidget):
 
     def set_icon_path(self, icon_path: str) -> None:
         self._icon_path = icon_path
+        self.update()
+
+    def set_side_length(self, side_length: int) -> None:
+        self._side_length = side_length
+        self.setFixedSize(side_length, side_length)
         self.update()
 
     def _set_hover(self, value: Any) -> None:
@@ -383,6 +436,7 @@ class HeaderIconButton(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        scale = screen_scale(self, minimum=0.78, maximum=1.05)
 
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         rect.translate(0, -1.0 * self._hover + 0.8 * self._press)
@@ -392,27 +446,30 @@ class HeaderIconButton(QWidget):
         border = blend_colors(QColor("#43618c"), QColor("#7bc4ff"), self._hover)
         border = blend_colors(border, QColor("#9bd4ff"), self._press * 0.5)
 
-        painter.setPen(QPen(border, 1.25))
+        painter.setPen(QPen(border, max(1.0, 1.25 * scale)))
         painter.setBrush(top_fill)
-        painter.drawRoundedRect(rect, 16, 16)
+        painter.drawRoundedRect(rect, 16 * scale, 16 * scale)
 
-        inner = rect.adjusted(10, 10, -10, -10)
-        painter.setPen(QPen(QColor("#2e4669"), 1.0))
+        inset = 8 * scale
+        inner = rect.adjusted(inset, inset, -inset, -inset)
+        painter.setPen(QPen(QColor("#2e4669"), max(1.0, scale)))
         painter.setBrush(bottom_fill)
-        painter.drawRoundedRect(inner, 14, 14)
+        painter.drawRoundedRect(inner, 14 * scale, 14 * scale)
 
-        icon = load_scaled_icon(self._icon_path, 74, 74)
+        icon_side = max(48, int(min(inner.width(), inner.height()) * 0.82))
+        icon = load_scaled_icon(self._icon_path, icon_side, icon_side)
         if not icon.isNull():
             icon_x = inner.center().x() - (icon.width() / 2)
             icon_y = inner.center().y() - (icon.height() / 2)
             painter.drawPixmap(int(icon_x), int(icon_y), icon)
 
         if self._hover > 0.04:
-            glow = rect.adjusted(2, 2, -2, -2)
+            glow_inset = 2 * scale
+            glow = rect.adjusted(glow_inset, glow_inset, -glow_inset, -glow_inset)
             accent = QColor(126, 194, 255, int(54 * self._hover))
-            painter.setPen(QPen(accent, 2.0))
+            painter.setPen(QPen(accent, max(1.2, 2.0 * scale)))
             painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(glow, 14, 14)
+            painter.drawRoundedRect(glow, 14 * scale, 14 * scale)
 
 
 class AddInstanceDialog(QDialog):
@@ -425,17 +482,29 @@ class AddInstanceDialog(QDialog):
         self.selection: dict[str, Any] | None = None
         self._current_loader_id: str | None = None
         self._selected_icon_path = self.service.default_icon
+        self._version_request_id = 0
+        self._loader_request_id = 0
+        self._workers: set[QThread] = set()
 
         self.setObjectName("instanceEditor")
         self.setWindowTitle("Create New Instance")
         self.setModal(True)
-        self.resize(1120, 780)
-        self.setMinimumSize(1040, 720)
+        self.setMinimumSize(860, 620)
+        self.resize(fitted_window_size(self.parentWidget() or self, 1120, 780, minimum_width=860, minimum_height=620))
 
         self._build_ui()
-        self._load_versions(force_refresh=False)
+        self._apply_responsive_layout()
         self._sync_header_icon()
         self._update_page_state(self.PAGE_CREATE)
+        QTimer.singleShot(0, lambda: self._load_versions(force_refresh=False))
+
+    def showEvent(self, event) -> None:
+        self._apply_responsive_layout()
+        super().showEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        self._apply_responsive_layout()
+        super().resizeEvent(event)
 
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
@@ -462,10 +531,6 @@ class AddInstanceDialog(QDialog):
         self.name_edit = AccentLineEdit("Enter a name or use the selected version", large=True)
         self.name_edit.setMinimumHeight(66)
         name_column.addWidget(self.name_edit)
-
-        self.subtitle_label = QLabel("Isolated installs, real version metadata, and live mod-loader integration.")
-        self.subtitle_label.setObjectName("editorSubtitle")
-        name_column.addWidget(self.subtitle_label)
         header_layout.addLayout(name_column, 1)
         root_layout.addWidget(header)
 
@@ -478,7 +543,7 @@ class AddInstanceDialog(QDialog):
 
         nav_frame = QFrame()
         nav_frame.setObjectName("instanceEditorNav")
-        nav_frame.setFixedWidth(212)
+        self.nav_frame = nav_frame
         nav_layout = QVBoxLayout(nav_frame)
         nav_layout.setContentsMargins(14, 18, 14, 18)
         nav_layout.setSpacing(12)
@@ -618,10 +683,6 @@ class AddInstanceDialog(QDialog):
         page_name = self.nav_list.item(target_index).text()
         self.page_title.setText(page_name)
         self.header_title.setText(f"{page_name.upper()} A NEW INSTANCE")
-        if target_index == self.PAGE_CREATE:
-            self.subtitle_label.setText("Isolated installs, real version metadata, and live mod-loader integration.")
-        else:
-            self.subtitle_label.setText("Import real modpacks or an existing .minecraft folder with live progress logs.")
         self._update_name_placeholder()
 
     def _build_version_section(self) -> QWidget:
@@ -653,6 +714,17 @@ class AddInstanceDialog(QDialog):
         self.version_proxy = VersionFilterProxyModel(self.service, self)
         self.version_proxy.setSourceModel(self.version_model)
 
+        self.version_stack = QStackedWidget()
+        self.version_stack.setObjectName("versionStack")
+        left.addWidget(self.version_stack, 1)
+
+        self.version_placeholder = LoaderPlaceholder("Loading Minecraft versions...")
+        self.version_stack.addWidget(self.version_placeholder)
+
+        version_table_holder = QWidget()
+        version_table_layout = QVBoxLayout(version_table_holder)
+        version_table_layout.setContentsMargins(0, 0, 0, 0)
+        version_table_layout.setSpacing(0)
         self.version_table = self._build_table_view()
         self.version_table.setObjectName("versionCatalogTable")
         self.version_table.setModel(self.version_proxy)
@@ -662,15 +734,17 @@ class AddInstanceDialog(QDialog):
         self.version_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.version_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.version_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        left.addWidget(self.version_table, 1)
+        version_table_layout.addWidget(self.version_table)
+        self.version_stack.addWidget(version_table_holder)
 
         self.version_search = AccentLineEdit("Search versions")
         self.version_search.textChanged.connect(self._on_version_search_changed)
+        self.version_search.setEnabled(False)
         left.addWidget(self.version_search)
 
         side = QFrame()
         side.setObjectName("editorSidePanel")
-        side.setFixedWidth(184)
+        self.version_side_panel = side
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(14, 14, 14, 14)
         side_layout.setSpacing(10)
@@ -699,6 +773,7 @@ class AddInstanceDialog(QDialog):
 
         self.version_refresh = ModernButton("Refresh", role="sidebar", height=42, icon_size=0)
         self.version_refresh.clicked.connect(lambda: self._load_versions(force_refresh=True))
+        self.version_refresh.setEnabled(False)
         side_layout.addWidget(self.version_refresh)
         return section
 
@@ -764,7 +839,7 @@ class AddInstanceDialog(QDialog):
 
         side = QFrame()
         side.setObjectName("editorSidePanel")
-        side.setFixedWidth(184)
+        self.loader_side_panel = side
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(14, 14, 14, 14)
         side_layout.setSpacing(10)
@@ -814,6 +889,30 @@ class AddInstanceDialog(QDialog):
         table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         return table
 
+    def _apply_responsive_layout(self) -> None:
+        root_margin = scaled_px(self, 22, minimum=14, maximum=24)
+        layout = self.layout()
+        if isinstance(layout, QVBoxLayout):
+            layout.setContentsMargins(root_margin, root_margin, root_margin, scaled_px(self, 20, minimum=14, maximum=22))
+            layout.setSpacing(scaled_px(self, 14, minimum=10, maximum=16))
+
+        self.icon_button.set_side_length(scaled_px(self, 104, minimum=76, maximum=108))
+        self.name_edit.setMinimumHeight(scaled_px(self, 66, minimum=52, maximum=68))
+        self.nav_frame.setFixedWidth(scaled_px(self, 212, minimum=160, maximum=220))
+        self.version_side_panel.setFixedWidth(scaled_px(self, 184, minimum=150, maximum=190))
+        self.loader_side_panel.setFixedWidth(scaled_px(self, 184, minimum=150, maximum=190))
+
+        self.cancel_button.set_metrics(height=scaled_px(self, 44, minimum=38, maximum=46), icon_size=0)
+        self.ok_button.set_metrics(height=scaled_px(self, 44, minimum=38, maximum=46), icon_size=0)
+        self.version_refresh.set_metrics(height=scaled_px(self, 42, minimum=38, maximum=44), icon_size=0)
+        self.loader_refresh.set_metrics(height=scaled_px(self, 42, minimum=38, maximum=44), icon_size=0)
+        self.modpack_input.browse_button.set_metrics(height=scaled_px(self, 46, minimum=40, maximum=48), icon_size=0)
+        self.minecraft_input.browse_button.set_metrics(height=scaled_px(self, 46, minimum=40, maximum=48), icon_size=0)
+
+        row_height = scaled_px(self, 36, minimum=32, maximum=38)
+        self.version_table.verticalHeader().setDefaultSectionSize(row_height)
+        self.loader_table.verticalHeader().setDefaultSectionSize(row_height)
+
     def _build_checkbox(self, text: str, checked: bool, value: str) -> QCheckBox:
         checkbox = QCheckBox(text)
         checkbox.setObjectName("editorFilterCheck")
@@ -831,15 +930,14 @@ class AddInstanceDialog(QDialog):
         return radio
 
     def _load_versions(self, force_refresh: bool) -> None:
-        try:
-            rows = self.service.get_version_catalog(force_refresh=force_refresh)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Version List Error", str(exc))
-            return
-
-        self.version_model.set_rows(rows)
-        self._update_version_filters()
-        self._select_first_row(self.version_table, self.version_proxy)
+        self._version_request_id += 1
+        self.version_model.set_rows([])
+        self.version_search.clear()
+        self.version_search.setEnabled(False)
+        self.version_refresh.setEnabled(False)
+        self.version_placeholder.set_text("Loading Minecraft versions...")
+        self.version_stack.setCurrentIndex(0)
+        self._start_worker("versions", self._version_request_id, force_refresh=force_refresh)
 
     def _update_version_filters(self) -> None:
         enabled = set()
@@ -885,19 +983,12 @@ class AddInstanceDialog(QDialog):
         self._refresh_loader_rows(force_refresh=False)
 
     def _sync_loader_availability(self) -> None:
-        version = self.current_version_id()
         for loader_id, button in self.loader_buttons.items():
-            if loader_id is None:
-                button.setEnabled(True)
-                button.setToolTip("")
-                continue
-
-            supported = bool(version) and version in self.service.get_loader_supported_versions(loader_id)
             button.setEnabled(True)
-            if supported:
+            if loader_id is None:
                 button.setToolTip("")
             else:
-                button.setToolTip("This loader does not support the currently selected Minecraft version.")
+                button.setToolTip("Choose a version to fetch compatible loader builds.")
 
     def _refresh_loader_rows(self, force_refresh: bool = False) -> None:
         version = self.current_version_id()
@@ -919,32 +1010,21 @@ class AddInstanceDialog(QDialog):
             self.loader_stack.setCurrentIndex(0)
             return
 
-        if version not in self.service.get_loader_supported_versions(self._current_loader_id):
-            self.loader_model.set_rows([])
-            self.loader_search.clear()
-            self.loader_search.setEnabled(False)
-            self.loader_refresh.setEnabled(False)
-            self.loader_placeholder.set_text("The selected version is not supported by this mod loader.")
-            self.loader_stack.setCurrentIndex(0)
-            return
-
-        try:
-            rows = self.service.get_loader_versions(
-                self._current_loader_id,
-                version,
-                force_refresh=force_refresh,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.loader_placeholder.set_text(str(exc))
-            self.loader_stack.setCurrentIndex(0)
-            self.loader_refresh.setEnabled(True)
-            return
-
-        self.loader_model.set_rows(rows)
-        self.loader_search.setEnabled(True)
-        self.loader_refresh.setEnabled(True)
-        self.loader_stack.setCurrentIndex(1)
-        self._select_first_row(self.loader_table, self.loader_proxy)
+        self._loader_request_id += 1
+        self.loader_model.set_rows([])
+        self.loader_search.clear()
+        self.loader_search.setEnabled(False)
+        self.loader_refresh.setEnabled(False)
+        loader_name = self.service.get_mod_loader_name(self._current_loader_id)
+        self.loader_placeholder.set_text(f"Loading {loader_name} versions...")
+        self.loader_stack.setCurrentIndex(0)
+        self._start_worker(
+            "loader_versions",
+            self._loader_request_id,
+            force_refresh=force_refresh,
+            loader_id=self._current_loader_id,
+            minecraft_version=version,
+        )
 
     def current_version_row(self) -> dict[str, Any] | None:
         return self._current_proxy_row(self.version_table, self.version_proxy, self.version_model)
@@ -1110,7 +1190,7 @@ class AddInstanceDialog(QDialog):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Import Modpack",
-            str(self.service.project_root),
+            str((Path.home() / "Downloads") if (Path.home() / "Downloads").exists() else Path.home()),
             "Modpack Archives (*.mrpack *.zip)",
         )
         if not file_path:
@@ -1123,7 +1203,7 @@ class AddInstanceDialog(QDialog):
         folder_path = QFileDialog.getExistingDirectory(
             self,
             "Import .minecraft Folder",
-            str(self.service.project_root),
+            str(Path.home()),
         )
         if not folder_path:
             return
@@ -1137,3 +1217,87 @@ class AddInstanceDialog(QDialog):
         self.minecraft_input.setText(folder_path)
         if self.modpack_input.text():
             self.modpack_input.clear()
+
+    def _start_worker(
+        self,
+        job: str,
+        request_id: int,
+        *,
+        force_refresh: bool = False,
+        loader_id: str | None = None,
+        minecraft_version: str | None = None,
+    ) -> None:
+        worker = CatalogWorker(
+            self.service,
+            job,
+            request_id,
+            force_refresh=force_refresh,
+            loader_id=loader_id,
+            minecraft_version=minecraft_version,
+        )
+        self._workers.add(worker)
+        worker.loaded.connect(self._handle_catalog_loaded)
+        worker.failed.connect(self._handle_catalog_failed)
+        worker.finished.connect(self._finalize_worker)
+        worker.start()
+
+    def _finalize_worker(self) -> None:
+        worker = self.sender()
+        if not isinstance(worker, QThread):
+            return
+        self._workers.discard(worker)
+        worker.deleteLater()
+
+    def _handle_catalog_loaded(self, job: str, request_id: int, payload: object) -> None:
+        if job == "versions":
+            if request_id != self._version_request_id:
+                return
+            rows = list(payload) if isinstance(payload, list) else []
+            self.version_model.set_rows(rows)
+            self.version_search.setEnabled(True)
+            self.version_refresh.setEnabled(True)
+            if rows:
+                self.version_stack.setCurrentIndex(1)
+                self._update_version_filters()
+                self._select_first_row(self.version_table, self.version_proxy)
+            else:
+                self.version_placeholder.set_text("No Minecraft versions were returned.")
+                self.version_stack.setCurrentIndex(0)
+            return
+
+        if job == "loader_versions":
+            if request_id != self._loader_request_id:
+                return
+            rows = list(payload) if isinstance(payload, list) else []
+            self.loader_refresh.setEnabled(True)
+            if rows:
+                self.loader_model.set_rows(rows)
+                self.loader_search.setEnabled(True)
+                self.loader_stack.setCurrentIndex(1)
+                self._select_first_row(self.loader_table, self.loader_proxy)
+            else:
+                self.loader_model.set_rows([])
+                self.loader_placeholder.set_text("No compatible loader versions were returned for this selection.")
+                self.loader_stack.setCurrentIndex(0)
+
+    def _handle_catalog_failed(self, job: str, request_id: int, message: str) -> None:
+        if job == "versions":
+            if request_id != self._version_request_id:
+                return
+            self.version_placeholder.set_text(message)
+            self.version_stack.setCurrentIndex(0)
+            self.version_refresh.setEnabled(True)
+            return
+
+        if job == "loader_versions":
+            if request_id != self._loader_request_id:
+                return
+            self.loader_placeholder.set_text(message)
+            self.loader_stack.setCurrentIndex(0)
+            self.loader_refresh.setEnabled(True)
+
+    def closeEvent(self, event) -> None:
+        for worker in list(self._workers):
+            if worker.isRunning():
+                worker.wait()
+        super().closeEvent(event)

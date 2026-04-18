@@ -15,6 +15,7 @@ from typing import Any
 
 import minecraft_launcher_lib
 import psutil
+from platformdirs import PlatformDirs
 
 
 EXPERIMENT_TYPES = {
@@ -62,6 +63,9 @@ MMCPACK_LOADER_UIDS = {
     "net.neoforged.neoforge": "neoforge",
     "net.neoforged": "neoforge",
 }
+
+APP_NAME = "NOTG Launcher"
+USER_ICON_PREFIX = "user-icons"
 
 
 @dataclass(slots=True)
@@ -218,16 +222,28 @@ class InstallResult:
 class LauncherService:
     def __init__(self, project_root: Path | None = None):
         self.project_root = project_root or Path(__file__).resolve().parents[2]
+        self.install_root = self.project_root
         self.assets_root = self.project_root / "assets"
         self.default_icons_root = self.assets_root / "default-instance-icons"
-        self.user_icons_root = self.project_root / "app" / "icons"
-        self.instances_root = self.project_root / "instances"
-        self.runtime_root = self.project_root / "runtime"
+        self.legacy_user_icons_root = self.project_root / "app" / "icons"
+        self.legacy_instances_root = self.project_root / "instances"
+
+        dirs = PlatformDirs(appname=APP_NAME, appauthor=False, ensure_exists=False)
+        self.data_root = Path(dirs.user_data_dir).resolve()
+        self.config_root = Path(dirs.user_config_dir).resolve()
+        self.cache_root = Path(dirs.user_cache_dir).resolve()
+        self.accounts_file = self.config_root / "accounts.json"
+        self.user_icons_root = self.data_root / "icons"
+        self.instances_root = self.data_root / "instances"
+        self.runtime_root = self.data_root / "runtime"
         self.staging_root = self.runtime_root / "staging"
-        self.logs_root = self.runtime_root / "logs"
+        self.logs_root = Path(dirs.user_log_dir).resolve()
         self.default_icon = "assets/default-instance-icons/Grass Block.png"
 
         for path in (
+            self.data_root,
+            self.config_root,
+            self.cache_root,
             self.user_icons_root,
             self.instances_root,
             self.runtime_root,
@@ -236,12 +252,52 @@ class LauncherService:
         ):
             path.mkdir(parents=True, exist_ok=True)
 
+        self._bootstrap_legacy_storage()
+        self._ensure_account_store()
+
         self._version_cache: list[dict[str, Any]] | None = None
         self._loader_support_cache: dict[str, set[str]] = {}
         self._loader_versions_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     def get_player_name(self) -> str:
-        return "player1"
+        return self._read_accounts_payload()["active"]
+
+    def list_accounts(self) -> list[str]:
+        return list(self._read_accounts_payload()["accounts"])
+
+    def set_active_account(self, player_name: str) -> str:
+        normalized = self._normalize_account_name(player_name)
+        payload = self._read_accounts_payload()
+        if normalized not in payload["accounts"]:
+            raise ValueError("That account does not exist.")
+        payload["active"] = normalized
+        self._write_accounts_payload(payload)
+        return normalized
+
+    def add_account(self, player_name: str) -> str:
+        normalized = self._normalize_account_name(player_name)
+        payload = self._read_accounts_payload()
+        if normalized.lower() in {name.lower() for name in payload["accounts"]}:
+            raise ValueError("That account already exists.")
+        payload["accounts"].append(normalized)
+        payload["active"] = normalized
+        payload["accounts"].sort(key=str.lower)
+        self._write_accounts_payload(payload)
+        return normalized
+
+    def delete_account(self, player_name: str) -> str:
+        normalized = self._normalize_account_name(player_name)
+        payload = self._read_accounts_payload()
+        if normalized not in payload["accounts"]:
+            raise ValueError("That account does not exist.")
+        if len(payload["accounts"]) == 1:
+            raise ValueError("At least one account must remain.")
+
+        payload["accounts"] = [name for name in payload["accounts"] if name != normalized]
+        if payload["active"] == normalized:
+            payload["active"] = payload["accounts"][0]
+        self._write_accounts_payload(payload)
+        return payload["active"]
 
     def get_default_icon_path(self) -> str:
         return str((self.project_root / self.default_icon).resolve())
@@ -272,7 +328,7 @@ class LauncherService:
 
         user_candidates = sorted(self.user_icons_root.glob("*.png"), key=lambda item: item.name.lower())
         for path in user_candidates:
-            relative_path = self._project_relative(path)
+            relative_path = self._user_icon_reference(path)
             icons.append(
                 IconRecord(
                     icon_id=relative_path,
@@ -293,7 +349,7 @@ class LauncherService:
         safe_name = _slugify(preferred_name or source.stem) or "icon"
         target = self._unique_icon_path(safe_name, ".png")
         shutil.copy2(source, target)
-        return self._project_relative(target)
+        return self._user_icon_reference(target)
 
     def promote_staged_icon(self, staged_icon_path: str | Path, preferred_name: str | None = None) -> str:
         staged = Path(staged_icon_path)
@@ -306,7 +362,7 @@ class LauncherService:
         safe_name = _slugify(preferred_name or staged.stem) or "icon"
         target = self._unique_icon_path(safe_name, suffix)
         shutil.copy2(staged, target)
-        return self._project_relative(target)
+        return self._user_icon_reference(target)
 
     def remove_user_icon(self, icon_path: str | Path) -> bool:
         icon = Path(self.resolve_icon_path(str(icon_path)))
@@ -325,11 +381,16 @@ class LauncherService:
         if not icon_path:
             return str(default_icon_path)
 
-        icon = Path(icon_path)
-        if icon.is_absolute():
-            resolved_icon = icon
+        normalized = str(icon_path).replace("\\", "/")
+        if normalized.startswith(f"{USER_ICON_PREFIX}/"):
+            relative = normalized[len(USER_ICON_PREFIX) + 1 :]
+            resolved_icon = (self.user_icons_root / relative).resolve()
         else:
-            resolved_icon = (self.project_root / icon).resolve()
+            icon = Path(normalized)
+            if icon.is_absolute():
+                resolved_icon = icon
+            else:
+                resolved_icon = (self.project_root / icon).resolve()
 
         if resolved_icon.is_file():
             return str(resolved_icon)
@@ -368,6 +429,10 @@ class LauncherService:
 
         instances.sort(key=lambda item: _parse_timestamp(item.created_at), reverse=True)
         return instances
+
+    def delete_instance(self, instance: InstanceRecord) -> None:
+        if instance.root_dir.exists():
+            shutil.rmtree(instance.root_dir)
 
     def prepare_install_request(
         self,
@@ -549,7 +614,7 @@ class LauncherService:
             "username": player_name,
             "uuid": _offline_uuid(player_name),
             "token": "offline-token",
-            "launcherName": "NOTG Launcher",
+            "launcherName": APP_NAME,
             "launcherVersion": "0.1",
             "gameDirectory": str(game_directory),
         }
@@ -577,10 +642,25 @@ class LauncherService:
         terminate_process_tree(pid)
 
     def _normalize_icon_reference(self, icon_path: str) -> str:
-        candidate = Path(icon_path)
+        normalized = icon_path.replace("\\", "/")
+        if normalized.startswith(f"{USER_ICON_PREFIX}/"):
+            return normalized
+
+        candidate = Path(normalized)
         if candidate.is_absolute():
-            return self._project_relative(candidate)
-        return icon_path.replace("\\", "/")
+            return self._path_reference(candidate)
+        return self._path_reference((self.project_root / candidate).resolve())
+
+    def _path_reference(self, path: Path) -> str:
+        resolved = path.resolve()
+        try:
+            relative = resolved.relative_to(self.user_icons_root.resolve())
+        except ValueError:
+            pass
+        else:
+            return f"{USER_ICON_PREFIX}/{relative.as_posix()}"
+
+        return self._project_relative(resolved)
 
     def _project_relative(self, path: Path) -> str:
         try:
@@ -588,6 +668,10 @@ class LauncherService:
         except ValueError:
             return str(path.resolve())
         return relative.as_posix()
+
+    def _user_icon_reference(self, path: Path) -> str:
+        relative = path.resolve().relative_to(self.user_icons_root.resolve())
+        return f"{USER_ICON_PREFIX}/{relative.as_posix()}"
 
     def _unique_icon_path(self, safe_name: str, suffix: str) -> Path:
         target = self.user_icons_root / f"{safe_name}{suffix}"
@@ -599,6 +683,75 @@ class LauncherService:
             if not candidate.exists():
                 return candidate
         raise RuntimeError("Could not allocate a unique icon filename.")
+
+    def _bootstrap_legacy_storage(self) -> None:
+        self._copy_tree_if_target_empty(self.legacy_instances_root, self.instances_root)
+        self._copy_tree_if_target_empty(self.legacy_user_icons_root, self.user_icons_root)
+
+    def _ensure_account_store(self) -> None:
+        if self.accounts_file.is_file():
+            payload = self._read_accounts_payload()
+            self._write_accounts_payload(payload)
+            return
+        self._write_accounts_payload({"accounts": ["player1"], "active": "player1"})
+
+    def _copy_tree_if_target_empty(self, source: Path, destination: Path) -> None:
+        if not source.exists() or not source.is_dir():
+            return
+        if source.resolve() == destination.resolve():
+            return
+        if any(destination.iterdir()):
+            return
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+
+    def _read_accounts_payload(self) -> dict[str, Any]:
+        default_payload = {"accounts": ["player1"], "active": "player1"}
+        if not self.accounts_file.is_file():
+            return default_payload
+
+        try:
+            payload = json.loads(self.accounts_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return default_payload
+
+        accounts = payload.get("accounts")
+        active = _optional_str(payload.get("active"))
+        if not isinstance(accounts, list):
+            return default_payload
+
+        normalized_accounts: list[str] = []
+        seen: set[str] = set()
+        for value in accounts:
+            try:
+                normalized = self._normalize_account_name(value)
+            except ValueError:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            normalized_accounts.append(normalized)
+
+        if not normalized_accounts:
+            normalized_accounts = ["player1"]
+
+        if not active or active not in normalized_accounts:
+            active = normalized_accounts[0]
+
+        return {"accounts": normalized_accounts, "active": active}
+
+    def _write_accounts_payload(self, payload: dict[str, Any]) -> None:
+        normalized = {
+            "accounts": list(payload["accounts"]),
+            "active": str(payload["active"]),
+        }
+        self.accounts_file.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+
+    def _normalize_account_name(self, value: Any) -> str:
+        text = _required_str(value, "Account name")
+        if len(text) > 32:
+            raise ValueError("Account names must be 32 characters or fewer.")
+        return text
 
 
 def run_install_task(task: dict[str, Any], event_queue: Any) -> None:

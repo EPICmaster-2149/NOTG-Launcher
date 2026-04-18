@@ -1,7 +1,7 @@
 QWidget {
     background-color: #0a1323;
     color: #e7eefc;
-    font-family: "Segoe UI Variable";
+    font-family: "Segoe UI";
     font-size: 14px;
 }
 
@@ -22,6 +22,12 @@ QWidget#topBar {
     background-color: rgba(16, 25, 43, 0.78);
     border: 1px solid rgba(88, 120, 176, 0.4);
     border-radius: 24px;
+}
+
+QWidget#accountPopup {
+    background-color: rgba(10, 18, 31, 0.96);
+    border: 1px solid rgba(84, 122, 177, 0.36);
+    border-radius: 18px;
 }
 
 QFrame#brandPanel {
@@ -146,7 +152,7 @@ QListWidget#instanceGrid {
     background: transparent;
     border: none;
     outline: 0;
-    padding: 2px 2px 2px 0;
+    padding: 10px 10px 14px 6px;
 }
 
 QListWidget#instanceGrid::item {
@@ -216,7 +222,8 @@ QLabel#emptyStateText {
 
 QDialog#instanceEditor,
 QDialog#installProgressDialog,
-QDialog#iconSelectorDialog {
+QDialog#iconSelectorDialog,
+QDialog#accountsDialog {
     background-color: qradialgradient(
         cx: 0.18,
         cy: 0.06,
@@ -230,7 +237,8 @@ QDialog#iconSelectorDialog {
 }
 
 QFrame#instanceEditorHeader,
-QFrame#installProgressHeader {
+QFrame#installProgressHeader,
+QFrame#accountsHeader {
     background-color: rgba(13, 22, 37, 0.9);
     border: 1px solid rgba(92, 132, 192, 0.3);
     border-radius: 16px;
@@ -259,6 +267,19 @@ QLabel#editorEyebrow {
 
 QLabel#editorSubtitle {
     color: #96afcf;
+    font-size: 13px;
+    background: transparent;
+}
+
+QLabel#accountsTitle {
+    color: #f5f9ff;
+    font-size: 24px;
+    font-weight: 700;
+    background: transparent;
+}
+
+QLabel#accountsSubtitle {
+    color: #98b0d3;
     font-size: 13px;
     background: transparent;
 }
@@ -417,6 +438,19 @@ QTableView#catalogTable::item:hover,
 QTableView#versionCatalogTable::item:hover,
 QTableView#loaderCatalogTable::item:hover {
     background-color: rgba(56, 91, 139, 0.42);
+}
+
+QLineEdit#accountsInput {
+    background-color: rgba(16, 26, 43, 0.96);
+    border: 1px solid rgba(84, 122, 177, 0.35);
+    border-radius: 10px;
+    color: #eef5ff;
+    padding: 12px 14px;
+    font-size: 14px;
+}
+
+QLineEdit#accountsInput:focus {
+    border: 1px solid rgba(132, 192, 255, 0.85);
 }
 
 QHeaderView::section {

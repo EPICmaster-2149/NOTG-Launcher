@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 
 from ui.topbar import ModernButton
 from ui.icon_utils import load_scaled_icon
+from ui.responsive import scaled_px
 
 
 class SideBar(QWidget):
@@ -20,7 +21,6 @@ class SideBar(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("sideBar")
-        self.setFixedWidth(284)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -100,6 +100,15 @@ class SideBar(QWidget):
         self._active_action = "Launch"
         self._sync_button_state()
         self.clear_instance()
+        self._apply_responsive_metrics()
+
+    def showEvent(self, event) -> None:
+        self._apply_responsive_metrics()
+        super().showEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        self._apply_responsive_metrics()
+        super().resizeEvent(event)
 
     def _handle_click(self, action):
         if action in self.buttons and action != "Delete":
@@ -132,6 +141,17 @@ class SideBar(QWidget):
     def _sync_button_state(self):
         for name, button in self.buttons.items():
             button.set_active(name == self._active_action)
+
+    def _apply_responsive_metrics(self) -> None:
+        self.setFixedWidth(scaled_px(self, 284, minimum=220, maximum=300))
+        icon_size = scaled_px(self, 104, minimum=76, maximum=104)
+        self.icon_label.setFixedSize(icon_size, icon_size)
+
+        for button in self.buttons.values():
+            button.set_metrics(height=scaled_px(self, 44, minimum=38, maximum=46), icon_size=0)
+
+        self.status_badge.setMinimumHeight(scaled_px(self, 40, minimum=34, maximum=42))
+        self.status_badge.updateGeometry()
 
 
 def _clean_version(version):
