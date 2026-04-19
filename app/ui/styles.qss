@@ -19,15 +19,15 @@ QWidget#appRoot {
 }
 
 QWidget#topBar {
-    background-color: rgba(16, 25, 43, 0.78);
-    border: 1px solid rgba(88, 120, 176, 0.4);
-    border-radius: 24px;
+    background-color: rgba(14, 24, 41, 0.86);
+    border: 1px solid rgba(88, 120, 176, 0.34);
+    border-radius: 16px;
 }
 
 QWidget#accountPopup {
-    background-color: rgba(10, 18, 31, 0.96);
-    border: 1px solid rgba(84, 122, 177, 0.36);
-    border-radius: 18px;
+    background-color: rgba(11, 20, 34, 0.97);
+    border: 1px solid rgba(84, 122, 177, 0.3);
+    border-radius: 12px;
 }
 
 QFrame#brandPanel {
@@ -56,9 +56,9 @@ QFrame#brandMark {
 }
 
 QFrame#accountChip {
-    background-color: rgba(88, 128, 196, 0.12);
-    border: 1px solid rgba(121, 165, 237, 0.38);
-    border-radius: 16px;
+    background-color: rgba(88, 128, 196, 0.1);
+    border: 1px solid rgba(121, 165, 237, 0.3);
+    border-radius: 12px;
 }
 
 QLabel#accountAvatar {
@@ -108,15 +108,14 @@ QFrame#sidePreview {
 }
 
 QLabel#selectedInstanceIcon {
-    background-color: rgba(29, 44, 70, 0.95);
-    border: 1px solid rgba(107, 145, 202, 0.26);
-    border-radius: 22px;
+    background: transparent;
+    border: none;
 }
 
 QLabel#instanceInfoName {
     background: transparent;
     color: #f5f9ff;
-    font-size: 21px;
+    font-size: 18px;
     font-weight: 700;
 }
 
@@ -139,13 +138,6 @@ QFrame#contentSurface {
     background-color: rgba(8, 15, 28, 0.78);
     border: 1px solid rgba(74, 106, 154, 0.24);
     border-radius: 28px;
-}
-
-QFrame#menuDivider {
-    min-height: 1px;
-    max-height: 1px;
-    border: none;
-    background-color: rgba(97, 134, 191, 0.3);
 }
 
 QListWidget#instanceGrid {
@@ -381,6 +373,34 @@ QFrame#editorSelectionSurface {
     border-radius: 14px;
 }
 
+QTabWidget#editorCreateTabs::pane {
+    border: none;
+    background: transparent;
+    top: -1px;
+}
+
+QTabWidget#editorCreateTabs QTabBar::tab {
+    background-color: rgba(17, 29, 47, 0.78);
+    border: 1px solid rgba(72, 105, 151, 0.26);
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    padding: 10px 18px;
+    margin-right: 6px;
+    color: #dce9ff;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+QTabWidget#editorCreateTabs QTabBar::tab:selected {
+    background-color: rgba(44, 76, 119, 0.92);
+    border: 1px solid rgba(132, 180, 246, 0.58);
+    color: #ffffff;
+}
+
+QTabWidget#editorCreateTabs QTabBar::tab:hover:!selected {
+    background-color: rgba(30, 51, 80, 0.9);
+}
+
 QFrame#editorSectionCard {
     background: transparent;
     border: none;
@@ -397,6 +417,63 @@ QFrame#editorSidePanel {
     background-color: rgba(13, 22, 37, 0.9);
     border: 1px solid rgba(84, 119, 170, 0.28);
     border-radius: 12px;
+}
+
+QComboBox#editorComboBox {
+    background-color: rgba(16, 26, 43, 0.96);
+    border: 1px solid rgba(84, 122, 177, 0.35);
+    border-radius: 10px;
+    color: #eef5ff;
+    padding: 10px 14px;
+    font-size: 14px;
+}
+
+QComboBox#editorComboBox:hover,
+QComboBox#editorComboBox:focus {
+    border: 1px solid rgba(132, 192, 255, 0.78);
+}
+
+QComboBox#editorComboBox::drop-down {
+    width: 28px;
+    border: none;
+    background: transparent;
+}
+
+QComboBox#editorComboBox::down-arrow {
+    image: none;
+    width: 0;
+    height: 0;
+}
+
+QComboBox#editorComboBox QAbstractItemView,
+QListWidget#editorTransferList {
+    background-color: rgba(12, 20, 33, 0.97);
+    border: 1px solid rgba(79, 111, 159, 0.26);
+    border-radius: 10px;
+    color: #eef5ff;
+    outline: 0;
+    padding: 6px;
+}
+
+QComboBox#editorComboBox QAbstractItemView::item,
+QListWidget#editorTransferList::item {
+    background: transparent;
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 2px 0;
+}
+
+QComboBox#editorComboBox QAbstractItemView::item:selected,
+QListWidget#editorTransferList::item:selected {
+    background-color: rgba(86, 145, 228, 0.58);
+    color: #ffffff;
+}
+
+QComboBox#editorComboBox QLineEdit {
+    background: transparent;
+    border: none;
+    color: #eef5ff;
+    padding: 0;
 }
 
 QLabel#editorFilterTitle {
@@ -500,6 +577,61 @@ QRadioButton#editorFilterRadio::indicator:checked {
     border: 1px solid rgba(142, 194, 255, 0.92);
     border-radius: 9px;
     background-color: rgba(92, 150, 232, 0.9);
+}
+
+QSlider#editorRamSlider::groove:horizontal {
+    height: 8px;
+    border-radius: 4px;
+    background-color: rgba(17, 28, 44, 0.96);
+    border: 1px solid rgba(72, 105, 151, 0.26);
+}
+
+QSlider#editorRamSlider::sub-page:horizontal {
+    border-radius: 4px;
+    background: qlineargradient(
+        x1: 0,
+        y1: 0,
+        x2: 1,
+        y2: 0,
+        stop: 0 rgba(88, 144, 228, 0.82),
+        stop: 1 rgba(124, 199, 255, 0.88)
+    );
+}
+
+QSlider#editorRamSlider::handle:horizontal {
+    width: 18px;
+    margin: -7px 0;
+    border-radius: 9px;
+    background-color: #dbeaff;
+    border: 1px solid rgba(116, 165, 229, 0.9);
+}
+
+QFrame#playtimeBar {
+    background-color: rgba(13, 22, 37, 0.88);
+    border: 1px solid rgba(84, 119, 170, 0.22);
+    border-radius: 12px;
+}
+
+QLabel#playtimePrimary,
+QLabel#playtimeSecondary,
+QLabel#playtimeTotal {
+    background: transparent;
+    color: #eef5ff;
+    font-size: 12px;
+}
+
+QLabel#playtimePrimary {
+    color: #f5f9ff;
+    font-weight: 600;
+}
+
+QLabel#playtimeSecondary {
+    color: #c1d6f8;
+}
+
+QLabel#playtimeTotal {
+    color: #f2f7ff;
+    font-weight: 600;
 }
 
 QProgressBar#installProgressBar {

@@ -43,6 +43,35 @@ IMPORTANT_MINECRAFT_MARKERS = (
     "crash-reports",
 )
 
+REQUIRED_IMPORT_MARKERS = (
+    "saves",
+    "mods",
+    "options.txt",
+)
+
+EXCLUDED_COPY_NAMES = {
+    "assets",
+    "bin",
+    "crash-reports",
+    "downloads",
+    "launcher_accounts.json",
+    "launcher_profiles.json",
+    "libraries",
+    "logs",
+    "natives",
+    "runtime",
+    "tmp",
+    "versions",
+    "webcache",
+}
+
+EXCLUDED_COPY_SUFFIXES = (
+    ".log",
+    ".tmp",
+)
+
+DEFAULT_MEMORY_MB = 2048
+
 ARCHIVE_ICON_CANDIDATES = (
     "icon.png",
     "pack.png",
@@ -90,6 +119,8 @@ class InstanceRecord:
     last_played: str | None
     root_dir: Path
     minecraft_dir: Path
+    memory_mb: int = DEFAULT_MEMORY_MB
+    total_played_seconds: int = 0
     status: str = "Quit"
     pid: int | None = None
 
@@ -116,6 +147,8 @@ class InstanceRecord:
             "icon_path": self.icon_path,
             "created_at": self.created_at,
             "last_played": self.last_played,
+            "memory_mb": self.memory_mb,
+            "total_played_seconds": self.total_played_seconds,
         }
 
     @classmethod
@@ -131,6 +164,8 @@ class InstanceRecord:
             icon_path=icon_path,
             created_at=str(metadata.get("created_at", _utc_now())),
             last_played=_optional_str(metadata.get("last_played")),
+            memory_mb=_coerce_memory_mb(metadata.get("memory_mb")),
+            total_played_seconds=_coerce_non_negative_int(metadata.get("total_played_seconds")),
             root_dir=root_dir,
             minecraft_dir=root_dir / ".minecraft",
         )
@@ -147,9 +182,12 @@ class InstallRequest:
     stage_dir: str
     final_dir: str
     minecraft_dir: str
+    memory_mb: int = DEFAULT_MEMORY_MB
     operation: str = "create"
     modpack_path: str | None = None
     minecraft_import_dir: str | None = None
+    copy_source_instance_id: str | None = None
+    copy_user_data: list[str] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -162,9 +200,12 @@ class InstallRequest:
             "stage_dir": self.stage_dir,
             "final_dir": self.final_dir,
             "minecraft_dir": self.minecraft_dir,
+            "memory_mb": self.memory_mb,
             "operation": self.operation,
             "modpack_path": self.modpack_path,
             "minecraft_import_dir": self.minecraft_import_dir,
+            "copy_source_instance_id": self.copy_source_instance_id,
+            "copy_user_data": list(self.copy_user_data or []),
         }
 
     @classmethod
@@ -179,9 +220,12 @@ class InstallRequest:
             stage_dir=str(payload["stage_dir"]),
             final_dir=str(payload["final_dir"]),
             minecraft_dir=str(payload["minecraft_dir"]),
+            memory_mb=_coerce_memory_mb(payload.get("memory_mb")),
             operation=str(payload.get("operation", "create")),
             modpack_path=_optional_str(payload.get("modpack_path")),
             minecraft_import_dir=_optional_str(payload.get("minecraft_import_dir")),
+            copy_source_instance_id=_optional_str(payload.get("copy_source_instance_id")),
+            copy_user_data=_coerce_str_list(payload.get("copy_user_data")),
         )
 
 
@@ -397,20 +441,54 @@ class LauncherService:
         return str(default_icon_path)
 
     def is_valid_minecraft_dir(self, path: str | Path) -> tuple[bool, str]:
+        if self.resolve_minecraft_import_source(path) is not None:
+            return True, ""
+        return (
+            False,
+            "Select a folder that contains `saves`, `mods`, and `options.txt`, or a folder whose `.minecraft` child does.",
+        )
+
+    def resolve_minecraft_import_source(self, path: str | Path) -> Path | None:
         candidate = Path(path)
         if not candidate.is_dir():
-            return False, "Select a folder that contains a launcher instance .minecraft directory."
+            return None
 
-        marker_hits = 0
-        for marker in IMPORTANT_MINECRAFT_MARKERS:
-            if (candidate / marker).exists():
-                marker_hits += 1
+        for probe in (candidate, candidate / ".minecraft"):
+            if not probe.is_dir():
+                continue
+            if all((probe / marker).exists() for marker in REQUIRED_IMPORT_MARKERS):
+                return probe
+        return None
 
-        if candidate.name == ".minecraft" and marker_hits >= 2:
-            return True, ""
-        if marker_hits >= 3:
-            return True, ""
-        return False, "That folder does not look like a valid .minecraft directory."
+    def get_instance(self, instance_id: str) -> InstanceRecord | None:
+        for instance in self.load_instances():
+            if instance.instance_id == instance_id:
+                return instance
+        return None
+
+    def list_copyable_user_data(self, instance_id: str) -> list[dict[str, str]]:
+        instance = self.get_instance(instance_id)
+        if instance is None or not instance.minecraft_dir.is_dir():
+            return []
+
+        entries: list[dict[str, str]] = []
+        for entry in sorted(instance.minecraft_dir.iterdir(), key=lambda item: item.name.lower()):
+            name = entry.name
+            lowered = name.lower()
+            if lowered in EXCLUDED_COPY_NAMES or name.startswith("."):
+                continue
+            if any(lowered.endswith(suffix) for suffix in EXCLUDED_COPY_SUFFIXES):
+                continue
+
+            label = _format_copy_entry_label(entry)
+            entries.append(
+                {
+                    "path": name,
+                    "label": label,
+                    "kind": "folder" if entry.is_dir() else "file",
+                }
+            )
+        return entries
 
     def load_instances(self) -> list[InstanceRecord]:
         instances: list[InstanceRecord] = []
@@ -441,9 +519,12 @@ class LauncherService:
         mod_loader_id: str | None,
         mod_loader_version: str | None,
         icon_path: str | None = None,
+        memory_mb: int | None = None,
         operation: str = "create",
         modpack_path: str | None = None,
         minecraft_import_dir: str | None = None,
+        copy_source_instance_id: str | None = None,
+        copy_user_data: list[str] | None = None,
     ) -> InstallRequest:
         normalized_name = name.strip()
         if operation == "create" and vanilla_version:
@@ -470,9 +551,12 @@ class LauncherService:
             stage_dir=str(stage_dir),
             final_dir=str(final_dir),
             minecraft_dir=str(minecraft_dir),
+            memory_mb=_coerce_memory_mb(memory_mb),
             operation=operation,
             modpack_path=_optional_str(modpack_path),
             minecraft_import_dir=_optional_str(minecraft_import_dir),
+            copy_source_instance_id=_optional_str(copy_source_instance_id),
+            copy_user_data=_sanitize_copy_user_data(copy_user_data),
         )
 
     def finalize_install(self, request: InstallRequest, result: InstallResult) -> InstanceRecord:
@@ -499,6 +583,8 @@ class LauncherService:
             "icon_path": self._normalize_icon_reference(resolved_icon),
             "created_at": _utc_now(),
             "last_played": None,
+            "memory_mb": _coerce_memory_mb(request.memory_mb),
+            "total_played_seconds": 0,
         }
         (stage_dir / "instance.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         shutil.move(str(stage_dir), str(final_dir))
@@ -516,6 +602,15 @@ class LauncherService:
         metadata_path = instance.root_dir / "instance.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["last_played"] = _utc_now()
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        refreshed = InstanceRecord.from_metadata(metadata, instance.root_dir)
+        refreshed.icon_path = self.resolve_icon_path(refreshed.icon_path)
+        return refreshed
+
+    def record_instance_playtime(self, instance: InstanceRecord, seconds: int) -> InstanceRecord:
+        metadata_path = instance.root_dir / "instance.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["total_played_seconds"] = _coerce_non_negative_int(metadata.get("total_played_seconds")) + max(0, seconds)
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         refreshed = InstanceRecord.from_metadata(metadata, instance.root_dir)
         refreshed.icon_path = self.resolve_icon_path(refreshed.icon_path)
@@ -609,7 +704,8 @@ class LauncherService:
         normalized = version_type.lower().replace("-", "_")
         return normalized not in KNOWN_VERSION_TYPES or normalized in EXPERIMENT_TYPES
 
-    def build_launch_options(self, player_name: str, game_directory: Path) -> dict[str, Any]:
+    def build_launch_options(self, player_name: str, game_directory: Path, memory_mb: int | None = None) -> dict[str, Any]:
+        resolved_memory = _coerce_memory_mb(memory_mb)
         return {
             "username": player_name,
             "uuid": _offline_uuid(player_name),
@@ -617,6 +713,7 @@ class LauncherService:
             "launcherName": APP_NAME,
             "launcherVersion": "0.1",
             "gameDirectory": str(game_directory),
+            "jvmArguments": [f"-Xmx{resolved_memory}M"],
         }
 
     def launch_instance(self, instance: InstanceRecord, player_name: str) -> subprocess.Popen[Any]:
@@ -624,7 +721,7 @@ class LauncherService:
         command = minecraft_launcher_lib.command.get_minecraft_command(
             instance.installed_version,
             minecraft_directory,
-            self.build_launch_options(player_name, minecraft_directory),
+            self.build_launch_options(player_name, minecraft_directory, instance.memory_mb),
         )
 
         kwargs: dict[str, Any] = {"cwd": str(minecraft_directory)}
@@ -821,6 +918,21 @@ def _run_standard_install(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
+    if request.copy_source_instance_id and request.copy_user_data:
+        service = LauncherService(Path(__file__).resolve().parents[2])
+        source_instance = service.get_instance(request.copy_source_instance_id)
+        if source_instance is None:
+            raise FileNotFoundError("The selected source instance no longer exists.")
+
+        _queue_event(event_queue, "status", text="Copying selected instance data")
+        _queue_event(event_queue, "log", text=f"Copying user data from {source_instance.name}")
+        _copy_selected_user_data(
+            source_instance.minecraft_dir,
+            Path(request.minecraft_dir),
+            request.copy_user_data,
+            event_queue,
+        )
+
     vanilla_version = _required_str(request.vanilla_version, "Minecraft version")
     installed_version = _install_dependency_stack(
         vanilla_version,
@@ -867,13 +979,14 @@ def _run_minecraft_directory_import(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
-    source_dir = Path(_required_str(request.minecraft_import_dir, ".minecraft folder"))
-    if not source_dir.is_dir():
-        raise FileNotFoundError(f"Minecraft directory not found: {source_dir}")
-
-    valid, message = LauncherService(Path(__file__).resolve().parents[2]).is_valid_minecraft_dir(source_dir)
-    if not valid:
-        raise ValueError(message)
+    raw_source_dir = Path(_required_str(request.minecraft_import_dir, ".minecraft folder"))
+    service = LauncherService(Path(__file__).resolve().parents[2])
+    source_dir = service.resolve_minecraft_import_source(raw_source_dir)
+    if source_dir is None:
+        valid, message = service.is_valid_minecraft_dir(raw_source_dir)
+        if not valid:
+            raise ValueError(message)
+        raise FileNotFoundError(f"Minecraft directory not found: {raw_source_dir}")
 
     minecraft_dir = Path(request.minecraft_dir)
     _queue_event(event_queue, "status", text="Copying imported files")
@@ -1499,6 +1612,46 @@ def _write_staged_icon(content: bytes, stage_dir: Path, file_name: str) -> Path:
     return target
 
 
+def _copy_selected_user_data(source_root: Path, destination_root: Path, selected_entries: list[str], event_queue: Any) -> None:
+    entries = _sanitize_copy_user_data(selected_entries)
+    if not entries:
+        _queue_event(event_queue, "max", value=1)
+        _queue_event(event_queue, "progress", value=1)
+        return
+
+    files_to_copy: list[tuple[Path, Path]] = []
+    empty_dirs: list[Path] = []
+    for entry_name in entries:
+        source_path = _safe_local_path_join(source_root, entry_name)
+        if not source_path.exists():
+            continue
+
+        if source_path.is_dir():
+            directory_files = [path for path in source_path.rglob("*") if path.is_file()]
+            if not directory_files:
+                empty_dirs.append(destination_root / entry_name)
+                continue
+            for file_path in directory_files:
+                files_to_copy.append((file_path, destination_root / file_path.relative_to(source_root)))
+        else:
+            files_to_copy.append((source_path, destination_root / entry_name))
+
+    for directory in empty_dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    _queue_event(event_queue, "max", value=max(1, len(files_to_copy)))
+    if not files_to_copy:
+        _queue_event(event_queue, "progress", value=1)
+        return
+
+    for index, (source_path, target_path) in enumerate(files_to_copy, start=1):
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+        _queue_event(event_queue, "progress", value=index)
+
+    _queue_event(event_queue, "status", text="Copying selected instance data")
+
+
 def _copy_tree_with_progress(source: Path, destination: Path, event_queue: Any, status_text: str) -> None:
     files = [path for path in source.rglob("*") if path.is_file()]
     _queue_event(event_queue, "max", value=max(1, len(files)))
@@ -1550,6 +1703,17 @@ def _safe_path_join(root: Path, relative_name: str) -> Path:
         candidate.relative_to(resolved_root)
     except ValueError as exc:
         raise RuntimeError(f"Archive entry would escape the instance directory: {relative_name}") from exc
+    return candidate
+
+
+def _safe_local_path_join(root: Path, relative_name: str) -> Path:
+    safe_parts = [part for part in Path(relative_name).parts if part not in ("", ".", "..")]
+    candidate = root.joinpath(*safe_parts).resolve()
+    resolved_root = root.resolve()
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise RuntimeError(f"Path would escape the instance directory: {relative_name}") from exc
     return candidate
 
 
@@ -1629,6 +1793,57 @@ def _slugify(text: str) -> str:
             previous_dash = True
 
     return "".join(result).strip("-")
+
+
+def _format_copy_entry_label(entry: Path) -> str:
+    display = entry.name.replace("_", " ")
+    display = display[:-4] if display.lower().endswith(".txt") else display
+    suffix = "Folder" if entry.is_dir() else "File"
+    return f"{display} ({suffix})"
+
+
+def _sanitize_copy_user_data(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+
+    sanitized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _optional_str(value)
+        if not text:
+            continue
+        normalized = Path(text).as_posix().strip("/")
+        if not normalized or normalized in seen:
+            continue
+        top_level = normalized.split("/", 1)[0]
+        lowered = top_level.lower()
+        if lowered in EXCLUDED_COPY_NAMES or top_level.startswith("."):
+            continue
+        sanitized.append(top_level)
+        seen.add(top_level)
+    return sanitized
+
+
+def _coerce_non_negative_int(value: Any, default: int = 0) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, number)
+
+
+def _coerce_memory_mb(value: Any) -> int:
+    try:
+        memory_mb = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MEMORY_MB
+    return max(1024, min(65536, memory_mb))
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if _optional_str(item)]
 
 
 def _optional_str(value: Any) -> str | None:

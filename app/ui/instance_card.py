@@ -152,9 +152,7 @@ class InstanceCard(QWidget):
         painter.setBrush(info_fill)
         painter.drawRoundedRect(info_rect, 16 * scale, 16 * scale)
 
-        name_font = QFont(self.font())
-        name_font.setPointSizeF(11.2 * scale)
-        name_font.setWeight(QFont.DemiBold)
+        name_font, wrapped_name = self._fit_name_layout(scale, info_rect.width() - (28 * scale))
         painter.setFont(name_font)
         painter.setPen(QColor("#eef5ff"))
         name_metrics = QFontMetrics(name_font)
@@ -163,7 +161,8 @@ class InstanceCard(QWidget):
         version_metrics = QFontMetrics(version_font)
 
         text_padding_x = 14 * scale
-        name_height = max(24.0 * scale, float(name_metrics.height()) + (4 * scale))
+        name_line_count = max(1, wrapped_name.count("\n") + 1)
+        name_height = max(24.0 * scale, float((name_metrics.lineSpacing() * name_line_count) + (4 * scale)))
         version_height = max(16.0 * scale, float(version_metrics.height()) + (2 * scale))
         text_block_height = name_height + (4 * scale) + version_height
         text_top = info_rect.center().y() - (text_block_height / 2)
@@ -175,8 +174,8 @@ class InstanceCard(QWidget):
         )
         painter.drawText(
             name_rect,
-            Qt.AlignHCenter | Qt.AlignVCenter,
-            name_metrics.elidedText(self.name, Qt.ElideRight, int(name_rect.width())),
+            Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextWordWrap,
+            wrapped_name,
         )
 
         painter.setFont(version_font)
@@ -203,3 +202,72 @@ class InstanceCard(QWidget):
             painter.setPen(QPen(accent, max(1.1, 1.8 * scale)))
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(glow_rect, 18 * scale, 18 * scale)
+
+    def _fit_name_layout(self, scale: float, width: float) -> tuple[QFont, str]:
+        base_size = 11.2 * scale
+        minimum_size = max(8.4, 8.6 * scale)
+        candidate_size = base_size
+
+        while candidate_size >= minimum_size:
+            font = QFont(self.font())
+            font.setPointSizeF(candidate_size)
+            font.setWeight(QFont.DemiBold)
+            metrics = QFontMetrics(font)
+            wrapped = self._wrap_text(self.name, metrics, int(width), max_lines=2)
+            if wrapped.count("\n") < 2:
+                return font, wrapped
+            candidate_size -= 0.4
+
+        font = QFont(self.font())
+        font.setPointSizeF(minimum_size)
+        font.setWeight(QFont.DemiBold)
+        metrics = QFontMetrics(font)
+        return font, self._wrap_text(self.name, metrics, int(width), max_lines=2, force_elide=True)
+
+    def _wrap_text(
+        self,
+        text: str,
+        metrics: QFontMetrics,
+        max_width: int,
+        *,
+        max_lines: int,
+        force_elide: bool = False,
+    ) -> str:
+        if not text.strip():
+            return ""
+
+        words = text.split()
+        if len(words) == 1 and not force_elide:
+            if metrics.horizontalAdvance(text) <= max_width:
+                return text
+
+        lines: list[str] = []
+        current = ""
+        remaining_words = list(words) if words else [text]
+
+        while remaining_words:
+            word = remaining_words.pop(0)
+            proposal = word if not current else f"{current} {word}"
+            if metrics.horizontalAdvance(proposal) <= max_width and not force_elide:
+                current = proposal
+                continue
+
+            if not current:
+                current = metrics.elidedText(word, Qt.ElideRight, max_width)
+            lines.append(current)
+            current = word if metrics.horizontalAdvance(word) <= max_width and not force_elide else ""
+
+            if len(lines) >= max_lines - 1:
+                remainder = " ".join(([current] if current else []) + remaining_words).strip()
+                if remainder:
+                    lines.append(metrics.elidedText(remainder, Qt.ElideRight, max_width))
+                return "\n".join(lines[:max_lines])
+
+        if current:
+            lines.append(current if not force_elide else metrics.elidedText(current, Qt.ElideRight, max_width))
+
+        if len(lines) > max_lines:
+            head = lines[: max_lines - 1]
+            head.append(metrics.elidedText(lines[max_lines - 1], Qt.ElideRight, max_width))
+            return "\n".join(head)
+        return "\n".join(lines)

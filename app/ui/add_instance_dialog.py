@@ -6,6 +6,7 @@ from typing import Any
 from PySide6.QtCore import (
     QAbstractTableModel,
     QEasingCurve,
+    QEvent,
     QModelIndex,
     QRectF,
     QSortFilterProxyModel,
@@ -20,6 +21,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
+    QCompleter,
     QDialog,
     QFileDialog,
     QFrame,
@@ -33,12 +36,16 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QRadioButton,
     QScrollArea,
+    QSlider,
     QSizePolicy,
     QStackedWidget,
+    QTabWidget,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
+
+import psutil
 
 from core.launcher import LauncherService
 from ui.icon_selector_dialog import IconSelectorDialog
@@ -356,6 +363,42 @@ class BrowseInput(QWidget):
         self.line_edit.setFocus()
 
 
+class SearchableComboBox(QComboBox):
+    def __init__(self, placeholder: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("editorComboBox")
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
+        self.setMaxVisibleItems(10)
+        self.lineEdit().setPlaceholderText(placeholder)
+        self.lineEdit().installEventFilter(self)
+
+        completer = QCompleter(self.model(), self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.setCompleter(completer)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.lineEdit() and event.type() == QEvent.MouseButtonPress and self.count():
+            self.showPopup()
+        return super().eventFilter(watched, event)
+
+    def selected_value(self) -> str | None:
+        value = self.currentData(Qt.UserRole)
+        if value:
+            return str(value)
+        typed_text = self.currentText().strip().lower()
+        if not typed_text:
+            return None
+        for index in range(self.count()):
+            if self.itemText(index).strip().lower() == typed_text:
+                match = self.itemData(index, Qt.UserRole)
+                return str(match) if match else None
+        return None
+
+
 class HeaderIconButton(QWidget):
     clicked = Signal()
 
@@ -485,6 +528,11 @@ class AddInstanceDialog(QDialog):
         self._version_request_id = 0
         self._loader_request_id = 0
         self._workers: set[QThread] = set()
+        self._copy_source_instances: list[dict[str, str]] = []
+        self._ram_default_mb = 2048
+        self._ram_slider_step_mb = 256
+        self._ram_selected_mb = self._ram_default_mb
+        self._ram_displayed_mb = self._ram_default_mb
 
         self.setObjectName("instanceEditor")
         self.setWindowTitle("Create New Instance")
@@ -495,6 +543,9 @@ class AddInstanceDialog(QDialog):
         self._build_ui()
         self._apply_responsive_layout()
         self._sync_header_icon()
+        self._reload_copy_source_instances()
+        self._update_ram_slider_range()
+        self._set_ram_value(self._ram_default_mb, animate=False)
         self._update_page_state(self.PAGE_CREATE)
         QTimer.singleShot(0, lambda: self._load_versions(force_refresh=False))
 
@@ -594,7 +645,7 @@ class AddInstanceDialog(QDialog):
         self.cancel_button.clicked.connect(self.reject)
         footer.addWidget(self.cancel_button)
 
-        self.ok_button = ModernButton("OK", role="accent", height=44, icon_size=0)
+        self.ok_button = ModernButton("Install", role="accent", height=44, icon_size=0)
         self.ok_button.clicked.connect(self._accept_selection)
         footer.addWidget(self.ok_button)
         content_layout.addLayout(footer)
@@ -602,6 +653,13 @@ class AddInstanceDialog(QDialog):
         self.nav_list.setCurrentRow(0)
 
     def _build_create_page(self) -> QWidget:
+        self.create_tabs = QTabWidget()
+        self.create_tabs.setObjectName("editorCreateTabs")
+        self.create_tabs.addTab(self._build_general_tab(), "General")
+        self.create_tabs.addTab(self._build_advanced_tab(), "Advanced")
+        return self.create_tabs
+
+    def _build_general_tab(self) -> QWidget:
         scroll_area = QScrollArea()
         scroll_area.setObjectName("instanceEditorScroll")
         scroll_area.setWidgetResizable(True)
@@ -629,6 +687,119 @@ class AddInstanceDialog(QDialog):
         selection_layout.addWidget(loader_section, 1)
 
         scroll_layout.addWidget(selection_surface)
+        scroll_area.setWidget(scroll_widget)
+        return scroll_area
+
+    def _build_advanced_tab(self) -> QWidget:
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName("instanceEditorScroll")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(0, 0, 6, 0)
+        scroll_layout.setSpacing(14)
+
+        advanced_surface = QFrame()
+        advanced_surface.setObjectName("editorSelectionSurface")
+        advanced_layout = QVBoxLayout(advanced_surface)
+        advanced_layout.setContentsMargins(18, 18, 18, 18)
+        advanced_layout.setSpacing(18)
+
+        copy_title = QLabel("Copy From Instance")
+        copy_title.setObjectName("editorSectionTitle")
+        advanced_layout.addWidget(copy_title)
+
+        self.copy_source_combo = SearchableComboBox("Search or select an existing instance")
+        self.copy_source_combo.currentIndexChanged.connect(self._on_copy_source_changed)
+        advanced_layout.addWidget(self.copy_source_combo)
+
+        copy_lists_row = QHBoxLayout()
+        copy_lists_row.setContentsMargins(0, 0, 0, 0)
+        copy_lists_row.setSpacing(12)
+        advanced_layout.addLayout(copy_lists_row)
+
+        self.copy_available_list = QListWidget()
+        self.copy_available_list.setObjectName("editorTransferList")
+        self.copy_available_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.copy_available_list.itemDoubleClicked.connect(lambda *_: self._move_copy_items(self.copy_available_list, self.copy_selected_list))
+
+        self.copy_selected_list = QListWidget()
+        self.copy_selected_list.setObjectName("editorTransferList")
+        self.copy_selected_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.copy_selected_list.itemDoubleClicked.connect(lambda *_: self._move_copy_items(self.copy_selected_list, self.copy_available_list))
+
+        available_column = self._build_transfer_column("Copy From", self.copy_available_list)
+        selected_column = self._build_transfer_column("Copy To", self.copy_selected_list)
+        copy_lists_row.addWidget(available_column, 1)
+
+        transfer_controls = QVBoxLayout()
+        transfer_controls.setContentsMargins(0, 22, 0, 0)
+        transfer_controls.setSpacing(10)
+        copy_lists_row.addLayout(transfer_controls)
+
+        self.copy_add_button = ModernButton(">", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=56, horizontal_padding=24)
+        self.copy_add_button.clicked.connect(lambda: self._move_copy_items(self.copy_available_list, self.copy_selected_list))
+        transfer_controls.addWidget(self.copy_add_button)
+
+        self.copy_remove_button = ModernButton("<", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=56, horizontal_padding=24)
+        self.copy_remove_button.clicked.connect(lambda: self._move_copy_items(self.copy_selected_list, self.copy_available_list))
+        transfer_controls.addWidget(self.copy_remove_button)
+
+        self.copy_all_button = ModernButton(">>", role="accent", height=38, icon_size=0, radius=10, minimum_width=56, horizontal_padding=24)
+        self.copy_all_button.clicked.connect(self._move_all_copy_items)
+        transfer_controls.addWidget(self.copy_all_button)
+
+        self.copy_clear_button = ModernButton("<<", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=56, horizontal_padding=24)
+        self.copy_clear_button.clicked.connect(self._clear_copy_selection)
+        transfer_controls.addWidget(self.copy_clear_button)
+        transfer_controls.addStretch()
+
+        copy_lists_row.addWidget(selected_column, 1)
+
+        divider = QFrame()
+        divider.setObjectName("editorSectionDivider")
+        advanced_layout.addWidget(divider)
+
+        ram_title = QLabel("Memory")
+        ram_title.setObjectName("editorSectionTitle")
+        advanced_layout.addWidget(ram_title)
+
+        ram_row = QHBoxLayout()
+        ram_row.setContentsMargins(0, 0, 0, 0)
+        ram_row.setSpacing(14)
+        advanced_layout.addLayout(ram_row)
+
+        self.ram_slider = QSlider(Qt.Horizontal)
+        self.ram_slider.setObjectName("editorRamSlider")
+        self.ram_slider.setSingleStep(1)
+        self.ram_slider.setPageStep(4)
+        self.ram_slider.valueChanged.connect(self._on_ram_slider_changed)
+        ram_row.addWidget(self.ram_slider, 1)
+
+        self.ram_display = AccentLineEdit("RAM (MB)")
+        self.ram_display.setReadOnly(True)
+        self.ram_display.setMinimumWidth(180)
+        ram_row.addWidget(self.ram_display)
+
+        ram_actions = QHBoxLayout()
+        ram_actions.setContentsMargins(0, 0, 0, 0)
+        ram_actions.setSpacing(12)
+        advanced_layout.addLayout(ram_actions)
+
+        self.ram_revert_button = ModernButton("Revert", role="sidebar", height=40, icon_size=0, radius=10, minimum_width=118, horizontal_padding=34)
+        self.ram_revert_button.clicked.connect(self._revert_ram_value)
+        ram_actions.addWidget(self.ram_revert_button)
+
+        self.ram_confirm_button = ModernButton("Confirm", role="accent", height=40, icon_size=0, radius=10, minimum_width=124, horizontal_padding=36)
+        self.ram_confirm_button.clicked.connect(self._confirm_ram_value)
+        ram_actions.addWidget(self.ram_confirm_button)
+        ram_actions.addStretch()
+
+        advanced_layout.addStretch()
+        scroll_layout.addWidget(advanced_surface)
         scroll_area.setWidget(scroll_widget)
         return scroll_area
 
@@ -676,6 +847,18 @@ class AddInstanceDialog(QDialog):
         scroll_layout.addWidget(import_surface)
         scroll_area.setWidget(scroll_widget)
         return scroll_area
+
+    def _build_transfer_column(self, title_text: str, list_widget: QListWidget) -> QWidget:
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        title = QLabel(title_text)
+        title.setObjectName("editorFilterTitle")
+        layout.addWidget(title)
+        layout.addWidget(list_widget, 1)
+        return column
 
     def _update_page_state(self, index: int) -> None:
         target_index = self.PAGE_CREATE if index < 0 else index
@@ -774,7 +957,7 @@ class AddInstanceDialog(QDialog):
         self.version_refresh = ModernButton("Refresh", role="sidebar", height=42, icon_size=0)
         self.version_refresh.clicked.connect(lambda: self._load_versions(force_refresh=True))
         self.version_refresh.setEnabled(False)
-        side_layout.addWidget(self.version_refresh)
+        side_layout.addWidget(self.version_refresh, alignment=Qt.AlignHCenter)
         return section
 
     def _build_loader_section(self) -> QWidget:
@@ -866,7 +1049,7 @@ class AddInstanceDialog(QDialog):
         self.loader_refresh = ModernButton("Refresh", role="sidebar", height=42, icon_size=0)
         self.loader_refresh.clicked.connect(lambda: self._refresh_loader_rows(force_refresh=True))
         self.loader_refresh.setEnabled(False)
-        side_layout.addWidget(self.loader_refresh)
+        side_layout.addWidget(self.loader_refresh, alignment=Qt.AlignHCenter)
         none_button.setChecked(True)
         return section
 
@@ -908,10 +1091,19 @@ class AddInstanceDialog(QDialog):
         self.loader_refresh.set_metrics(height=scaled_px(self, 42, minimum=38, maximum=44), icon_size=0)
         self.modpack_input.browse_button.set_metrics(height=scaled_px(self, 46, minimum=40, maximum=48), icon_size=0)
         self.minecraft_input.browse_button.set_metrics(height=scaled_px(self, 46, minimum=40, maximum=48), icon_size=0)
+        self.copy_add_button.set_metrics(height=scaled_px(self, 38, minimum=36, maximum=40), icon_size=0)
+        self.copy_remove_button.set_metrics(height=scaled_px(self, 38, minimum=36, maximum=40), icon_size=0)
+        self.copy_all_button.set_metrics(height=scaled_px(self, 38, minimum=36, maximum=40), icon_size=0)
+        self.copy_clear_button.set_metrics(height=scaled_px(self, 38, minimum=36, maximum=40), icon_size=0)
+        self.ram_revert_button.set_metrics(height=scaled_px(self, 40, minimum=36, maximum=42), icon_size=0)
+        self.ram_confirm_button.set_metrics(height=scaled_px(self, 40, minimum=36, maximum=42), icon_size=0)
+        self.ram_display.setMinimumWidth(scaled_px(self, 180, minimum=156, maximum=188))
 
         row_height = scaled_px(self, 36, minimum=32, maximum=38)
         self.version_table.verticalHeader().setDefaultSectionSize(row_height)
         self.loader_table.verticalHeader().setDefaultSectionSize(row_height)
+        self.copy_available_list.setMinimumHeight(scaled_px(self, 220, minimum=180, maximum=260))
+        self.copy_selected_list.setMinimumHeight(scaled_px(self, 220, minimum=180, maximum=260))
 
     def _build_checkbox(self, text: str, checked: bool, value: str) -> QCheckBox:
         checkbox = QCheckBox(text)
@@ -1085,6 +1277,142 @@ class AddInstanceDialog(QDialog):
             placeholder = self.service.default_instance_name(version, self._current_loader_id)
         self.name_edit.setPlaceholderText(placeholder)
 
+    def _reload_copy_source_instances(self) -> None:
+        current_value = self.copy_source_combo.selected_value() if hasattr(self, "copy_source_combo") else None
+        instances = self.service.load_instances()
+        self._copy_source_instances = [
+            {"id": instance.instance_id, "name": instance.name}
+            for instance in instances
+        ]
+
+        if not hasattr(self, "copy_source_combo"):
+            return
+
+        self.copy_source_combo.blockSignals(True)
+        self.copy_source_combo.clear()
+        self.copy_source_combo.addItem("", None)
+        for instance in self._copy_source_instances:
+            self.copy_source_combo.addItem(instance["name"], instance["id"])
+        self.copy_source_combo.blockSignals(False)
+
+        if current_value:
+            index = self.copy_source_combo.findData(current_value, role=Qt.UserRole)
+            if index >= 0:
+                self.copy_source_combo.setCurrentIndex(index)
+        self._on_copy_source_changed()
+
+    def _on_copy_source_changed(self) -> None:
+        if not hasattr(self, "copy_available_list"):
+            return
+
+        self.copy_available_list.clear()
+        self.copy_selected_list.clear()
+        instance_id = self.copy_source_combo.selected_value()
+        if not instance_id:
+            return
+
+        for entry in self.service.list_copyable_user_data(instance_id):
+            item = QListWidgetItem(entry["label"])
+            item.setData(Qt.UserRole, entry["path"])
+            self.copy_available_list.addItem(item)
+
+    def _move_copy_items(self, source: QListWidget, destination: QListWidget) -> None:
+        selected_items = source.selectedItems()
+        if not selected_items:
+            return
+
+        existing = {
+            str(destination.item(index).data(Qt.UserRole))
+            for index in range(destination.count())
+        }
+        for item in selected_items:
+            entry_path = str(item.data(Qt.UserRole))
+            if entry_path in existing:
+                source.takeItem(source.row(item))
+                continue
+            clone = QListWidgetItem(item.text())
+            clone.setData(Qt.UserRole, entry_path)
+            destination.addItem(clone)
+            source.takeItem(source.row(item))
+
+    def _move_all_copy_items(self) -> None:
+        while self.copy_available_list.count():
+            item = self.copy_available_list.takeItem(0)
+            if item is None:
+                break
+            clone = QListWidgetItem(item.text())
+            clone.setData(Qt.UserRole, item.data(Qt.UserRole))
+            self.copy_selected_list.addItem(clone)
+
+    def _clear_copy_selection(self) -> None:
+        while self.copy_selected_list.count():
+            item = self.copy_selected_list.takeItem(0)
+            if item is None:
+                break
+            clone = QListWidgetItem(item.text())
+            clone.setData(Qt.UserRole, item.data(Qt.UserRole))
+            self.copy_available_list.addItem(clone)
+
+    def _selected_copy_entries(self) -> list[str]:
+        return [
+            str(self.copy_selected_list.item(index).data(Qt.UserRole))
+            for index in range(self.copy_selected_list.count())
+            if self.copy_selected_list.item(index).data(Qt.UserRole)
+        ]
+
+    def _update_ram_slider_range(self) -> None:
+        total_mb = int(psutil.virtual_memory().total / (1024 * 1024))
+        maximum_mb = max(self._ram_default_mb, min(16384, (int(total_mb * 0.75) // 1024) * 1024))
+        minimum_mb = 1024
+        self.ram_slider.setMinimum(minimum_mb // self._ram_slider_step_mb)
+        self.ram_slider.setMaximum(maximum_mb // self._ram_slider_step_mb)
+
+    def _slider_to_mb(self, slider_value: int) -> int:
+        return slider_value * self._ram_slider_step_mb
+
+    def _mb_to_slider(self, memory_mb: int) -> int:
+        return max(self.ram_slider.minimum(), min(self.ram_slider.maximum(), memory_mb // self._ram_slider_step_mb))
+
+    def _snap_memory_mb(self, memory_mb: int) -> int:
+        snapped = int(round(memory_mb / 1024.0) * 1024)
+        minimum = self._slider_to_mb(self.ram_slider.minimum())
+        maximum = self._slider_to_mb(self.ram_slider.maximum())
+        return max(minimum, min(maximum, snapped))
+
+    def _set_ram_value(self, memory_mb: int, *, animate: bool) -> None:
+        self._ram_selected_mb = self._snap_memory_mb(memory_mb)
+        self.ram_slider.blockSignals(True)
+        self.ram_slider.setValue(self._mb_to_slider(self._ram_selected_mb))
+        self.ram_slider.blockSignals(False)
+        existing_animation = getattr(self, "_ram_animation", None)
+        if isinstance(existing_animation, QVariantAnimation):
+            existing_animation.stop()
+        if animate:
+            start_value = self._ram_displayed_mb
+            animation = QVariantAnimation(
+                self,
+                duration=220,
+                easingCurve=QEasingCurve.OutCubic,
+                startValue=start_value,
+                endValue=self._ram_selected_mb,
+                valueChanged=lambda value: self.ram_display.setText(f"{int(value)} MB"),
+            )
+            animation.finished.connect(lambda: setattr(self, "_ram_displayed_mb", self._ram_selected_mb))
+            animation.start()
+            self._ram_animation = animation
+        else:
+            self._ram_displayed_mb = self._ram_selected_mb
+            self.ram_display.setText(f"{self._ram_selected_mb} MB")
+
+    def _on_ram_slider_changed(self, value: int) -> None:
+        self._set_ram_value(self._slider_to_mb(value), animate=False)
+
+    def _revert_ram_value(self) -> None:
+        self._set_ram_value(self._ram_default_mb, animate=True)
+
+    def _confirm_ram_value(self) -> None:
+        self._set_ram_value(self._ram_selected_mb, animate=True)
+
     def _accept_selection(self) -> None:
         if self.page_stack.currentIndex() == self.PAGE_IMPORT:
             self._accept_import_selection()
@@ -1115,9 +1443,12 @@ class AddInstanceDialog(QDialog):
             "mod_loader_id": self._current_loader_id,
             "mod_loader_version": loader_version,
             "icon_path": self._selected_icon_path,
+            "memory_mb": self._ram_selected_mb,
             "operation": "create",
             "modpack_path": None,
             "minecraft_import_dir": None,
+            "copy_source_instance_id": self.copy_source_combo.selected_value(),
+            "copy_user_data": self._selected_copy_entries(),
         }
         self.accept()
 
@@ -1150,9 +1481,12 @@ class AddInstanceDialog(QDialog):
                 "mod_loader_id": None,
                 "mod_loader_version": None,
                 "icon_path": self._selected_icon_path,
+                "memory_mb": self._ram_default_mb,
                 "operation": "import_modpack",
                 "modpack_path": modpack_path,
                 "minecraft_import_dir": None,
+                "copy_source_instance_id": None,
+                "copy_user_data": [],
             }
             self.accept()
             return
@@ -1169,9 +1503,12 @@ class AddInstanceDialog(QDialog):
             "mod_loader_id": None,
             "mod_loader_version": None,
             "icon_path": self._selected_icon_path,
+            "memory_mb": self._ram_default_mb,
             "operation": "import_minecraft",
             "modpack_path": None,
             "minecraft_import_dir": minecraft_path,
+            "copy_source_instance_id": None,
+            "copy_user_data": [],
         }
         self.accept()
 

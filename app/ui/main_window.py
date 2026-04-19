@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
@@ -45,6 +47,7 @@ class MainWindow(QWidget):
         self._selected_item: QListWidgetItem | None = None
         self._launch_threads: dict[str, LaunchWorker] = {}
         self._running_processes: dict[str, Any] = {}
+        self._launch_started_at: dict[str, float] = {}
         self._progress_dialogs: list[InstallProgressDialog] = []
 
         self.setObjectName("appRoot")
@@ -58,8 +61,9 @@ class MainWindow(QWidget):
         self.refresh_instances()
 
         self.process_monitor = QTimer(self)
-        self.process_monitor.setInterval(1500)
+        self.process_monitor.setInterval(1000)
         self.process_monitor.timeout.connect(self._poll_running_processes)
+        self.process_monitor.timeout.connect(self._update_playtime_bar)
         self.process_monitor.start()
 
     def showEvent(self, event) -> None:
@@ -87,10 +91,6 @@ class MainWindow(QWidget):
         self.topbar.set_accounts(self.service.list_accounts(), self.service.get_player_name())
         self.topbar.action_requested.connect(self._handle_topbar_action)
         main_layout.addWidget(self.topbar)
-
-        self.menu_divider = QFrame()
-        self.menu_divider.setObjectName("menuDivider")
-        main_layout.addWidget(self.menu_divider)
 
         content_layout = QHBoxLayout()
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -165,6 +165,26 @@ class MainWindow(QWidget):
         empty_layout.addStretch()
         self.content_stack.addWidget(empty_page)
 
+        self.playtime_bar = QFrame()
+        self.playtime_bar.setObjectName("playtimeBar")
+        playtime_layout = QHBoxLayout(self.playtime_bar)
+        playtime_layout.setContentsMargins(12, 6, 12, 6)
+        playtime_layout.setSpacing(14)
+
+        self.playtime_primary = QLabel("Select an instance to see playtime details.")
+        self.playtime_primary.setObjectName("playtimePrimary")
+        playtime_layout.addWidget(self.playtime_primary, 1)
+
+        self.playtime_session = QLabel("Session: 0s")
+        self.playtime_session.setObjectName("playtimeSecondary")
+        playtime_layout.addWidget(self.playtime_session)
+
+        self.playtime_total = QLabel("Total playtime: 0s")
+        self.playtime_total.setObjectName("playtimeTotal")
+        playtime_layout.addWidget(self.playtime_total)
+
+        main_layout.addWidget(self.playtime_bar)
+
     def _apply_responsive_layout(self) -> None:
         outer_margin = scaled_px(self, 20, minimum=12, maximum=24)
         content_spacing = scaled_px(self, 16, minimum=10, maximum=18)
@@ -200,6 +220,7 @@ class MainWindow(QWidget):
         if not instances:
             self.content_stack.setCurrentIndex(1)
             self.sidebar.clear_instance()
+            self._update_playtime_bar()
             return
 
         self.content_stack.setCurrentIndex(0)
@@ -226,6 +247,7 @@ class MainWindow(QWidget):
                     selected_row = row
                     break
         self.instance_list.setCurrentRow(selected_row)
+        self._update_playtime_bar()
 
     def _handle_topbar_action(self, action: str) -> None:
         if action == "Add Instance":
@@ -279,6 +301,7 @@ class MainWindow(QWidget):
         del previous
         if current is None:
             self.sidebar.clear_instance()
+            self._update_playtime_bar()
             return
 
         self._selected_item = current
@@ -289,6 +312,7 @@ class MainWindow(QWidget):
             card.set_selected(item is current)
 
         self.sidebar.set_instance(selected_instance)
+        self._update_playtime_bar()
 
     def _handle_instance_double_clicked(self, item: QListWidgetItem) -> None:
         self.instance_list.setCurrentItem(item)
@@ -342,6 +366,7 @@ class MainWindow(QWidget):
 
         if process.pid:
             self.service.terminate_process_tree(process.pid)
+        self._persist_session_playtime(instance.instance_id)
         self._running_processes.pop(instance.instance_id, None)
         self._set_instance_status(instance.instance_id, "Quit")
 
@@ -372,6 +397,7 @@ class MainWindow(QWidget):
 
     def _handle_launch_success(self, instance: InstanceRecord, process: Any) -> None:
         self._running_processes[instance.instance_id] = process
+        self._launch_started_at[instance.instance_id] = time.monotonic()
         instance.pid = getattr(process, "pid", None)
         try:
             updated = self.service.refresh_instance_last_played(instance)
@@ -388,21 +414,23 @@ class MainWindow(QWidget):
         QMessageBox.critical(self, "Launch Failed", message)
 
     def _replace_instance(self, updated: InstanceRecord) -> None:
-        for item, card, instance in self._cards:
+        for index, (item, card, instance) in enumerate(self._cards):
             if instance.instance_id != updated.instance_id:
                 continue
 
             item.setData(Qt.UserRole, updated)
+            self._cards[index] = (item, card, updated)
             card.name = updated.name
             card.version = updated.version_label
             card.icon_path = updated.icon_path
             card.update()
             if item is self._selected_item:
                 self.sidebar.set_instance(updated)
+                self._update_playtime_bar()
             break
 
     def _set_instance_status(self, instance_id: str, status: str) -> None:
-        for item, card, instance in self._cards:
+        for index, (item, card, instance) in enumerate(self._cards):
             del card
             if instance.instance_id != instance_id:
                 continue
@@ -410,8 +438,10 @@ class MainWindow(QWidget):
             updated = item.data(Qt.UserRole)
             updated.status = status
             item.setData(Qt.UserRole, updated)
+            self._cards[index] = (item, self._cards[index][1], updated)
             if item is self._selected_item:
                 self.sidebar.update_status(status)
+                self._update_playtime_bar()
             break
 
     def _sync_accounts_ui(self) -> None:
@@ -431,6 +461,86 @@ class MainWindow(QWidget):
             finished.append((instance_id, return_code))
 
         for instance_id, return_code in finished:
+            self._persist_session_playtime(instance_id)
             self._running_processes.pop(instance_id, None)
             status = "Quit" if return_code == 0 else "Crashed"
             self._set_instance_status(instance_id, status)
+
+    def _persist_session_playtime(self, instance_id: str) -> None:
+        started_at = self._launch_started_at.pop(instance_id, None)
+        if started_at is None:
+            return
+
+        elapsed_seconds = max(0, int(time.monotonic() - started_at))
+        if elapsed_seconds <= 0:
+            return
+
+        for item, card, instance in self._cards:
+            del card
+            if instance.instance_id != instance_id:
+                continue
+            current = item.data(Qt.UserRole)
+            try:
+                updated = self.service.record_instance_playtime(current, elapsed_seconds)
+            except Exception:
+                return
+            updated.status = current.status
+            updated.pid = current.pid
+            self._replace_instance(updated)
+            return
+
+    def _current_session_seconds(self, instance_id: str) -> int:
+        started_at = self._launch_started_at.get(instance_id)
+        if started_at is None:
+            return 0
+        return max(0, int(time.monotonic() - started_at))
+
+    def _update_playtime_bar(self) -> None:
+        selected_instance = self._selected_item.data(Qt.UserRole) if self._selected_item is not None else None
+        aggregate_total = sum(
+            int(item.data(Qt.UserRole).total_played_seconds) + self._current_session_seconds(item.data(Qt.UserRole).instance_id)
+            for item, _, _ in self._cards
+        )
+
+        if selected_instance is None:
+            self.playtime_primary.setText("Select an instance to see session and instance playtime.")
+            self.playtime_session.setText("Session: 0s")
+            self.playtime_total.setText(f"Total playtime: {_format_duration(aggregate_total)}")
+            return
+
+        session_seconds = self._current_session_seconds(selected_instance.instance_id)
+        instance_total = int(selected_instance.total_played_seconds) + session_seconds
+        self.playtime_primary.setText(
+            f"{selected_instance.name}, last played {_format_last_played(selected_instance.last_played)}"
+        )
+        self.playtime_session.setText(
+            f"Session: {_format_duration(session_seconds)} | Instance total: {_format_duration(instance_total)}"
+        )
+        self.playtime_total.setText(f"Total playtime: {_format_duration(aggregate_total)}")
+
+
+def _format_duration(total_seconds: int) -> str:
+    seconds = max(0, int(total_seconds))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    if minutes or hours or days:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
+
+
+def _format_last_played(value: str | None) -> str:
+    if not value:
+        return "never"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return parsed.astimezone().strftime("on %m/%d/%y %I:%M %p")

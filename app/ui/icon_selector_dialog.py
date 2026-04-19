@@ -167,6 +167,8 @@ class IconTile(QWidget):
 
 
 class IconSelectorDialog(QDialog):
+    _GRID_COLUMNS = 5
+
     def __init__(
         self,
         service: LauncherService,
@@ -272,12 +274,12 @@ class IconSelectorDialog(QDialog):
         for index, icon in enumerate(icons):
             tile = IconTile(icon, self.grid_holder)
             tile.clicked.connect(self._select_icon)
-            row = index // 4
-            column = index % 4
+            row = index // self._GRID_COLUMNS
+            column = index % self._GRID_COLUMNS
             self.grid_layout.addWidget(tile, row, column)
             self._tiles[icon.relative_path] = tile
 
-        for column in range(4):
+        for column in range(self._GRID_COLUMNS):
             self.grid_layout.setColumnStretch(column, 0)
         self._select_icon(selected_icon)
 

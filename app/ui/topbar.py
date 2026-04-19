@@ -65,7 +65,21 @@ class ModernButton(QPushButton):
         },
     }
 
-    def __init__(self, text, icon=None, role="toolbar", height=44, icon_size=18, parent=None):
+    def __init__(
+        self,
+        text,
+        icon=None,
+        role="toolbar",
+        height=44,
+        icon_size=18,
+        parent=None,
+        *,
+        radius: int | None = None,
+        font_point_size: int | None = None,
+        font_weight: int | None = None,
+        minimum_width: int | None = None,
+        horizontal_padding: int | None = None,
+    ):
         super().__init__(text, parent)
         self._role = role
         self._colors = self.ROLE_COLORS[role]
@@ -74,7 +88,11 @@ class ModernButton(QPushButton):
         self._active = 0.0
         self._invalid = 0.0
         self._icon_size = icon_size
-        self._radius = 12 if role == "toolbar" else 14
+        self._radius = radius if radius is not None else (12 if role == "toolbar" else 14)
+        self._font_point_size = font_point_size
+        self._font_weight = font_weight if font_weight is not None else QFont.DemiBold
+        self._minimum_width_override = minimum_width
+        self._horizontal_padding = horizontal_padding
 
         if icon is not None:
             self.setIcon(icon)
@@ -113,14 +131,18 @@ class ModernButton(QPushButton):
 
     def sizeHint(self):
         font = QFont(self.font())
-        font.setPointSize(12 if self._role == "toolbar" else 11)
-        font.setWeight(QFont.DemiBold)
+        font.setPointSize(self._font_point_size or (12 if self._role == "toolbar" else 11))
+        font.setWeight(self._font_weight)
         metrics = QFontMetrics(font)
         gap = 12 if not self.icon().isNull() else 0
         icon_width = self._icon_size if not self.icon().isNull() else 0
-        horizontal_padding = 58 if self._role == "toolbar" else 54
+        horizontal_padding = self._horizontal_padding if self._horizontal_padding is not None else (
+            58 if self._role == "toolbar" else 54
+        )
         width = metrics.horizontalAdvance(self.text()) + icon_width + gap + horizontal_padding
-        minimum_width = 176 if self._role == "toolbar" else 152
+        minimum_width = self._minimum_width_override if self._minimum_width_override is not None else (
+            176 if self._role == "toolbar" else 152
+        )
         return QSize(max(width, minimum_width), self.minimumHeight() + 5)
 
     def minimumSizeHint(self):
@@ -222,8 +244,8 @@ class ModernButton(QPushButton):
 
         content_rect = rect.adjusted(18, 0, -18, 0)
         font = QFont(self.font())
-        font.setPointSize(12 if self._role == "toolbar" else 11)
-        font.setWeight(QFont.DemiBold)
+        font.setPointSize(self._font_point_size or (12 if self._role == "toolbar" else 11))
+        font.setWeight(self._font_weight)
         painter.setFont(font)
         metrics = QFontMetrics(font)
         gap = 12 if not self.icon().isNull() else 0
@@ -271,10 +293,19 @@ class AccountPopup(QWidget):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setObjectName("accountPopup")
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(12, 12, 12, 12)
-        self._layout.setSpacing(8)
+        self._layout.setContentsMargins(10, 10, 10, 10)
+        self._layout.setSpacing(6)
         self._account_buttons: list[ModernButton] = []
-        self._manage_button = ModernButton("Manage Accounts", role="sidebar", height=40, icon_size=0)
+        self._manage_button = ModernButton(
+            "Manage Accounts",
+            role="sidebar",
+            height=36,
+            icon_size=0,
+            radius=10,
+            minimum_width=148,
+            horizontal_padding=36,
+            font_weight=QFont.Bold,
+        )
         self._manage_button.clicked.connect(self._handle_manage)
 
     def set_accounts(self, accounts: list[str], active_account: str) -> None:
@@ -289,7 +320,16 @@ class AccountPopup(QWidget):
         self._account_buttons.clear()
 
         for account_name in accounts:
-            button = ModernButton(account_name, role="sidebar", height=40, icon_size=0)
+            button = ModernButton(
+                account_name,
+                role="sidebar",
+                height=36,
+                icon_size=0,
+                radius=10,
+                minimum_width=148,
+                horizontal_padding=36,
+                font_weight=QFont.Medium,
+            )
             button.set_active(account_name == active_account)
             button.clicked.connect(lambda _=False, name=account_name: self._handle_account(name))
             self._layout.addWidget(button)
@@ -299,7 +339,7 @@ class AccountPopup(QWidget):
         self.adjustSize()
 
     def show_below(self, widget: QWidget) -> None:
-        global_pos = widget.mapToGlobal(QPoint(0, widget.height() + 8))
+        global_pos = widget.mapToGlobal(QPoint(0, widget.height() + 4))
         self.move(global_pos)
         self.show()
         self.raise_()
@@ -323,8 +363,8 @@ class TopBar(QWidget):
         asset_root = Path(__file__).resolve().parents[2] / "assets"
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(18, 12, 18, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
         self.buttons = {}
         for name, icon_name in [
@@ -336,8 +376,12 @@ class TopBar(QWidget):
                 name,
                 icon=QIcon(str(asset_root / icon_name)),
                 role="toolbar",
-                height=52,
-                icon_size=30,
+                height=46,
+                icon_size=24,
+                radius=10,
+                minimum_width=136,
+                horizontal_padding=42,
+                font_point_size=11,
             )
             button.clicked.connect(lambda _, action=name: self._handle_click(action))
             layout.addWidget(button)
@@ -350,8 +394,8 @@ class TopBar(QWidget):
         self.account_chip.setCursor(Qt.PointingHandCursor)
         self.account_chip.clicked.connect(self._toggle_account_popup)
         account_layout = QHBoxLayout(self.account_chip)
-        account_layout.setContentsMargins(12, 8, 12, 8)
-        account_layout.setSpacing(10)
+        account_layout.setContentsMargins(10, 6, 10, 6)
+        account_layout.setSpacing(8)
 
         self.account_avatar = QLabel("P")
         self.account_avatar.setObjectName("accountAvatar")
@@ -379,25 +423,25 @@ class TopBar(QWidget):
         super().resizeEvent(event)
 
     def _apply_responsive_metrics(self) -> None:
-        margins = scaled_px(self, 18, minimum=12, maximum=22)
-        vertical_margin = scaled_px(self, 12, minimum=8, maximum=16)
-        spacing = scaled_px(self, 12, minimum=8, maximum=16)
+        margins = scaled_px(self, 12, minimum=10, maximum=16)
+        vertical_margin = scaled_px(self, 10, minimum=8, maximum=12)
+        spacing = scaled_px(self, 8, minimum=6, maximum=10)
         self._layout.setContentsMargins(margins, vertical_margin, margins, vertical_margin)
         self._layout.setSpacing(spacing)
         self._account_layout.setContentsMargins(
-            scaled_px(self, 12, minimum=10, maximum=16),
-            scaled_px(self, 8, minimum=6, maximum=10),
-            scaled_px(self, 12, minimum=10, maximum=16),
-            scaled_px(self, 8, minimum=6, maximum=10),
+            scaled_px(self, 10, minimum=8, maximum=12),
+            scaled_px(self, 6, minimum=5, maximum=8),
+            scaled_px(self, 10, minimum=8, maximum=12),
+            scaled_px(self, 6, minimum=5, maximum=8),
         )
-        self._account_layout.setSpacing(scaled_px(self, 10, minimum=8, maximum=12))
-        avatar_size = scaled_px(self, 28, minimum=24, maximum=32)
+        self._account_layout.setSpacing(scaled_px(self, 8, minimum=6, maximum=10))
+        avatar_size = scaled_px(self, 26, minimum=22, maximum=28)
         self.account_avatar.setFixedSize(avatar_size, avatar_size)
 
         for button in self.buttons.values():
             button.set_metrics(
-                height=scaled_px(self, 52, minimum=42, maximum=56),
-                icon_size=scaled_px(self, 30, minimum=20, maximum=30),
+                height=scaled_px(self, 46, minimum=40, maximum=48),
+                icon_size=scaled_px(self, 24, minimum=18, maximum=24),
             )
 
     def set_accounts(self, accounts: list[str], active_account: str) -> None:

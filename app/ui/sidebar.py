@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
@@ -50,11 +50,15 @@ class SideBar(QWidget):
         self.name_label = QLabel("No instance")
         self.name_label.setObjectName("instanceInfoName")
         self.name_label.setAlignment(Qt.AlignCenter)
+        self.name_label.setWordWrap(True)
+        self.name_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         preview_layout.addWidget(self.name_label)
 
         self.version_label = QLabel("Select an instance")
         self.version_label.setObjectName("instanceInfoVersion")
         self.version_label.setAlignment(Qt.AlignCenter)
+        self.version_label.setWordWrap(True)
+        self.version_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         preview_layout.addWidget(self.version_label)
 
         self.status_badge = StatusBadge()
@@ -121,7 +125,6 @@ class SideBar(QWidget):
         self.name_label.setText(instance.name)
         self.version_label.setText(_clean_version(instance.version_label))
 
-        pixmap = QPixmap(instance.icon_path)
         pixmap = load_scaled_icon(instance.icon_path, 78, 78)
         self.icon_label.setPixmap(pixmap)
         self.update_status(instance.status)
@@ -146,6 +149,8 @@ class SideBar(QWidget):
         self.setFixedWidth(scaled_px(self, 284, minimum=220, maximum=300))
         icon_size = scaled_px(self, 104, minimum=76, maximum=104)
         self.icon_label.setFixedSize(icon_size, icon_size)
+        self.name_label.setMaximumWidth(scaled_px(self, 216, minimum=170, maximum=222))
+        self.version_label.setMaximumWidth(scaled_px(self, 216, minimum=170, maximum=222))
 
         for button in self.buttons.values():
             button.set_metrics(height=scaled_px(self, 44, minimum=38, maximum=46), icon_size=0)
