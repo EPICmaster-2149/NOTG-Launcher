@@ -1,7 +1,8 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPoint, QRectF, QSize, Qt, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from ui.responsive import scaled_px
@@ -285,72 +286,85 @@ class ClickableFrame(QFrame):
         super().mouseReleaseEvent(event)
 
 
-class AccountPopup(QWidget):
-    account_selected = Signal(str)
-    manage_requested = Signal()
+@dataclass(slots=True)
+class PopupAction:
+    action_id: str
+    label: str
+    role: str = "sidebar"
+    bold: bool = False
+    active: bool = False
+
+
+class ActionPopup(QWidget):
+    action_triggered = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
-        self.setObjectName("accountPopup")
+        self.setObjectName("actionPopup")
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(10, 10, 10, 10)
-        self._layout.setSpacing(6)
-        self._account_buttons: list[ModernButton] = []
-        self._manage_button = ModernButton(
-            "Manage Accounts",
-            role="sidebar",
-            height=36,
-            icon_size=0,
-            radius=10,
-            minimum_width=148,
-            horizontal_padding=36,
-            font_weight=QFont.Bold,
-        )
-        self._manage_button.clicked.connect(self._handle_manage)
+        self._layout.setContentsMargins(8, 8, 8, 8)
+        self._layout.setSpacing(4)
+        self._buttons: list[ModernButton] = []
+        self._minimum_popup_width = 184
 
-    def set_accounts(self, accounts: list[str], active_account: str) -> None:
+    def set_actions(self, actions: list[PopupAction]) -> None:
         while self._layout.count():
             item = self._layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
-                if widget is self._manage_button:
-                    widget.setParent(None)
-                    continue
                 widget.deleteLater()
-        self._account_buttons.clear()
 
-        for account_name in accounts:
+        self._buttons.clear()
+        for action in actions:
             button = ModernButton(
-                account_name,
-                role="sidebar",
+                action.label,
+                role=action.role,
                 height=36,
                 icon_size=0,
-                radius=10,
-                minimum_width=148,
-                horizontal_padding=36,
-                font_weight=QFont.Medium,
+                radius=8,
+                minimum_width=self._minimum_popup_width,
+                horizontal_padding=30,
+                font_weight=QFont.Bold if action.bold else QFont.Medium,
+                font_point_size=10,
             )
-            button.set_active(account_name == active_account)
-            button.clicked.connect(lambda _=False, name=account_name: self._handle_account(name))
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.set_active(action.active)
+            button.clicked.connect(lambda _=False, action_id=action.action_id: self._emit_action(action_id))
             self._layout.addWidget(button)
-            self._account_buttons.append(button)
+            self._buttons.append(button)
 
-        self._layout.addWidget(self._manage_button)
+        self._sync_width()
+
+    def show_below(self, widget: QWidget, *, align_right: bool = False) -> None:
+        anchor = widget.mapToGlobal(QPoint(0, widget.height() + 4))
+        if align_right:
+            anchor.setX(anchor.x() + max(0, widget.width() - self.width()))
+        self._show_at(anchor)
+
+    def show_at_global(self, global_pos: QPoint) -> None:
+        self._show_at(global_pos)
+
+    def _sync_width(self) -> None:
+        target_width = self._minimum_popup_width
+        for button in self._buttons:
+            target_width = max(target_width, button.sizeHint().width())
+        self.setFixedWidth(target_width + 4)
         self.adjustSize()
 
-    def show_below(self, widget: QWidget) -> None:
-        global_pos = widget.mapToGlobal(QPoint(0, widget.height() + 4))
-        self.move(global_pos)
+    def _show_at(self, global_pos: QPoint) -> None:
+        geometry = QGuiApplication.primaryScreen().availableGeometry() if QGuiApplication.primaryScreen() else None
+        target_x = global_pos.x()
+        target_y = global_pos.y()
+        if geometry is not None:
+            target_x = max(geometry.left() + 6, min(target_x, geometry.right() - self.width() - 6))
+            target_y = max(geometry.top() + 6, min(target_y, geometry.bottom() - self.height() - 6))
+        self.move(QPoint(target_x, target_y))
         self.show()
         self.raise_()
 
-    def _handle_account(self, account_name: str) -> None:
+    def _emit_action(self, action_id: str) -> None:
         self.hide()
-        self.account_selected.emit(account_name)
-
-    def _handle_manage(self) -> None:
-        self.hide()
-        self.manage_requested.emit()
+        self.action_triggered.emit(action_id)
 
 
 class TopBar(QWidget):
@@ -407,9 +421,8 @@ class TopBar(QWidget):
         account_layout.addWidget(self.account_name)
 
         layout.addWidget(self.account_chip)
-        self.account_popup = AccountPopup(self)
-        self.account_popup.account_selected.connect(lambda account: self.action_requested.emit(f"Account:{account}"))
-        self.account_popup.manage_requested.connect(lambda: self.action_requested.emit("Manage Accounts"))
+        self.account_popup = ActionPopup(self)
+        self.account_popup.action_triggered.connect(self._handle_popup_action)
         self._layout = layout
         self._account_layout = account_layout
         self._apply_responsive_metrics()
@@ -447,13 +460,26 @@ class TopBar(QWidget):
     def set_accounts(self, accounts: list[str], active_account: str) -> None:
         self.account_name.setText(active_account)
         self.account_avatar.setText(active_account[:1].upper())
-        self.account_popup.set_accounts(accounts, active_account)
+        actions = [
+            PopupAction(
+                action_id=f"Account:{account_name}",
+                label=account_name,
+                role="sidebar",
+                active=account_name == active_account,
+            )
+            for account_name in accounts
+        ]
+        actions.append(PopupAction("Manage Accounts", "Manage Accounts", bold=True))
+        self.account_popup.set_actions(actions)
 
     def _handle_click(self, action):
+        self.action_requested.emit(action)
+
+    def _handle_popup_action(self, action: str) -> None:
         self.action_requested.emit(action)
 
     def _toggle_account_popup(self):
         if self.account_popup.isVisible():
             self.account_popup.hide()
             return
-        self.account_popup.show_below(self.account_chip)
+        self.account_popup.show_below(self.account_chip, align_right=True)

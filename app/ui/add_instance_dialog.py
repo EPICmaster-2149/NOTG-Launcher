@@ -740,19 +740,19 @@ class AddInstanceDialog(QDialog):
         transfer_controls.setSpacing(10)
         copy_lists_row.addLayout(transfer_controls)
 
-        self.copy_add_button = ModernButton(">", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=56, horizontal_padding=24)
+        self.copy_add_button = ModernButton(">", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=70, horizontal_padding=16)
         self.copy_add_button.clicked.connect(lambda: self._move_copy_items(self.copy_available_list, self.copy_selected_list))
         transfer_controls.addWidget(self.copy_add_button)
 
-        self.copy_remove_button = ModernButton("<", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=56, horizontal_padding=24)
+        self.copy_remove_button = ModernButton("<", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=70, horizontal_padding=16)
         self.copy_remove_button.clicked.connect(lambda: self._move_copy_items(self.copy_selected_list, self.copy_available_list))
         transfer_controls.addWidget(self.copy_remove_button)
 
-        self.copy_all_button = ModernButton(">>", role="accent", height=38, icon_size=0, radius=10, minimum_width=56, horizontal_padding=24)
+        self.copy_all_button = ModernButton(">>", role="accent", height=38, icon_size=0, radius=10, minimum_width=76, horizontal_padding=18)
         self.copy_all_button.clicked.connect(self._move_all_copy_items)
         transfer_controls.addWidget(self.copy_all_button)
 
-        self.copy_clear_button = ModernButton("<<", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=56, horizontal_padding=24)
+        self.copy_clear_button = ModernButton("<<", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=76, horizontal_padding=18)
         self.copy_clear_button.clicked.connect(self._clear_copy_selection)
         transfer_controls.addWidget(self.copy_clear_button)
         transfer_controls.addStretch()

@@ -3,8 +3,10 @@ from __future__ import annotations
 import configparser
 import hashlib
 import json
+import re
 import shutil
 import subprocess
+import tomllib
 import traceback
 import uuid
 import zipfile
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 import minecraft_launcher_lib
 import psutil
@@ -95,6 +98,9 @@ MMCPACK_LOADER_UIDS = {
 
 APP_NAME = "NOTG Launcher"
 USER_ICON_PREFIX = "user-icons"
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+BACKGROUND_FILE_NAME = "active-background"
+UNSET = object()
 
 
 @dataclass(slots=True)
@@ -277,11 +283,15 @@ class LauncherService:
         self.config_root = Path(dirs.user_config_dir).resolve()
         self.cache_root = Path(dirs.user_cache_dir).resolve()
         self.accounts_file = self.config_root / "accounts.json"
+        self.background_settings_file = self.config_root / "background.json"
         self.user_icons_root = self.data_root / "icons"
         self.instances_root = self.data_root / "instances"
         self.runtime_root = self.data_root / "runtime"
         self.staging_root = self.runtime_root / "staging"
         self.logs_root = Path(dirs.user_log_dir).resolve()
+        self.backgrounds_root = self.data_root / "backgrounds"
+        self.default_background_root = self.project_root / "default-background"
+        self.generated_icons_root = self.cache_root / "generated-icons"
         self.default_icon = "assets/default-instance-icons/Grass Block.png"
 
         for path in (
@@ -293,6 +303,7 @@ class LauncherService:
             self.runtime_root,
             self.staging_root,
             self.logs_root,
+            self.generated_icons_root,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -512,6 +523,310 @@ class LauncherService:
         if instance.root_dir.exists():
             shutil.rmtree(instance.root_dir)
 
+    def instance_metadata_path(self, instance: InstanceRecord) -> Path:
+        return instance.root_dir / "instance.json"
+
+    def update_instance(
+        self,
+        instance: InstanceRecord,
+        *,
+        name: str | None = None,
+        icon_path: str | None = None,
+        memory_mb: int | None = None,
+        vanilla_version: str | None = None,
+        installed_version: str | None = None,
+        mod_loader_id: Any = UNSET,
+        mod_loader_version: Any = UNSET,
+        last_played: str | None = None,
+        total_played_seconds: int | None = None,
+    ) -> InstanceRecord:
+        metadata_path = self.instance_metadata_path(instance)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        if name is not None:
+            normalized_name = name.strip()
+            if not normalized_name:
+                raise ValueError("Instance name cannot be empty.")
+            metadata["name"] = normalized_name
+        if icon_path is not None:
+            metadata["icon_path"] = self._normalize_icon_reference(icon_path)
+        if memory_mb is not None:
+            metadata["memory_mb"] = _coerce_memory_mb(memory_mb)
+        if vanilla_version is not None:
+            metadata["vanilla_version"] = vanilla_version
+        if installed_version is not None:
+            metadata["installed_version"] = installed_version
+        if mod_loader_id is not UNSET:
+            metadata["mod_loader_id"] = mod_loader_id
+        if mod_loader_version is not UNSET:
+            metadata["mod_loader_version"] = mod_loader_version
+        if last_played is not None:
+            metadata["last_played"] = last_played
+        if total_played_seconds is not None:
+            metadata["total_played_seconds"] = _coerce_non_negative_int(total_played_seconds)
+
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        refreshed = InstanceRecord.from_metadata(metadata, instance.root_dir)
+        refreshed.icon_path = self.resolve_icon_path(refreshed.icon_path)
+        return refreshed
+
+    def rename_instance(self, instance: InstanceRecord, new_name: str) -> InstanceRecord:
+        return self.update_instance(instance, name=new_name)
+
+    def set_instance_icon(self, instance: InstanceRecord, icon_path: str) -> InstanceRecord:
+        return self.update_instance(instance, icon_path=icon_path)
+
+    def set_instance_memory(self, instance: InstanceRecord, memory_mb: int) -> InstanceRecord:
+        return self.update_instance(instance, memory_mb=memory_mb)
+
+    def duplicate_instance(self, instance: InstanceRecord, preferred_name: str | None = None) -> InstanceRecord:
+        target_name = self._allocate_duplicate_name(preferred_name or f"{instance.name} Copy")
+        slug = _slugify(target_name)[:40] or "instance"
+        instance_id = f"{slug}-{uuid.uuid4().hex[:8]}"
+        target_dir = self.instances_root / instance_id
+        if target_dir.exists():
+            raise FileExistsError(f"Instance directory already exists: {target_dir}")
+
+        shutil.copytree(instance.root_dir, target_dir)
+        metadata_path = target_dir / "instance.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["instance_id"] = instance_id
+        metadata["name"] = target_name
+        metadata["created_at"] = _utc_now()
+        metadata["last_played"] = None
+        metadata["total_played_seconds"] = 0
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+        duplicated = InstanceRecord.from_metadata(metadata, target_dir)
+        duplicated.icon_path = self.resolve_icon_path(duplicated.icon_path)
+        return duplicated
+
+    def prepare_reinstall_request(
+        self,
+        instance: InstanceRecord,
+        *,
+        vanilla_version: str,
+        mod_loader_id: str | None,
+        mod_loader_version: str | None,
+    ) -> InstallRequest:
+        stage_dir = self.staging_root / f"{instance.instance_id}-reinstall-{uuid.uuid4().hex[:8]}"
+        minecraft_dir = stage_dir / ".minecraft"
+        copy_entries = [entry["path"] for entry in self.list_copyable_user_data(instance.instance_id)]
+        return InstallRequest(
+            instance_id=instance.instance_id,
+            name=instance.name,
+            vanilla_version=vanilla_version,
+            mod_loader_id=mod_loader_id,
+            mod_loader_version=mod_loader_version,
+            icon_path=self._normalize_icon_reference(instance.icon_path),
+            stage_dir=str(stage_dir),
+            final_dir=str(instance.root_dir),
+            minecraft_dir=str(minecraft_dir),
+            memory_mb=instance.memory_mb,
+            operation="reinstall",
+            modpack_path=None,
+            minecraft_import_dir=None,
+            copy_source_instance_id=instance.instance_id,
+            copy_user_data=copy_entries,
+        )
+
+    def prepare_copy_userdata_request(
+        self,
+        instance: InstanceRecord,
+        *,
+        source_instance_id: str,
+        copy_user_data: list[str],
+    ) -> InstallRequest:
+        stage_dir = self.staging_root / f"{instance.instance_id}-copy-{uuid.uuid4().hex[:8]}"
+        minecraft_dir = stage_dir / ".minecraft"
+        return InstallRequest(
+            instance_id=instance.instance_id,
+            name=instance.name,
+            vanilla_version=instance.vanilla_version,
+            mod_loader_id=instance.mod_loader_id,
+            mod_loader_version=instance.mod_loader_version,
+            icon_path=self._normalize_icon_reference(instance.icon_path),
+            stage_dir=str(stage_dir),
+            final_dir=str(instance.root_dir),
+            minecraft_dir=str(minecraft_dir),
+            memory_mb=instance.memory_mb,
+            operation="copy_userdata",
+            modpack_path=None,
+            minecraft_import_dir=None,
+            copy_source_instance_id=source_instance_id,
+            copy_user_data=copy_user_data,
+        )
+
+    def get_instance_mods_dir(self, instance: InstanceRecord) -> Path:
+        return instance.minecraft_dir / "mods"
+
+    def get_instance_configs_dir(self, instance: InstanceRecord) -> Path:
+        return instance.minecraft_dir / "config"
+
+    def get_instance_screenshots_dir(self, instance: InstanceRecord) -> Path:
+        return instance.minecraft_dir / "screenshots"
+
+    def get_instance_latest_log_path(self, instance: InstanceRecord) -> Path:
+        return instance.minecraft_dir / "logs" / "latest.log"
+
+    def get_latest_crash_report(self, instance: InstanceRecord) -> Path | None:
+        crash_dir = instance.minecraft_dir / "crash-reports"
+        if not crash_dir.is_dir():
+            return None
+        reports = sorted(
+            [path for path in crash_dir.glob("*.txt") if path.is_file()],
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        return reports[0] if reports else None
+
+    def get_default_background_path(self) -> str | None:
+        if not self.default_background_root.is_dir():
+            return None
+        for candidate in sorted(self.default_background_root.iterdir(), key=lambda item: item.name.lower()):
+            if candidate.is_file() and candidate.suffix.lower() in IMAGE_SUFFIXES:
+                return str(candidate.resolve())
+        return None
+
+    def get_active_background_path(self) -> str | None:
+        payload = self._read_background_payload()
+        mode = str(payload.get("mode", "default"))
+        if mode == "custom":
+            file_name = _optional_str(payload.get("file_name"))
+            if file_name:
+                custom_path = self.backgrounds_root / file_name
+                if custom_path.is_file():
+                    return str(custom_path.resolve())
+        return self.get_default_background_path()
+
+    def set_custom_background(self, source_path: str | Path) -> str:
+        source = Path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Background image not found: {source}")
+        if source.suffix.lower() not in IMAGE_SUFFIXES:
+            raise ValueError("Choose a PNG, JPG, JPEG, BMP, or WEBP image.")
+
+        self.backgrounds_root.mkdir(parents=True, exist_ok=True)
+        for existing in self.backgrounds_root.glob(f"{BACKGROUND_FILE_NAME}.*"):
+            if existing.is_file():
+                existing.unlink()
+
+        target = self.backgrounds_root / f"{BACKGROUND_FILE_NAME}{source.suffix.lower()}"
+        shutil.copy2(source, target)
+        self._write_background_payload({"mode": "custom", "file_name": target.name})
+        return str(target.resolve())
+
+    def reset_background(self) -> None:
+        self._write_background_payload({"mode": "default"})
+
+    def list_mods(self, instance: InstanceRecord) -> list[dict[str, Any]]:
+        mods_dir = self.get_instance_mods_dir(instance)
+        if not mods_dir.is_dir():
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for path in sorted(mods_dir.iterdir(), key=lambda item: item.name.lower()):
+            if not path.is_file():
+                continue
+            lowered = path.name.lower()
+            if lowered.endswith(".disabled"):
+                archive_name = path.name[:-9]
+            else:
+                archive_name = path.name
+
+            if Path(archive_name).suffix.lower() not in {".jar", ".zip"}:
+                continue
+
+            metadata = _read_mod_metadata(path, self.generated_icons_root)
+            rows.append(
+                {
+                    "file_name": path.name,
+                    "path": str(path.resolve()),
+                    "enabled": not lowered.endswith(".disabled"),
+                    "icon_path": metadata.get("icon_path"),
+                    "name": metadata.get("name") or _friendly_archive_name(path.name),
+                    "version": metadata.get("version") or "Unknown",
+                    "last_modified": _format_file_timestamp(path),
+                    "provider": metadata.get("provider") or "Unknown",
+                }
+            )
+        return rows
+
+    def set_mod_enabled(self, instance: InstanceRecord, file_name: str, enabled: bool) -> Path:
+        source = _safe_local_path_join(self.get_instance_mods_dir(instance), file_name)
+        if not source.is_file():
+            raise FileNotFoundError(f"Mod file not found: {file_name}")
+
+        is_enabled = not source.name.lower().endswith(".disabled")
+        if is_enabled == enabled:
+            return source
+
+        if enabled:
+            if not source.name.lower().endswith(".disabled"):
+                return source
+            target_name = re.sub(r"\.disabled$", "", source.name, flags=re.IGNORECASE)
+        else:
+            target_name = f"{source.name}.disabled"
+
+        target = source.with_name(target_name)
+        if target.exists():
+            raise FileExistsError(f"A mod file named '{target.name}' already exists.")
+
+        source.rename(target)
+        return target
+
+    def remove_mods(self, instance: InstanceRecord, file_names: list[str]) -> None:
+        mods_dir = self.get_instance_mods_dir(instance)
+        for file_name in file_names:
+            target = _safe_local_path_join(mods_dir, file_name)
+            if target.is_file():
+                target.unlink()
+
+    def list_screenshots(self, instance: InstanceRecord) -> list[dict[str, Any]]:
+        screenshots_dir = self.get_instance_screenshots_dir(instance)
+        if not screenshots_dir.is_dir():
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for path in sorted(
+            [candidate for candidate in screenshots_dir.iterdir() if candidate.is_file() and candidate.suffix.lower() in IMAGE_SUFFIXES],
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        ):
+            rows.append(
+                {
+                    "file_name": path.name,
+                    "path": str(path.resolve()),
+                    "label": _format_screenshot_label(path),
+                    "modified_timestamp": path.stat().st_mtime,
+                }
+            )
+        return rows
+
+    def rename_screenshot(self, instance: InstanceRecord, file_name: str, new_stem: str) -> Path:
+        screenshots_dir = self.get_instance_screenshots_dir(instance)
+        source = _safe_local_path_join(screenshots_dir, file_name)
+        if not source.is_file():
+            raise FileNotFoundError(f"Screenshot not found: {file_name}")
+
+        cleaned = _slugify_filename(new_stem)
+        if not cleaned:
+            raise ValueError("Screenshot name cannot be empty.")
+
+        target = screenshots_dir / f"{cleaned}{source.suffix.lower()}"
+        if target.exists() and target.resolve() != source.resolve():
+            raise FileExistsError(f"A screenshot named '{target.name}' already exists.")
+
+        source.rename(target)
+        return target
+
+    def delete_screenshots(self, instance: InstanceRecord, file_names: list[str]) -> None:
+        screenshots_dir = self.get_instance_screenshots_dir(instance)
+        for file_name in file_names:
+            target = _safe_local_path_join(screenshots_dir, file_name)
+            if target.is_file():
+                target.unlink()
+
     def prepare_install_request(
         self,
         name: str,
@@ -564,8 +879,12 @@ class LauncherService:
         final_dir = Path(request.final_dir)
         if not stage_dir.exists():
             raise FileNotFoundError(f"Missing staging directory: {stage_dir}")
-        if final_dir.exists():
+        replace_existing = request.operation in {"reinstall", "copy_userdata"}
+        existing_metadata: dict[str, Any] = {}
+        if final_dir.exists() and not replace_existing:
             raise FileExistsError(f"Instance directory already exists: {final_dir}")
+        if replace_existing and (final_dir / "instance.json").is_file():
+            existing_metadata = json.loads((final_dir / "instance.json").read_text(encoding="utf-8"))
 
         resolved_icon = result.icon_path or request.icon_path
         if result.staged_icon_path:
@@ -581,12 +900,14 @@ class LauncherService:
             "mod_loader_id": result.mod_loader_id,
             "mod_loader_version": result.mod_loader_version,
             "icon_path": self._normalize_icon_reference(resolved_icon),
-            "created_at": _utc_now(),
-            "last_played": None,
+            "created_at": existing_metadata.get("created_at", _utc_now()),
+            "last_played": existing_metadata.get("last_played"),
             "memory_mb": _coerce_memory_mb(request.memory_mb),
-            "total_played_seconds": 0,
+            "total_played_seconds": _coerce_non_negative_int(existing_metadata.get("total_played_seconds")),
         }
         (stage_dir / "instance.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        if replace_existing and final_dir.exists():
+            shutil.rmtree(final_dir, ignore_errors=True)
         shutil.move(str(stage_dir), str(final_dir))
 
         instance = InstanceRecord.from_metadata(metadata, final_dir)
@@ -714,6 +1035,7 @@ class LauncherService:
             "launcherVersion": "0.1",
             "gameDirectory": str(game_directory),
             "jvmArguments": [f"-Xmx{resolved_memory}M"],
+            "enableLoggingConfig": True,
         }
 
     def launch_instance(self, instance: InstanceRecord, player_name: str) -> subprocess.Popen[Any]:
@@ -792,6 +1114,23 @@ class LauncherService:
             return
         self._write_accounts_payload({"accounts": ["player1"], "active": "player1"})
 
+    def _read_background_payload(self) -> dict[str, Any]:
+        payload = {"mode": "default"}
+        if not self.background_settings_file.is_file():
+            return payload
+        try:
+            loaded = json.loads(self.background_settings_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return payload
+        if not isinstance(loaded, dict):
+            return payload
+        if _optional_str(loaded.get("mode")) == "custom" and _optional_str(loaded.get("file_name")):
+            return {"mode": "custom", "file_name": str(loaded["file_name"])}
+        return payload
+
+    def _write_background_payload(self, payload: dict[str, Any]) -> None:
+        self.background_settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
     def _copy_tree_if_target_empty(self, source: Path, destination: Path) -> None:
         if not source.exists() or not source.is_dir():
             return
@@ -850,6 +1189,17 @@ class LauncherService:
             raise ValueError("Account names must be 32 characters or fewer.")
         return text
 
+    def _allocate_duplicate_name(self, base_name: str) -> str:
+        normalized_base = base_name.strip() or "Instance Copy"
+        existing = {instance.name.lower() for instance in self.load_instances()}
+        if normalized_base.lower() not in existing:
+            return normalized_base
+        for index in range(2, 5000):
+            candidate = f"{normalized_base} {index}"
+            if candidate.lower() not in existing:
+                return candidate
+        raise RuntimeError("Could not allocate a unique instance name.")
+
 
 def run_install_task(task: dict[str, Any], event_queue: Any) -> None:
     try:
@@ -874,6 +1224,10 @@ def run_install_task(task: dict[str, Any], event_queue: Any) -> None:
             result = _run_modpack_import(request, callback, event_queue)
         elif request.operation == "import_minecraft":
             result = _run_minecraft_directory_import(request, callback, event_queue)
+        elif request.operation == "reinstall":
+            result = _run_reinstall(request, callback, event_queue)
+        elif request.operation == "copy_userdata":
+            result = _run_copy_userdata(request, callback, event_queue)
         else:
             raise ValueError(f"Unsupported install operation: {request.operation}")
 
@@ -948,6 +1302,88 @@ def _run_standard_install(
         installed_version=installed_version,
         mod_loader_id=request.mod_loader_id,
         mod_loader_version=request.mod_loader_version,
+        icon_path=request.icon_path,
+    )
+
+
+def _run_reinstall(
+    request: InstallRequest,
+    callback: dict[str, Any],
+    event_queue: Any,
+) -> InstallResult:
+    service = LauncherService(Path(__file__).resolve().parents[2])
+    existing_instance = service.get_instance(request.instance_id)
+    if existing_instance is None:
+        raise FileNotFoundError("The instance being reinstalled no longer exists.")
+
+    vanilla_version = _required_str(request.vanilla_version, "Minecraft version")
+    installed_version = _install_dependency_stack(
+        vanilla_version,
+        request.mod_loader_id,
+        request.mod_loader_version,
+        Path(request.minecraft_dir),
+        callback,
+        event_queue,
+    )
+
+    if request.copy_source_instance_id and request.copy_user_data:
+        _queue_event(event_queue, "status", text="Restoring instance data")
+        _queue_event(event_queue, "log", text=f"Restoring saved data from {existing_instance.name}")
+        _copy_selected_user_data(
+            existing_instance.minecraft_dir,
+            Path(request.minecraft_dir),
+            request.copy_user_data,
+            event_queue,
+        )
+
+    return InstallResult(
+        name=request.name,
+        vanilla_version=vanilla_version,
+        installed_version=installed_version,
+        mod_loader_id=request.mod_loader_id,
+        mod_loader_version=request.mod_loader_version,
+        icon_path=request.icon_path,
+    )
+
+
+def _run_copy_userdata(
+    request: InstallRequest,
+    callback: dict[str, Any],
+    event_queue: Any,
+) -> InstallResult:
+    del callback
+    service = LauncherService(Path(__file__).resolve().parents[2])
+    source_instance = service.get_instance(_required_str(request.copy_source_instance_id, "Copy source instance"))
+    target_instance = service.get_instance(request.instance_id)
+    if source_instance is None:
+        raise FileNotFoundError("The selected source instance no longer exists.")
+    if target_instance is None:
+        raise FileNotFoundError("The target instance no longer exists.")
+
+    stage_dir = Path(request.stage_dir)
+    minecraft_dir = Path(request.minecraft_dir)
+
+    _queue_event(event_queue, "status", text="Staging current instance")
+    _queue_event(event_queue, "log", text=f"Creating a staged copy of {target_instance.name}")
+    _copy_tree_with_progress(target_instance.root_dir, stage_dir, event_queue, "Staging current instance")
+
+    if request.copy_user_data:
+        _queue_event(event_queue, "status", text="Replacing selected files")
+        _queue_event(event_queue, "log", text=f"Replacing data from {source_instance.name}")
+        _remove_selected_user_data(minecraft_dir, request.copy_user_data)
+        _copy_selected_user_data(
+            source_instance.minecraft_dir,
+            minecraft_dir,
+            request.copy_user_data,
+            event_queue,
+        )
+
+    return InstallResult(
+        name=target_instance.name,
+        vanilla_version=target_instance.vanilla_version,
+        installed_version=target_instance.installed_version,
+        mod_loader_id=target_instance.mod_loader_id,
+        mod_loader_version=target_instance.mod_loader_version,
         icon_path=request.icon_path,
     )
 
@@ -1652,6 +2088,17 @@ def _copy_selected_user_data(source_root: Path, destination_root: Path, selected
     _queue_event(event_queue, "status", text="Copying selected instance data")
 
 
+def _remove_selected_user_data(destination_root: Path, selected_entries: list[str]) -> None:
+    for entry_name in _sanitize_copy_user_data(selected_entries):
+        target_path = _safe_local_path_join(destination_root, entry_name)
+        if not target_path.exists():
+            continue
+        if target_path.is_dir():
+            shutil.rmtree(target_path, ignore_errors=True)
+        else:
+            target_path.unlink(missing_ok=True)
+
+
 def _copy_tree_with_progress(source: Path, destination: Path, event_queue: Any, status_text: str) -> None:
     files = [path for path in source.rglob("*") if path.is_file()]
     _queue_event(event_queue, "max", value=max(1, len(files)))
@@ -1773,6 +2220,22 @@ def _format_release_date(value: Any) -> str:
     return "Unknown"
 
 
+def _format_file_timestamp(path: Path) -> str:
+    try:
+        modified = datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return "Unknown"
+    return modified.strftime("%m/%d/%y %I:%M %p")
+
+
+def _format_screenshot_label(path: Path) -> str:
+    try:
+        modified = datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return path.stem
+    return modified.strftime("%Y-%m-%d %I:%M:%S %p")
+
+
 def _format_version_type(version_type: str) -> str:
     normalized = version_type.replace("_", " ").strip()
     if not normalized:
@@ -1793,6 +2256,185 @@ def _slugify(text: str) -> str:
             previous_dash = True
 
     return "".join(result).strip("-")
+
+
+def _slugify_filename(text: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", text.strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .-_")
+    return cleaned
+
+
+def _friendly_archive_name(file_name: str) -> str:
+    display_name = file_name[:-9] if file_name.lower().endswith(".disabled") else file_name
+    stem = Path(display_name).stem
+    return stem.replace("_", " ").replace("-", " ").strip() or stem
+
+
+def _read_mod_metadata(path: Path, cache_root: Path) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "name": _friendly_archive_name(path.name),
+        "version": "Unknown",
+        "provider": "Unknown",
+        "icon_path": None,
+    }
+
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            names = set(archive.namelist())
+            manifest = _read_manifest_properties(archive)
+
+            if "fabric.mod.json" in names:
+                data = json.loads(_read_text_from_zip(archive, "fabric.mod.json") or "{}")
+                metadata.update(_mod_metadata_from_fabric(data))
+            elif "quilt.mod.json" in names:
+                data = json.loads(_read_text_from_zip(archive, "quilt.mod.json") or "{}")
+                metadata.update(_mod_metadata_from_quilt(data))
+            elif "META-INF/neoforge.mods.toml" in names:
+                metadata.update(_mod_metadata_from_toml(_read_text_from_zip(archive, "META-INF/neoforge.mods.toml")))
+            elif "META-INF/mods.toml" in names:
+                metadata.update(_mod_metadata_from_toml(_read_text_from_zip(archive, "META-INF/mods.toml")))
+            elif "mcmod.info" in names:
+                raw = _read_text_from_zip(archive, "mcmod.info")
+                if raw:
+                    metadata.update(_mod_metadata_from_mcmod_info(json.loads(raw)))
+
+            icon_reference = metadata.get("icon_reference")
+            if not metadata.get("version") or metadata.get("version") == "${file.jarVersion}":
+                metadata["version"] = manifest.get("Implementation-Version") or manifest.get("Specification-Version") or "Unknown"
+            if not metadata.get("name") or metadata.get("name") == "Unknown":
+                metadata["name"] = manifest.get("Implementation-Title") or metadata["name"]
+
+            extracted_icon = _extract_mod_icon(archive, icon_reference, path, cache_root)
+            if extracted_icon is not None:
+                metadata["icon_path"] = str(extracted_icon.resolve())
+    except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError, tomllib.TOMLDecodeError):
+        return metadata
+
+    metadata.pop("icon_reference", None)
+    return metadata
+
+
+def _mod_metadata_from_fabric(data: dict[str, Any]) -> dict[str, Any]:
+    authors = data.get("authors")
+    contact = data.get("contact") if isinstance(data.get("contact"), dict) else {}
+    icon_reference = data.get("icon")
+    if isinstance(icon_reference, dict):
+        ordered_icons = [value for _, value in sorted(icon_reference.items(), key=lambda item: item[0])]
+        icon_reference = ordered_icons[-1] if ordered_icons else None
+    return {
+        "name": _optional_str(data.get("name")) or _optional_str(data.get("id")) or "Unknown",
+        "version": _optional_str(data.get("version")) or "Unknown",
+        "provider": _guess_provider(contact.get("homepage"), contact.get("sources"), authors),
+        "icon_reference": _optional_str(icon_reference),
+    }
+
+
+def _mod_metadata_from_quilt(data: dict[str, Any]) -> dict[str, Any]:
+    quilt_loader = data.get("quilt_loader") if isinstance(data.get("quilt_loader"), dict) else {}
+    metadata = quilt_loader.get("metadata") if isinstance(quilt_loader.get("metadata"), dict) else {}
+    contributors = metadata.get("contributors")
+    authors = list(contributors.keys()) if isinstance(contributors, dict) else contributors
+    contact = metadata.get("contact") if isinstance(metadata.get("contact"), dict) else {}
+    icon_reference = metadata.get("icon")
+    if isinstance(icon_reference, dict):
+        ordered_icons = [value for _, value in sorted(icon_reference.items(), key=lambda item: item[0])]
+        icon_reference = ordered_icons[-1] if ordered_icons else None
+    return {
+        "name": _optional_str(metadata.get("name")) or _optional_str(quilt_loader.get("id")) or "Unknown",
+        "version": _optional_str(quilt_loader.get("version")) or "Unknown",
+        "provider": _guess_provider(contact.get("homepage"), contact.get("sources"), authors),
+        "icon_reference": _optional_str(icon_reference),
+    }
+
+
+def _mod_metadata_from_toml(text: str) -> dict[str, Any]:
+    if not text.strip():
+        return {}
+    data = tomllib.loads(text)
+    mods = data.get("mods")
+    if not isinstance(mods, list) or not mods:
+        return {}
+    first_mod = mods[0] if isinstance(mods[0], dict) else {}
+    return {
+        "name": _optional_str(first_mod.get("displayName")) or _optional_str(first_mod.get("modId")) or "Unknown",
+        "version": _optional_str(first_mod.get("version")) or "Unknown",
+        "provider": _guess_provider(first_mod.get("displayURL"), first_mod.get("authors")),
+        "icon_reference": _optional_str(first_mod.get("logoFile")),
+    }
+
+
+def _mod_metadata_from_mcmod_info(data: Any) -> dict[str, Any]:
+    entry = data[0] if isinstance(data, list) and data else data
+    if not isinstance(entry, dict):
+        return {}
+    return {
+        "name": _optional_str(entry.get("name")) or _optional_str(entry.get("modid")) or "Unknown",
+        "version": _optional_str(entry.get("version")) or "Unknown",
+        "provider": _guess_provider(entry.get("url"), entry.get("authorList")),
+        "icon_reference": _optional_str(entry.get("logoFile")),
+    }
+
+
+def _read_manifest_properties(archive: zipfile.ZipFile) -> dict[str, str]:
+    manifest_text = _read_text_from_zip(archive, "META-INF/MANIFEST.MF")
+    properties: dict[str, str] = {}
+    if not manifest_text:
+        return properties
+    for line in manifest_text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        properties[key.strip()] = value.strip()
+    return properties
+
+
+def _guess_provider(*values: Any) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            stripped = value.strip()
+            if stripped.startswith("http://") or stripped.startswith("https://"):
+                parsed = urlparse(stripped)
+                host = (parsed.netloc or "").lower().removeprefix("www.")
+                if host:
+                    return host
+            return stripped.split(",")[0].strip() or "Unknown"
+        if isinstance(value, dict):
+            provider = _guess_provider(*value.values())
+            if provider != "Unknown":
+                return provider
+        if isinstance(value, list):
+            provider = _guess_provider(*value)
+            if provider != "Unknown":
+                return provider
+    return "Unknown"
+
+
+def _extract_mod_icon(
+    archive: zipfile.ZipFile,
+    icon_reference: Any,
+    mod_path: Path,
+    cache_root: Path,
+) -> Path | None:
+    icon_name = _optional_str(icon_reference)
+    if not icon_name:
+        return None
+    normalized = icon_name.replace("\\", "/").strip("/")
+    if not normalized or normalized not in archive.namelist():
+        return None
+    if Path(normalized).suffix.lower() not in IMAGE_SUFFIXES:
+        return None
+
+    try:
+        icon_bytes = archive.read(normalized)
+    except KeyError:
+        return None
+
+    digest = hashlib.sha1(f"{mod_path.resolve()}::{mod_path.stat().st_mtime}::{normalized}".encode("utf-8")).hexdigest()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    target = cache_root / f"{digest}{Path(normalized).suffix.lower()}"
+    if not target.exists():
+        target.write_bytes(icon_bytes)
+    return target
 
 
 def _format_copy_entry_label(entry: Path) -> str:

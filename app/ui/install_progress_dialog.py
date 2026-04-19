@@ -41,7 +41,7 @@ class InstallProgressDialog(QDialog):
         self._last_status = ""
 
         self.setObjectName("installProgressDialog")
-        self.setWindowTitle("Installing Instance" if request.operation == "create" else "Importing Instance")
+        self.setWindowTitle(_operation_window_title(request.operation))
         self.resize(760, 420)
         self.setMinimumSize(660, 380)
 
@@ -65,12 +65,12 @@ class InstallProgressDialog(QDialog):
 
         text_column = QVBoxLayout()
         text_column.setSpacing(6)
-        title_prefix = "Installing" if self.request.operation == "create" else "Importing"
+        title_prefix = _operation_title_prefix(self.request.operation)
         self.title_label = QLabel(f"{title_prefix} {self.request.name}")
         self.title_label.setObjectName("installProgressTitle")
         text_column.addWidget(self.title_label)
 
-        initial_status = "Preparing instance directory" if self.request.operation == "create" else "Preparing import"
+        initial_status = _operation_initial_status(self.request.operation)
         self.status_label = QLabel(initial_status)
         self.status_label.setObjectName("installProgressStatus")
         text_column.addWidget(self.status_label)
@@ -110,7 +110,7 @@ class InstallProgressDialog(QDialog):
         )
         self._process.start()
         self._poll_timer.start()
-        prefix = "install" if self.request.operation == "create" else "import"
+        prefix = _operation_log_prefix(self.request.operation)
         self._append_log(f"Starting {prefix} for {self.request.name}")
 
     def _poll_events(self) -> None:
@@ -205,8 +205,8 @@ class InstallProgressDialog(QDialog):
 
         answer = QMessageBox.question(
             self,
-            "Abort Installation",
-            "Abort this installation and remove the instance being created?",
+            _abort_dialog_title(self.request.operation),
+            _abort_dialog_message(self.request.operation),
         )
         if answer != QMessageBox.Yes:
             return
@@ -240,8 +240,8 @@ class InstallProgressDialog(QDialog):
         if not self._completed and not self._aborting:
             answer = QMessageBox.question(
                 self,
-                "Abort Installation",
-                "Closing this window will abort the installation. Continue?",
+                _abort_dialog_title(self.request.operation),
+                "Closing this window will stop the current task. Continue?",
             )
             if answer != QMessageBox.Yes:
                 event.ignore()
@@ -250,3 +250,57 @@ class InstallProgressDialog(QDialog):
 
         self._terminate_process()
         super().closeEvent(event)
+
+
+def _operation_window_title(operation: str) -> str:
+    return {
+        "create": "Installing Instance",
+        "import_modpack": "Importing Instance",
+        "import_minecraft": "Importing Instance",
+        "reinstall": "Reinstalling Instance",
+        "copy_userdata": "Copying Instance Data",
+    }.get(operation, "Running Instance Task")
+
+
+def _operation_title_prefix(operation: str) -> str:
+    return {
+        "create": "Installing",
+        "import_modpack": "Importing",
+        "import_minecraft": "Importing",
+        "reinstall": "Reinstalling",
+        "copy_userdata": "Copying",
+    }.get(operation, "Running")
+
+
+def _operation_initial_status(operation: str) -> str:
+    return {
+        "create": "Preparing instance directory",
+        "import_modpack": "Preparing import",
+        "import_minecraft": "Preparing import",
+        "reinstall": "Preparing replacement files",
+        "copy_userdata": "Preparing staged copy",
+    }.get(operation, "Preparing task")
+
+
+def _operation_log_prefix(operation: str) -> str:
+    return {
+        "create": "install",
+        "import_modpack": "import",
+        "import_minecraft": "import",
+        "reinstall": "reinstall",
+        "copy_userdata": "copy",
+    }.get(operation, "task")
+
+
+def _abort_dialog_title(operation: str) -> str:
+    return {
+        "copy_userdata": "Stop Copy",
+        "reinstall": "Stop Reinstall",
+    }.get(operation, "Abort Installation")
+
+
+def _abort_dialog_message(operation: str) -> str:
+    return {
+        "copy_userdata": "Stop copying files into this instance?",
+        "reinstall": "Stop reinstalling this instance?",
+    }.get(operation, "Abort this installation and remove the instance being created?")

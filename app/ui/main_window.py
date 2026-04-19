@@ -5,17 +5,19 @@ from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 from core.launcher import InstanceRecord, LauncherService
 from ui.accounts_dialog import AccountsDialog
 from ui.add_instance_dialog import AddInstanceDialog
+from ui.edit_instance_dialog import EditInstanceDialog
 from ui.install_progress_dialog import InstallProgressDialog
 from ui.instance_card import InstanceCard
 from ui.responsive import fitted_window_size, scaled_px
+from ui.settings_dialog import SettingsDialog
 from ui.sidebar import SideBar
-from ui.topbar import TopBar
+from ui.topbar import ActionPopup, PopupAction, TopBar
 
 
 class LaunchWorker(QThread):
@@ -49,6 +51,11 @@ class MainWindow(QWidget):
         self._running_processes: dict[str, Any] = {}
         self._launch_started_at: dict[str, float] = {}
         self._progress_dialogs: list[InstallProgressDialog] = []
+        self._edit_dialogs: dict[str, EditInstanceDialog] = {}
+        self._settings_dialog: SettingsDialog | None = None
+        self._instance_popup_target_id: str | None = None
+        self._background_pixmap = QPixmap()
+        self._background_path: str | None = None
 
         self.setObjectName("appRoot")
         self.setWindowTitle("NOTG Launcher")
@@ -57,6 +64,7 @@ class MainWindow(QWidget):
         self._screen_connected = False
 
         self._build_ui()
+        self._refresh_background()
         self._apply_responsive_layout()
         self.refresh_instances()
 
@@ -74,6 +82,24 @@ class MainWindow(QWidget):
     def resizeEvent(self, event) -> None:
         self._apply_responsive_layout()
         super().resizeEvent(event)
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        if not self._background_pixmap.isNull():
+            scaled = self._background_pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            source_x = max(0, int((scaled.width() - self.width()) / 2))
+            source_y = max(0, int((scaled.height() - self.height()) / 2))
+            painter.drawPixmap(0, 0, scaled, source_x, source_y, self.width(), self.height())
+            painter.fillRect(self.rect(), QColor(6, 11, 20, 118))
+        else:
+            gradient = QLinearGradient(0, 0, 0, self.height())
+            gradient.setColorAt(0.0, QColor("#162742"))
+            gradient.setColorAt(0.35, QColor("#0e192d"))
+            gradient.setColorAt(1.0, QColor("#08111d"))
+            painter.fillRect(self.rect(), gradient)
 
     def _ensure_screen_tracking(self) -> None:
         handle = self.windowHandle()
@@ -133,8 +159,10 @@ class MainWindow(QWidget):
         self.instance_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.instance_list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         self.instance_list.setGridSize(QSize(218, 234))
+        self.instance_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.instance_list.currentItemChanged.connect(self._handle_current_item_changed)
         self.instance_list.itemDoubleClicked.connect(self._handle_instance_double_clicked)
+        self.instance_list.customContextMenuRequested.connect(self._show_instance_context_menu)
         list_layout.addWidget(self.instance_list, 1)
         self.content_stack.addWidget(list_page)
 
@@ -184,6 +212,9 @@ class MainWindow(QWidget):
         playtime_layout.addWidget(self.playtime_total)
 
         main_layout.addWidget(self.playtime_bar)
+
+        self.instance_popup = ActionPopup(self)
+        self.instance_popup.action_triggered.connect(self._handle_instance_popup_action)
 
     def _apply_responsive_layout(self) -> None:
         outer_margin = scaled_px(self, 20, minimum=12, maximum=24)
@@ -248,6 +279,7 @@ class MainWindow(QWidget):
                     break
         self.instance_list.setCurrentRow(selected_row)
         self._update_playtime_bar()
+        self._sync_open_edit_dialogs(instances)
 
     def _handle_topbar_action(self, action: str) -> None:
         if action == "Add Instance":
@@ -259,7 +291,7 @@ class MainWindow(QWidget):
             return
 
         if action == "Settings":
-            QMessageBox.information(self, "Settings", "Settings are not implemented yet.")
+            self._open_settings_dialog()
             return
 
         if action == "Manage Accounts":
@@ -335,6 +367,15 @@ class MainWindow(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(instance.root_dir)))
             return
 
+        if action == "Edit":
+            instance = self._selected_item.data(Qt.UserRole)
+            self._open_edit_dialog(instance)
+            return
+
+        if action == "Copy":
+            self._copy_selected_instance()
+            return
+
         if action == "Delete":
             self._delete_selected_instance()
             return
@@ -370,6 +411,17 @@ class MainWindow(QWidget):
         self._running_processes.pop(instance.instance_id, None)
         self._set_instance_status(instance.instance_id, "Quit")
 
+    def _copy_selected_instance(self) -> None:
+        if self._selected_item is None:
+            return
+        instance = self._selected_item.data(Qt.UserRole)
+        try:
+            duplicated = self.service.duplicate_instance(instance)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Copy Instance", str(exc))
+            return
+        self.refresh_instances(select_instance_id=duplicated.instance_id)
+
     def _delete_selected_instance(self) -> None:
         if self._selected_item is None:
             return
@@ -393,6 +445,9 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "Delete Instance", str(exc))
             return
 
+        dialog = self._edit_dialogs.pop(instance.instance_id, None)
+        if dialog is not None:
+            dialog.close()
         self.refresh_instances()
 
     def _handle_launch_success(self, instance: InstanceRecord, process: Any) -> None:
@@ -424,6 +479,9 @@ class MainWindow(QWidget):
             card.version = updated.version_label
             card.icon_path = updated.icon_path
             card.update()
+            dialog = self._edit_dialogs.get(updated.instance_id)
+            if dialog is not None:
+                dialog.sync_runtime_state(updated)
             if item is self._selected_item:
                 self.sidebar.set_instance(updated)
                 self._update_playtime_bar()
@@ -439,6 +497,9 @@ class MainWindow(QWidget):
             updated.status = status
             item.setData(Qt.UserRole, updated)
             self._cards[index] = (item, self._cards[index][1], updated)
+            dialog = self._edit_dialogs.get(updated.instance_id)
+            if dialog is not None:
+                dialog.sync_runtime_state(updated)
             if item is self._selected_item:
                 self.sidebar.update_status(status)
                 self._update_playtime_bar()
@@ -451,6 +512,105 @@ class MainWindow(QWidget):
         dialog = AccountsDialog(self.service, self)
         dialog.exec()
         self._sync_accounts_ui()
+
+    def _open_settings_dialog(self) -> None:
+        if self._settings_dialog is None:
+            self._settings_dialog = SettingsDialog(self.service, self)
+            self._settings_dialog.background_changed.connect(lambda *_: self._refresh_background())
+            self._settings_dialog.destroyed.connect(lambda *_: setattr(self, "_settings_dialog", None))
+        self._settings_dialog.show()
+        self._settings_dialog.raise_()
+        self._settings_dialog.activateWindow()
+
+    def _refresh_background(self) -> None:
+        self._background_path = self.service.get_active_background_path()
+        self._background_pixmap = QPixmap(self._background_path) if self._background_path else QPixmap()
+        self.update()
+
+    def _open_edit_dialog(self, instance: InstanceRecord, *, page: str = "Minecraft Log") -> None:
+        dialog = self._edit_dialogs.get(instance.instance_id)
+        if dialog is None:
+            dialog = EditInstanceDialog(self.service, instance, self, initial_page=page)
+            dialog.instance_changed.connect(self._handle_dialog_instance_changed)
+            dialog.launch_requested.connect(lambda current_instance: self._launch_instance_by_id(current_instance.instance_id))
+            dialog.kill_requested.connect(lambda current_instance: self._kill_instance_by_id(current_instance.instance_id))
+            dialog.destroyed.connect(lambda *_, instance_id=instance.instance_id: self._edit_dialogs.pop(instance_id, None))
+            self._edit_dialogs[instance.instance_id] = dialog
+        else:
+            dialog._set_page(page)
+            dialog.sync_runtime_state(instance)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _handle_dialog_instance_changed(self, instance: InstanceRecord) -> None:
+        self.refresh_instances(select_instance_id=instance.instance_id)
+        dialog = self._edit_dialogs.get(instance.instance_id)
+        if dialog is not None:
+            dialog.sync_runtime_state(instance)
+
+    def _launch_instance_by_id(self, instance_id: str) -> None:
+        item = self._item_for_instance_id(instance_id)
+        if item is None:
+            return
+        self.instance_list.setCurrentItem(item)
+        self._launch_selected_instance()
+
+    def _kill_instance_by_id(self, instance_id: str) -> None:
+        item = self._item_for_instance_id(instance_id)
+        if item is None:
+            return
+        self.instance_list.setCurrentItem(item)
+        self._kill_selected_instance()
+
+    def _item_for_instance_id(self, instance_id: str) -> QListWidgetItem | None:
+        for item, _, instance in self._cards:
+            if instance.instance_id == instance_id:
+                return item
+        return None
+
+    def _sync_open_edit_dialogs(self, instances: list[InstanceRecord]) -> None:
+        instances_by_id = {instance.instance_id: instance for instance in instances}
+        for instance_id, dialog in list(self._edit_dialogs.items()):
+            updated = instances_by_id.get(instance_id)
+            if updated is None:
+                dialog.close()
+                continue
+            dialog.sync_runtime_state(updated)
+
+    def _show_instance_context_menu(self, pos) -> None:
+        item = self.instance_list.itemAt(pos)
+        if item is None:
+            return
+        self.instance_list.setCurrentItem(item)
+        instance = item.data(Qt.UserRole)
+        self._instance_popup_target_id = instance.instance_id
+        self.instance_popup.set_actions(
+            [
+                PopupAction("Edit", "Edit"),
+                PopupAction("Folder", "Folder"),
+                PopupAction("Copy", "Copy"),
+                PopupAction("Delete", "Delete", role="danger", bold=True),
+            ]
+        )
+        self.instance_popup.show_at_global(self.instance_list.viewport().mapToGlobal(pos))
+
+    def _handle_instance_popup_action(self, action: str) -> None:
+        target_id = self._instance_popup_target_id
+        if not target_id:
+            return
+        item = self._item_for_instance_id(target_id)
+        if item is None:
+            return
+        self.instance_list.setCurrentItem(item)
+        if action == "Edit":
+            self._open_edit_dialog(item.data(Qt.UserRole))
+        elif action == "Folder":
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(item.data(Qt.UserRole).root_dir)))
+        elif action == "Copy":
+            self._copy_selected_instance()
+        elif action == "Delete":
+            self._delete_selected_instance()
 
     def _poll_running_processes(self) -> None:
         finished: list[tuple[str, int]] = []
@@ -465,6 +625,14 @@ class MainWindow(QWidget):
             self._running_processes.pop(instance_id, None)
             status = "Quit" if return_code == 0 else "Crashed"
             self._set_instance_status(instance_id, status)
+            if return_code != 0:
+                instance = self.service.get_instance(instance_id)
+                if instance is not None:
+                    instance.status = "Crashed"
+                    self._open_edit_dialog(instance, page="Minecraft Log")
+                    dialog = self._edit_dialogs.get(instance_id)
+                    if dialog is not None:
+                        dialog.notify_crash(return_code)
 
     def _persist_session_playtime(self, instance_id: str) -> None:
         started_at = self._launch_started_at.pop(instance_id, None)
