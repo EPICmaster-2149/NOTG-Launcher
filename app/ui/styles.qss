@@ -1,5 +1,4 @@
 QWidget {
-    background-color: #0a1323;
     color: #e7eefc;
     font-family: "Segoe UI";
     font-size: 14px;
@@ -310,10 +309,10 @@ QListWidget#instanceEditorNavList::item {
     background: rgba(17, 29, 47, 0.82);
     border: 1px solid rgba(61, 88, 126, 0.28);
     border-radius: 9px;
-    padding: 10px 12px;
+    padding: 8px 10px;
     margin: 0 0 6px 0;
     color: #f0f5ff;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 600;
 }
 
@@ -371,6 +370,8 @@ QScrollArea#instanceEditorScroll {
     border: none;
 }
 
+QWidget#instanceListPage,
+QWidget#instanceEmptyPage,
 QScrollArea#instanceEditorScroll > QWidget > QWidget {
     background: transparent;
 }

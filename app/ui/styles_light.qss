@@ -1,5 +1,4 @@
 QWidget {
-    background-color: #f4f7fb;
     color: #17324d;
 }
 
@@ -73,7 +72,7 @@ QStackedWidget#instanceContentStack {
 
 QFrame#sidePanel,
 QFrame#contentSurface {
-    background-color: rgba(247, 250, 255, 0.28);
+    background-color: rgba(247, 250, 255, 0.18);
     border: 1px solid rgba(184, 201, 225, 0.56);
 }
 
@@ -118,6 +117,12 @@ QDialog#settingsDialog {
     );
 }
 
+QWidget#instanceListPage,
+QWidget#instanceEmptyPage,
+QScrollArea#instanceEditorScroll > QWidget > QWidget {
+    background: transparent;
+}
+
 QLabel#editorEyebrow {
     color: #4f78b9;
 }
@@ -143,9 +148,9 @@ QListWidget#instanceEditorNavList::item {
     background: rgba(255, 255, 255, 0.92);
     border: 1px solid rgba(198, 210, 228, 0.9);
     border-radius: 9px;
-    padding: 10px 12px;
+    padding: 8px 10px;
     color: #23405f;
-    font-size: 14px;
+    font-size: 13px;
 }
 
 QListWidget#instanceEditorNavList::item:selected {

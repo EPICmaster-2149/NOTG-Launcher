@@ -220,7 +220,7 @@ THEME_PALETTES: dict[str, dict[str, Any]] = {
     },
     "light": {
         "window": {
-            "overlay": QColor(249, 251, 255, 118),
+            "overlay": QColor(249, 251, 255, 0),
             "gradient": ("#f7f9fd", "#eef3f9", "#e6edf7"),
         },
         "buttons": _button_roles(light=True),

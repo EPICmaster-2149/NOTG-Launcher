@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 from core.ipc import LauncherIpcServer, send_ipc_message
 from core.launcher import LauncherService
 from core.session_monitor import run_session_monitor
+from ui.app_icon import application_icon
 from ui.theme import apply_theme
 
 
@@ -42,6 +43,7 @@ def main():
 
     app = QApplication([])
     app.setApplicationName("NOTG Launcher")
+    app.setWindowIcon(application_icon(service.project_root))
     apply_theme(app, service.get_theme_mode())
 
     from ui.main_window import MainWindow

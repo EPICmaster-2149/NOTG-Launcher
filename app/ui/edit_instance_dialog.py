@@ -6,7 +6,7 @@ from typing import Any
 import psutil
 
 from PySide6.QtCore import QSize, QSortFilterProxyModel, QThread, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QClipboard, QGuiApplication, QIcon, QTextCursor
+from PySide6.QtGui import QClipboard, QGuiApplication, QIcon, QImage, QImageReader, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSizePolicy,
     QStackedWidget,
+    QListView,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
@@ -50,6 +51,84 @@ from ui.icon_utils import load_scaled_icon
 from ui.install_progress_dialog import InstallProgressDialog
 from ui.responsive import fitted_window_size, scaled_px
 from ui.topbar import ModernButton
+
+
+def _read_scaled_image(path: str | Path, width: int, height: int) -> QImage:
+    reader = QImageReader(str(Path(path).resolve()))
+    reader.setAutoTransform(True)
+    if width > 0 and height > 0:
+        source_size = reader.size()
+        if source_size.isValid():
+            reader.setScaledSize(source_size.scaled(QSize(width, height), Qt.KeepAspectRatio))
+    return reader.read()
+
+
+class InstanceAssetWorker(QThread):
+    loaded = Signal(str, int, object)
+    failed = Signal(str, int, str)
+
+    def __init__(
+        self,
+        service: LauncherService,
+        instance: InstanceRecord,
+        job: str,
+        request_id: int,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._service = service
+        self._instance = instance
+        self._job = job
+        self._request_id = request_id
+
+    def run(self) -> None:
+        try:
+            if self._job == "mods":
+                payload = self._service.list_mods(self._instance)
+            elif self._job == "screenshots":
+                payload = self._service.list_screenshots(self._instance)
+            else:
+                raise ValueError(f"Unsupported asset job: {self._job}")
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(self._job, self._request_id, str(exc))
+            return
+
+        if self.isInterruptionRequested():
+            return
+        self.loaded.emit(self._job, self._request_id, payload)
+
+
+class ScreenshotThumbnailWorker(QThread):
+    thumbnail_ready = Signal(int, str, object)
+    failed = Signal(int, str)
+
+    def __init__(
+        self,
+        request_id: int,
+        rows: list[dict[str, Any]],
+        icon_size: QSize,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._request_id = request_id
+        self._rows = list(rows)
+        self._icon_size = QSize(icon_size)
+
+    def run(self) -> None:
+        try:
+            for row in self._rows:
+                if self.isInterruptionRequested():
+                    return
+                image = _read_scaled_image(
+                    str(row["path"]),
+                    self._icon_size.width(),
+                    self._icon_size.height(),
+                )
+                if image.isNull():
+                    continue
+                self.thumbnail_ready.emit(self._request_id, str(row["file_name"]), image)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(self._request_id, str(exc))
 
 
 class EditInstanceDialog(QDialog):
@@ -80,10 +159,17 @@ class EditInstanceDialog(QDialog):
         self._current_loader_id = instance.mod_loader_id
         self._version_request_id = 0
         self._loader_request_id = 0
+        self._mods_request_id = 0
+        self._screenshots_request_id = 0
+        self._thumbnail_request_id = 0
         self._workers: set[QThread] = set()
+        self._thumbnail_worker: QThread | None = None
         self._progress_dialogs: list[InstallProgressDialog] = []
         self._mods_cache: list[dict[str, Any]] = []
         self._screenshots_cache: list[dict[str, Any]] = []
+        self._screenshot_items: dict[str, QListWidgetItem] = {}
+        self._pending_mod_selection: list[str] = []
+        self._pending_screenshot_selection: list[str] = []
         self._copy_source_instances: list[dict[str, str]] = []
         self._ram_slider_step_mb = 256
         self._ram_selected_mb = instance.memory_mb
@@ -128,33 +214,34 @@ class EditInstanceDialog(QDialog):
         self.log_timer.stop()
         for worker in list(self._workers):
             if worker.isRunning():
+                worker.requestInterruption()
                 worker.wait()
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(22, 22, 22, 20)
-        root_layout.setSpacing(14)
+        root_layout.setContentsMargins(18, 18, 18, 16)
+        root_layout.setSpacing(12)
 
         header = QFrame()
         header.setObjectName("instanceEditorHeader")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(22, 18, 22, 18)
-        header_layout.setSpacing(18)
+        header_layout.setContentsMargins(16, 14, 16, 14)
+        header_layout.setSpacing(14)
 
         self.icon_button = HeaderIconButton(self.service.resolve_icon_path(self._selected_icon_path))
         self.icon_button.clicked.connect(self._open_icon_selector)
         header_layout.addWidget(self.icon_button)
 
         name_column = QVBoxLayout()
-        name_column.setSpacing(10)
+        name_column.setSpacing(6)
 
         self.header_title = QLabel("EDIT INSTANCE")
         self.header_title.setObjectName("editorEyebrow")
         name_column.addWidget(self.header_title)
 
         self.name_edit = AccentLineEdit("Rename instance", large=True)
-        self.name_edit.setMinimumHeight(66)
+        self.name_edit.setMinimumHeight(56)
         self.name_edit.setText(self.instance.name)
         self.name_edit.editingFinished.connect(self._save_name_change)
         name_column.addWidget(self.name_edit)
@@ -171,8 +258,8 @@ class EditInstanceDialog(QDialog):
         self.nav_frame = QFrame()
         self.nav_frame.setObjectName("instanceEditorNav")
         nav_layout = QVBoxLayout(self.nav_frame)
-        nav_layout.setContentsMargins(14, 18, 14, 18)
-        nav_layout.setSpacing(12)
+        nav_layout.setContentsMargins(12, 14, 12, 14)
+        nav_layout.setSpacing(10)
 
         nav_title = QLabel("Sections")
         nav_title.setObjectName("editorNavTitle")
@@ -180,10 +267,13 @@ class EditInstanceDialog(QDialog):
 
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("instanceEditorNavList")
-        self.nav_list.setSpacing(8)
+        self.nav_list.setSpacing(6)
         self.nav_list.setFrameShape(QFrame.NoFrame)
         self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.nav_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.nav_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.nav_list.setWordWrap(True)
+        self.nav_list.setTextElideMode(Qt.ElideNone)
         self.nav_list.currentRowChanged.connect(self._update_page_state)
         for title in self.PAGE_NAMES:
             self.nav_list.addItem(QListWidgetItem(title))
@@ -193,16 +283,16 @@ class EditInstanceDialog(QDialog):
         content = QFrame()
         content.setObjectName("instanceEditorContent")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(24, 20, 24, 20)
-        content_layout.setSpacing(14)
+        content_layout.setContentsMargins(18, 16, 18, 16)
+        content_layout.setSpacing(10)
 
         self.page_title = QLabel("Minecraft Log")
         self.page_title.setObjectName("editorCompactPageTitle")
         content_layout.addWidget(self.page_title)
 
-        divider = QFrame()
-        divider.setObjectName("editorPrimaryDivider")
-        content_layout.addWidget(divider)
+        self.page_divider = QFrame()
+        self.page_divider.setObjectName("editorPrimaryDivider")
+        content_layout.addWidget(self.page_divider)
 
         self.page_scroll = QScrollArea()
         self.page_scroll.setObjectName("instanceEditorScroll")
@@ -231,15 +321,15 @@ class EditInstanceDialog(QDialog):
         footer.setSpacing(12)
         footer.addStretch()
 
-        self.launch_button = ModernButton("Launch", role="accent", height=42, icon_size=0)
+        self.launch_button = ModernButton("Launch", role="accent", height=38, icon_size=0)
         self.launch_button.clicked.connect(lambda: self.launch_requested.emit(self.instance))
         footer.addWidget(self.launch_button)
 
-        self.kill_button = ModernButton("Force Stop", role="danger", height=42, icon_size=0)
+        self.kill_button = ModernButton("Force Stop", role="danger", height=38, icon_size=0)
         self.kill_button.clicked.connect(lambda: self.kill_requested.emit(self.instance))
         footer.addWidget(self.kill_button)
 
-        self.ok_button = ModernButton("OK", role="sidebar", height=42, icon_size=0, minimum_width=106, horizontal_padding=26)
+        self.ok_button = ModernButton("OK", role="sidebar", height=38, icon_size=0, minimum_width=94, horizontal_padding=22)
         self.ok_button.clicked.connect(self.accept)
         footer.addWidget(self.ok_button)
         content_layout.addLayout(footer)
@@ -250,22 +340,22 @@ class EditInstanceDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(10)
+        top_row.setSpacing(8)
 
         title = QLabel("Minecraft Log")
         title.setObjectName("editorSectionTitle")
         top_row.addWidget(title)
         top_row.addStretch()
 
-        self.log_copy_button = ModernButton("Copy", role="sidebar", height=38, icon_size=0, minimum_width=92)
+        self.log_copy_button = ModernButton("Copy", role="sidebar", height=36, icon_size=0, minimum_width=84, horizontal_padding=20)
         self.log_copy_button.clicked.connect(self._copy_log_contents)
         top_row.addWidget(self.log_copy_button)
 
-        self.log_clear_button = ModernButton("Clear", role="sidebar", height=38, icon_size=0, minimum_width=92)
+        self.log_clear_button = ModernButton("Clear", role="sidebar", height=36, icon_size=0, minimum_width=84, horizontal_padding=20)
         self.log_clear_button.clicked.connect(self._clear_log_view)
         top_row.addWidget(self.log_clear_button)
         layout.addLayout(top_row)
@@ -283,17 +373,17 @@ class EditInstanceDialog(QDialog):
 
         bottom_row = QHBoxLayout()
         bottom_row.setContentsMargins(0, 0, 0, 0)
-        bottom_row.setSpacing(10)
+        bottom_row.setSpacing(8)
 
         self.log_search = AccentLineEdit("Search log text")
         self.log_search.returnPressed.connect(self._find_in_log)
         bottom_row.addWidget(self.log_search, 1)
 
-        self.log_find_button = ModernButton("Find", role="sidebar", height=38, icon_size=0, minimum_width=90)
+        self.log_find_button = ModernButton("Find", role="sidebar", height=36, icon_size=0, minimum_width=80, horizontal_padding=20)
         self.log_find_button.clicked.connect(self._find_in_log)
         bottom_row.addWidget(self.log_find_button)
 
-        self.log_bottom_button = ModernButton("Bottom", role="sidebar", height=38, icon_size=0, minimum_width=96)
+        self.log_bottom_button = ModernButton("Bottom", role="sidebar", height=36, icon_size=0, minimum_width=88, horizontal_padding=20)
         self.log_bottom_button.clicked.connect(self._scroll_log_to_bottom)
         bottom_row.addWidget(self.log_bottom_button)
         layout.addLayout(bottom_row)
@@ -303,18 +393,13 @@ class EditInstanceDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
-
-        info_label = QLabel("Select a different Minecraft version or mod loader, then reinstall this instance with the new stack.")
-        info_label.setObjectName("editorStatusText")
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
+        layout.setSpacing(10)
 
         selection_surface = QFrame()
         selection_surface.setObjectName("editorSelectionSurface")
         selection_layout = QVBoxLayout(selection_surface)
-        selection_layout.setContentsMargins(18, 18, 18, 18)
-        selection_layout.setSpacing(18)
+        selection_layout.setContentsMargins(14, 14, 14, 14)
+        selection_layout.setSpacing(14)
         selection_layout.addWidget(self._build_version_section(), 1)
 
         section_divider = QFrame()
@@ -331,18 +416,19 @@ class EditInstanceDialog(QDialog):
         self.version_notice.setObjectName("editorStatusText")
         install_row.addWidget(self.version_notice, 1)
 
-        self.version_install_button = ModernButton("Install", role="accent", height=42, icon_size=0)
+        self.version_install_button = ModernButton("Install", role="accent", height=38, icon_size=0, minimum_width=96, horizontal_padding=22)
         self.version_install_button.setEnabled(False)
         self.version_install_button.clicked.connect(self._install_selected_version)
         install_row.addWidget(self.version_install_button)
         layout.addLayout(install_row)
+        self.loader_buttons.get(self.instance.mod_loader_id, self.loader_buttons[None]).setChecked(True)
         return page
 
     def _build_mods_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(8)
 
         self.mods_title = QLabel("Mods (0 installed)")
         self.mods_title.setObjectName("editorSectionTitle")
@@ -360,44 +446,48 @@ class EditInstanceDialog(QDialog):
         self.mods_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.mods_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.mods_table.setAlternatingRowColors(True)
+        self.mods_table.setWordWrap(False)
         self.mods_table.verticalHeader().setVisible(False)
         self.mods_table.horizontalHeader().setHighlightSections(False)
+        self.mods_table.horizontalHeader().setStretchLastSection(False)
+        self.mods_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.mods_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.mods_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.mods_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.mods_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.mods_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
         self.mods_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.mods_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.mods_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.mods_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)
+        self.mods_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Interactive)
         self.mods_table.itemSelectionChanged.connect(self._sync_mod_actions)
         content_row.addWidget(self.mods_table, 1)
 
         mod_actions = QFrame()
         mod_actions.setObjectName("editorSidePanel")
         mod_actions_layout = QVBoxLayout(mod_actions)
-        mod_actions_layout.setContentsMargins(14, 14, 14, 14)
-        mod_actions_layout.setSpacing(10)
+        mod_actions_layout.setContentsMargins(12, 12, 12, 12)
+        mod_actions_layout.setSpacing(8)
 
-        self.remove_mod_button = ModernButton("Remove", role="danger", height=40, icon_size=0)
+        self.remove_mod_button = ModernButton("Remove", role="danger", height=36, icon_size=0, horizontal_padding=20)
         self.remove_mod_button.clicked.connect(self._remove_selected_mods)
         mod_actions_layout.addWidget(self.remove_mod_button)
 
-        self.enable_mod_button = ModernButton("Enable", role="sidebar", height=40, icon_size=0)
+        self.enable_mod_button = ModernButton("Enable", role="sidebar", height=36, icon_size=0, horizontal_padding=20)
         self.enable_mod_button.clicked.connect(lambda: self._set_selected_mods_enabled(True))
         mod_actions_layout.addWidget(self.enable_mod_button)
 
-        self.disable_mod_button = ModernButton("Disable", role="sidebar", height=40, icon_size=0)
+        self.disable_mod_button = ModernButton("Disable", role="sidebar", height=36, icon_size=0, horizontal_padding=20)
         self.disable_mod_button.clicked.connect(lambda: self._set_selected_mods_enabled(False))
         mod_actions_layout.addWidget(self.disable_mod_button)
 
         mod_actions_layout.addStretch()
 
-        self.view_mods_folder_button = ModernButton("View Folder", role="sidebar", height=40, icon_size=0)
+        self.view_mods_folder_button = ModernButton("View Folder", role="sidebar", height=36, icon_size=0, horizontal_padding=20)
         self.view_mods_folder_button.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.service.get_instance_mods_dir(self.instance))))
         )
         mod_actions_layout.addWidget(self.view_mods_folder_button)
 
-        self.view_configs_button = ModernButton("View Configs", role="sidebar", height=40, icon_size=0)
+        self.view_configs_button = ModernButton("View Configs", role="sidebar", height=36, icon_size=0, horizontal_padding=20)
         self.view_configs_button.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.service.get_instance_configs_dir(self.instance))))
         )
@@ -413,7 +503,7 @@ class EditInstanceDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(8)
 
         self.screenshots_title = QLabel("Screenshots")
         self.screenshots_title.setObjectName("editorSectionTitle")
@@ -432,8 +522,11 @@ class EditInstanceDialog(QDialog):
         self.screenshots_list.setMovement(QListWidget.Static)
         self.screenshots_list.setFlow(QListWidget.LeftToRight)
         self.screenshots_list.setWrapping(True)
-        self.screenshots_list.setSpacing(14)
+        self.screenshots_list.setSpacing(10)
         self.screenshots_list.setFrameShape(QFrame.NoFrame)
+        self.screenshots_list.setLayoutMode(QListView.Batched)
+        self.screenshots_list.setBatchSize(24)
+        self.screenshots_list.setUniformItemSizes(True)
         self.screenshots_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.screenshots_list.itemSelectionChanged.connect(self._sync_screenshot_actions)
         content_row.addWidget(self.screenshots_list, 1)
@@ -441,24 +534,24 @@ class EditInstanceDialog(QDialog):
         screenshot_actions = QFrame()
         screenshot_actions.setObjectName("editorSidePanel")
         screenshot_actions_layout = QVBoxLayout(screenshot_actions)
-        screenshot_actions_layout.setContentsMargins(14, 14, 14, 14)
-        screenshot_actions_layout.setSpacing(10)
+        screenshot_actions_layout.setContentsMargins(12, 12, 12, 12)
+        screenshot_actions_layout.setSpacing(8)
 
-        self.copy_image_button = ModernButton("Copy Image", role="sidebar", height=40, icon_size=0)
+        self.copy_image_button = ModernButton("Copy Image", role="sidebar", height=36, icon_size=0, horizontal_padding=18)
         self.copy_image_button.clicked.connect(self._copy_selected_image)
         screenshot_actions_layout.addWidget(self.copy_image_button)
 
-        self.delete_image_button = ModernButton("Delete", role="danger", height=40, icon_size=0)
+        self.delete_image_button = ModernButton("Delete", role="danger", height=36, icon_size=0, horizontal_padding=18)
         self.delete_image_button.clicked.connect(self._delete_selected_screenshots)
         screenshot_actions_layout.addWidget(self.delete_image_button)
 
-        self.rename_image_button = ModernButton("Rename", role="sidebar", height=40, icon_size=0)
+        self.rename_image_button = ModernButton("Rename", role="sidebar", height=36, icon_size=0, horizontal_padding=18)
         self.rename_image_button.clicked.connect(self._rename_selected_screenshot)
         screenshot_actions_layout.addWidget(self.rename_image_button)
 
         screenshot_actions_layout.addStretch()
 
-        self.view_screenshots_folder_button = ModernButton("View Folder", role="sidebar", height=40, icon_size=0)
+        self.view_screenshots_folder_button = ModernButton("View Folder", role="sidebar", height=36, icon_size=0, horizontal_padding=18)
         self.view_screenshots_folder_button.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.service.get_instance_screenshots_dir(self.instance))))
         )
@@ -475,8 +568,8 @@ class EditInstanceDialog(QDialog):
         advanced_surface = QFrame()
         advanced_surface.setObjectName("editorSelectionSurface")
         advanced_layout = QVBoxLayout(advanced_surface)
-        advanced_layout.setContentsMargins(18, 18, 18, 18)
-        advanced_layout.setSpacing(18)
+        advanced_layout.setContentsMargins(14, 14, 14, 14)
+        advanced_layout.setSpacing(14)
 
         copy_title = QLabel("Copy From Instance")
         copy_title.setObjectName("editorSectionTitle")
@@ -536,7 +629,7 @@ class EditInstanceDialog(QDialog):
         copy_action_row.setSpacing(12)
         copy_action_row.addStretch()
 
-        self.copy_execute_button = ModernButton("Copy", role="accent", height=40, icon_size=0)
+        self.copy_execute_button = ModernButton("Copy", role="accent", height=36, icon_size=0, minimum_width=92, horizontal_padding=20)
         self.copy_execute_button.clicked.connect(self._copy_selected_instance_data)
         copy_action_row.addWidget(self.copy_execute_button)
         advanced_layout.addLayout(copy_action_row)
@@ -571,11 +664,11 @@ class EditInstanceDialog(QDialog):
         ram_actions.setSpacing(12)
         advanced_layout.addLayout(ram_actions)
 
-        self.ram_revert_button = ModernButton("Revert", role="sidebar", height=40, icon_size=0, radius=10, minimum_width=118, horizontal_padding=34)
+        self.ram_revert_button = ModernButton("Revert", role="sidebar", height=36, icon_size=0, radius=10, minimum_width=104, horizontal_padding=24)
         self.ram_revert_button.clicked.connect(lambda: self._set_ram_value(self.instance.memory_mb))
         ram_actions.addWidget(self.ram_revert_button)
 
-        self.ram_confirm_button = ModernButton("Confirm", role="accent", height=40, icon_size=0, radius=10, minimum_width=124, horizontal_padding=36)
+        self.ram_confirm_button = ModernButton("Confirm", role="accent", height=36, icon_size=0, radius=10, minimum_width=108, horizontal_padding=24)
         self.ram_confirm_button.clicked.connect(self._save_ram_value)
         ram_actions.addWidget(self.ram_confirm_button)
         ram_actions.addStretch()
@@ -743,7 +836,6 @@ class EditInstanceDialog(QDialog):
         self.loader_refresh.clicked.connect(lambda: self._refresh_loader_rows(force_refresh=True))
         self.loader_refresh.setEnabled(False)
         side_layout.addWidget(self.loader_refresh)
-        self.loader_buttons[None].setChecked(self.instance.mod_loader_id is None)
         return section
 
     def _build_table_view(self) -> QTableView:
@@ -794,18 +886,18 @@ class EditInstanceDialog(QDialog):
         return column
 
     def _apply_responsive_layout(self) -> None:
-        root_margin = scaled_px(self, 22, minimum=14, maximum=24)
+        root_margin = scaled_px(self, 18, minimum=12, maximum=20)
         layout = self.layout()
         if isinstance(layout, QVBoxLayout):
-            layout.setContentsMargins(root_margin, root_margin, root_margin, scaled_px(self, 20, minimum=14, maximum=22))
-            layout.setSpacing(scaled_px(self, 14, minimum=10, maximum=16))
+            layout.setContentsMargins(root_margin, root_margin, root_margin, scaled_px(self, 16, minimum=12, maximum=18))
+            layout.setSpacing(scaled_px(self, 12, minimum=8, maximum=14))
 
         compact_layout = self.width() < 1220
-        self.icon_button.set_side_length(scaled_px(self, 96, minimum=74, maximum=100))
-        self.name_edit.setMinimumHeight(scaled_px(self, 54, minimum=44, maximum=56))
-        self.nav_frame.setFixedWidth(scaled_px(self, 168 if compact_layout else 178, minimum=148, maximum=184))
-        self.version_side_panel.setFixedWidth(scaled_px(self, 152 if compact_layout else 168, minimum=136, maximum=172))
-        self.loader_side_panel.setFixedWidth(scaled_px(self, 152 if compact_layout else 168, minimum=136, maximum=172))
+        self.icon_button.set_side_length(scaled_px(self, 82, minimum=66, maximum=88))
+        self.name_edit.setMinimumHeight(scaled_px(self, 48, minimum=42, maximum=50))
+        self.nav_frame.setFixedWidth(scaled_px(self, 158 if compact_layout else 166, minimum=148, maximum=172))
+        self.version_side_panel.setFixedWidth(scaled_px(self, 144 if compact_layout else 156, minimum=132, maximum=160))
+        self.loader_side_panel.setFixedWidth(scaled_px(self, 144 if compact_layout else 156, minimum=132, maximum=160))
 
         for button in (
             self.launch_button,
@@ -835,18 +927,18 @@ class EditInstanceDialog(QDialog):
             self.ram_revert_button,
             self.ram_confirm_button,
         ):
-            button.set_metrics(height=scaled_px(self, button.minimumHeight(), minimum=36, maximum=max(40, button.minimumHeight() + 2)), icon_size=0)
+            button.set_metrics(height=scaled_px(self, button.minimumHeight(), minimum=34, maximum=max(38, button.minimumHeight() + 1)), icon_size=0)
 
         self.ram_display.setMinimumWidth(scaled_px(self, 170, minimum=148, maximum=176))
         self.version_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 34, minimum=30, maximum=36))
         self.loader_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 34, minimum=30, maximum=36))
-        self.mods_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 40, minimum=36, maximum=44))
-        self.version_stack.setMinimumHeight(scaled_px(self, 260, minimum=228, maximum=286))
-        self.loader_stack.setMinimumHeight(scaled_px(self, 206, minimum=182, maximum=226))
-        self.screenshots_list.setGridSize(QSize(scaled_px(self, 214, minimum=188, maximum=224), scaled_px(self, 178, minimum=164, maximum=190)))
-        self.screenshots_list.setIconSize(QSize(scaled_px(self, 190, minimum=164, maximum=196), scaled_px(self, 108, minimum=96, maximum=114)))
-        self.copy_available_list.setMinimumHeight(scaled_px(self, 220, minimum=180, maximum=260))
-        self.copy_selected_list.setMinimumHeight(scaled_px(self, 220, minimum=180, maximum=260))
+        self.mods_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 36, minimum=32, maximum=40))
+        self.version_stack.setMinimumHeight(scaled_px(self, 240, minimum=210, maximum=260))
+        self.loader_stack.setMinimumHeight(scaled_px(self, 192, minimum=170, maximum=212))
+        self.screenshots_list.setGridSize(QSize(scaled_px(self, 204, minimum=180, maximum=212), scaled_px(self, 160, minimum=148, maximum=170)))
+        self.screenshots_list.setIconSize(QSize(scaled_px(self, 178, minimum=152, maximum=184), scaled_px(self, 96, minimum=88, maximum=102)))
+        self.copy_available_list.setMinimumHeight(scaled_px(self, 196, minimum=168, maximum=224))
+        self.copy_selected_list.setMinimumHeight(scaled_px(self, 196, minimum=168, maximum=224))
         self._sync_page_stack_height()
 
     def _set_page(self, page_name: str) -> None:
@@ -858,10 +950,16 @@ class EditInstanceDialog(QDialog):
         self.page_stack.setCurrentIndex(target_index)
         page_name = self.PAGE_NAMES[target_index]
         self.page_title.setText(page_name)
+        compact_pages = {"Minecraft Log", "Mods", "Screenshots"}
+        show_header = page_name not in compact_pages
+        self.page_title.setVisible(show_header)
+        self.page_divider.setVisible(show_header)
         self._ensure_page_loaded(page_name)
         self._sync_page_stack_height()
         self.page_scroll.verticalScrollBar().setValue(0)
         self._sync_log_polling_state()
+        if page_name != "Screenshots" and self._thumbnail_worker is not None and self._thumbnail_worker.isRunning():
+            self._thumbnail_worker.requestInterruption()
         if page_name == "Minecraft Log":
             self._poll_log_output()
 
@@ -1072,9 +1170,32 @@ class EditInstanceDialog(QDialog):
         worker.finished.connect(self._finalize_worker)
         worker.start()
 
+    def _start_asset_worker(self, job: str, request_id: int) -> None:
+        worker = InstanceAssetWorker(self.service, self.instance, job, request_id, self)
+        self._workers.add(worker)
+        worker.loaded.connect(self._handle_asset_loaded)
+        worker.failed.connect(self._handle_asset_failed)
+        worker.finished.connect(self._finalize_worker)
+        worker.start()
+
+    def _start_thumbnail_worker(self, rows: list[dict[str, Any]]) -> None:
+        if self._thumbnail_worker is not None and self._thumbnail_worker.isRunning():
+            self._thumbnail_worker.requestInterruption()
+
+        self._thumbnail_request_id += 1
+        worker = ScreenshotThumbnailWorker(self._thumbnail_request_id, rows, self.screenshots_list.iconSize(), self)
+        self._thumbnail_worker = worker
+        self._workers.add(worker)
+        worker.thumbnail_ready.connect(self._handle_thumbnail_ready)
+        worker.failed.connect(self._handle_thumbnail_failed)
+        worker.finished.connect(self._finalize_worker)
+        worker.start()
+
     def _finalize_worker(self) -> None:
         worker = self.sender()
         if isinstance(worker, QThread):
+            if worker is self._thumbnail_worker:
+                self._thumbnail_worker = None
             self._workers.discard(worker)
             worker.deleteLater()
 
@@ -1121,6 +1242,56 @@ class EditInstanceDialog(QDialog):
             self.loader_placeholder.set_text(message)
             self.loader_stack.setCurrentIndex(0)
             self.loader_refresh.setEnabled(True)
+
+    def _handle_asset_loaded(self, job: str, request_id: int, payload: object) -> None:
+        rows = list(payload) if isinstance(payload, list) else []
+        if job == "mods":
+            if request_id != self._mods_request_id:
+                return
+            self._mods_cache = rows
+            self.mods_title.setText(f"Mods ({len(self._mods_cache)} installed)")
+            self._apply_mod_search()
+            return
+
+        if job == "screenshots":
+            if request_id != self._screenshots_request_id:
+                return
+            selected_names = set(self._pending_screenshot_selection)
+            self._pending_screenshot_selection = []
+            self._screenshots_cache = rows
+            self._screenshot_items.clear()
+            self.screenshots_title.setText(f"Screenshots ({len(self._screenshots_cache)})")
+            self.screenshots_list.clear()
+            for row in self._screenshots_cache:
+                item = QListWidgetItem(str(row["label"]))
+                item.setData(Qt.UserRole, row["file_name"])
+                self.screenshots_list.addItem(item)
+                self._screenshot_items[str(row["file_name"])] = item
+                if row["file_name"] in selected_names:
+                    item.setSelected(True)
+            self._sync_screenshot_actions()
+            self._start_thumbnail_worker(self._screenshots_cache)
+
+    def _handle_asset_failed(self, job: str, request_id: int, message: str) -> None:
+        if job == "mods" and request_id == self._mods_request_id:
+            self.mods_title.setText("Mods")
+            QMessageBox.warning(self, "Mods", message)
+            return
+        if job == "screenshots" and request_id == self._screenshots_request_id:
+            self.screenshots_title.setText("Screenshots")
+            QMessageBox.warning(self, "Screenshots", message)
+
+    def _handle_thumbnail_ready(self, request_id: int, file_name: str, image: object) -> None:
+        if request_id != self._thumbnail_request_id or not isinstance(image, QImage):
+            return
+        item = self._screenshot_items.get(file_name)
+        if item is None:
+            return
+        item.setIcon(QIcon(QPixmap.fromImage(image)))
+
+    def _handle_thumbnail_failed(self, request_id: int, message: str) -> None:
+        if request_id == self._thumbnail_request_id:
+            QMessageBox.warning(self, "Screenshots", message)
 
     def _update_version_filters(self) -> None:
         enabled = set()
@@ -1268,6 +1439,8 @@ class EditInstanceDialog(QDialog):
         self._sync_version_install_button()
 
     def _sync_version_install_button(self) -> None:
+        if not hasattr(self, "version_install_button") or not hasattr(self, "version_notice"):
+            return
         selected_version = self.current_version_id()
         if self._current_loader_id is None:
             selected_loader_version = None
@@ -1321,21 +1494,45 @@ class EditInstanceDialog(QDialog):
         self._apply_instance(instance)
 
     def _reload_mods(self) -> None:
-        self._mods_cache = self.service.list_mods(self.instance)
-        self.mods_title.setText(f"Mods ({len(self._mods_cache)} installed)")
-        self._apply_mod_search()
+        current_selection = self._selected_mod_file_names() if self.mods_table.rowCount() else []
+        if current_selection and not self._pending_mod_selection:
+            self._pending_mod_selection = current_selection
+        self._mods_request_id += 1
+        self.mods_title.setText("Mods (loading...)")
+        self.mods_table.clearContents()
+        self.mods_table.setRowCount(0)
+        self._sync_mod_actions()
+        self._start_asset_worker("mods", self._mods_request_id)
 
     def _apply_mod_search(self) -> None:
         query = self.mods_search.text().strip().lower() if hasattr(self, "mods_search") else ""
+        selected_names = set(self._pending_mod_selection) or set(self._selected_mod_file_names())
+        self._pending_mod_selection = []
         rows = [
             row
             for row in self._mods_cache
             if not query or query in " ".join(str(row.get(key, "")) for key in ("name", "version", "provider")).lower()
         ]
+        self.mods_table.setUpdatesEnabled(False)
+        self.mods_table.clearContents()
         self.mods_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             self._populate_mod_row(row_index, row)
+            if row["file_name"] in selected_names:
+                self.mods_table.selectRow(row_index)
+        self._sync_mod_table_columns()
+        self.mods_table.setUpdatesEnabled(True)
         self._sync_mod_actions()
+
+    def _sync_mod_table_columns(self) -> None:
+        self.mods_table.resizeColumnToContents(0)
+        self.mods_table.resizeColumnToContents(1)
+        self.mods_table.resizeColumnToContents(3)
+        self.mods_table.resizeColumnToContents(4)
+        self.mods_table.resizeColumnToContents(5)
+        self.mods_table.setColumnWidth(2, max(self.mods_table.columnWidth(2), 240))
+        self.mods_table.setColumnWidth(4, max(self.mods_table.columnWidth(4), 170))
+        self.mods_table.setColumnWidth(5, max(self.mods_table.columnWidth(5), 150))
 
     def _populate_mod_row(self, row_index: int, row: dict[str, Any]) -> None:
         file_name = str(row["file_name"])
@@ -1387,8 +1584,8 @@ class EditInstanceDialog(QDialog):
             QMessageBox.warning(self, "Mods", str(exc))
             self._reload_mods()
             return
+        self._pending_mod_selection = [target_path.name]
         self._reload_mods()
-        self._select_mod_by_file_name(target_path.name)
 
     def _set_selected_mods_enabled(self, enabled: bool) -> None:
         selected = self._selected_mod_file_names()
@@ -1400,9 +1597,8 @@ class EditInstanceDialog(QDialog):
             QMessageBox.warning(self, "Mods", str(exc))
             self._reload_mods()
             return
+        self._pending_mod_selection = list(updated_names)
         self._reload_mods()
-        for file_name in updated_names:
-            self._select_mod_by_file_name(file_name)
 
     def _remove_selected_mods(self) -> None:
         selected = self._selected_mod_file_names()
@@ -1416,6 +1612,7 @@ class EditInstanceDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Mods", str(exc))
             return
+        self._pending_mod_selection = []
         self._reload_mods()
 
     def _select_mod_by_file_name(self, file_name: str) -> None:
@@ -1426,16 +1623,17 @@ class EditInstanceDialog(QDialog):
                 break
 
     def _reload_screenshots(self) -> None:
-        self._screenshots_cache = self.service.list_screenshots(self.instance)
-        self.screenshots_title.setText(f"Screenshots ({len(self._screenshots_cache)})")
+        current_selection = self._selected_screenshot_names() if self.screenshots_list.count() else []
+        if current_selection and not self._pending_screenshot_selection:
+            self._pending_screenshot_selection = current_selection
+        if self._thumbnail_worker is not None and self._thumbnail_worker.isRunning():
+            self._thumbnail_worker.requestInterruption()
+        self._screenshots_request_id += 1
+        self.screenshots_title.setText("Screenshots (loading...)")
         self.screenshots_list.clear()
-        for row in self._screenshots_cache:
-            item = QListWidgetItem(row["label"])
-            item.setData(Qt.UserRole, row["file_name"])
-            item.setToolTip(str(row["path"]))
-            item.setIcon(QIcon(load_scaled_icon(row["path"], self.screenshots_list.iconSize().width(), self.screenshots_list.iconSize().height())))
-            self.screenshots_list.addItem(item)
+        self._screenshot_items.clear()
         self._sync_screenshot_actions()
+        self._start_asset_worker("screenshots", self._screenshots_request_id)
 
     def _selected_screenshot_names(self) -> list[str]:
         return [str(item.data(Qt.UserRole)) for item in self.screenshots_list.selectedItems() if item.data(Qt.UserRole)]
@@ -1455,10 +1653,10 @@ class EditInstanceDialog(QDialog):
         match = next((row for row in self._screenshots_cache if row["file_name"] == file_name), None)
         if match is None:
             return
-        pixmap = load_scaled_icon(match["path"], 1600, 1600)
-        if pixmap.isNull():
+        image = _read_scaled_image(match["path"], 0, 0)
+        if image.isNull():
             return
-        QGuiApplication.clipboard().setPixmap(pixmap, QClipboard.Clipboard)
+        QGuiApplication.clipboard().setImage(image, QClipboard.Clipboard)
 
     def _delete_selected_screenshots(self) -> None:
         selected = self._selected_screenshot_names()
@@ -1472,6 +1670,7 @@ class EditInstanceDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Screenshots", str(exc))
             return
+        self._pending_screenshot_selection = []
         self._reload_screenshots()
 
     def _rename_selected_screenshot(self) -> None:
@@ -1487,12 +1686,8 @@ class EditInstanceDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Screenshots", str(exc))
             return
+        self._pending_screenshot_selection = [target.name]
         self._reload_screenshots()
-        for index in range(self.screenshots_list.count()):
-            item = self.screenshots_list.item(index)
-            if item.data(Qt.UserRole) == target.name:
-                item.setSelected(True)
-                break
 
     def _reload_copy_source_instances(self) -> None:
         current_value = self.copy_source_combo.selected_value() if hasattr(self, "copy_source_combo") else None

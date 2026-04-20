@@ -11,6 +11,7 @@ from core.launcher import InstanceRecord, LauncherService
 from ui.instance_card import InstanceCard
 from ui.responsive import fitted_window_size, scaled_px
 from ui.sidebar import SideBar
+from ui.app_icon import application_icon
 from ui.theme import theme_palette
 from ui.topbar import ActionPopup, PopupAction, TopBar
 
@@ -83,6 +84,7 @@ class MainWindow(QWidget):
 
         self.setObjectName("appRoot")
         self.setWindowTitle("NOTG Launcher")
+        self.setWindowIcon(application_icon(self.service.project_root))
         self.setMinimumSize(980, 640)
         self.resize(fitted_window_size(self, 1420, 860, minimum_width=980, minimum_height=640))
 
@@ -119,7 +121,6 @@ class MainWindow(QWidget):
             self._ensure_background_cache()
             if not self._background_cache.isNull():
                 painter.drawPixmap(0, 0, self._background_cache)
-            painter.fillRect(self.rect(), palette["overlay"])
         else:
             gradient = QLinearGradient(0, 0, 0, self.height())
             top, middle, bottom = palette["gradient"]
@@ -190,6 +191,8 @@ class MainWindow(QWidget):
         surface_layout.addWidget(self.content_stack, 1)
 
         list_page = QWidget()
+        list_page.setObjectName("instanceListPage")
+        list_page.setAttribute(Qt.WA_StyledBackground, False)
         list_layout = QVBoxLayout(list_page)
         list_layout.setContentsMargins(0, 0, 0, 0)
         list_layout.setSpacing(0)
@@ -206,8 +209,12 @@ class MainWindow(QWidget):
         self.instance_list.setFrameShape(QFrame.NoFrame)
         self.instance_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.instance_list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.instance_list.setUniformItemSizes(True)
         self.instance_list.setGridSize(QSize(218, 234))
         self.instance_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.instance_list.setAutoFillBackground(False)
+        self.instance_list.viewport().setAutoFillBackground(False)
+        self.instance_list.viewport().setAttribute(Qt.WA_StyledBackground, False)
         self.instance_list.currentItemChanged.connect(self._handle_current_item_changed)
         self.instance_list.itemDoubleClicked.connect(self._handle_instance_double_clicked)
         self.instance_list.customContextMenuRequested.connect(self._show_instance_context_menu)
@@ -215,6 +222,8 @@ class MainWindow(QWidget):
         self.content_stack.addWidget(list_page)
 
         empty_page = QWidget()
+        empty_page.setObjectName("instanceEmptyPage")
+        empty_page.setAttribute(Qt.WA_StyledBackground, False)
         empty_layout = QVBoxLayout(empty_page)
         empty_layout.setContentsMargins(26, 26, 26, 26)
         empty_layout.setSpacing(12)
@@ -458,12 +467,20 @@ class MainWindow(QWidget):
         if self._selected_item is None:
             return
         instance = self._selected_item.data(Qt.UserRole)
+        from ui.install_progress_dialog import InstallProgressDialog
+
         try:
-            duplicated = self.service.duplicate_instance(instance)
+            request = self.service.prepare_duplicate_request(instance)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Copy Instance", str(exc))
             return
-        self.refresh_instances(select_instance_id=duplicated.instance_id)
+
+        progress_dialog = InstallProgressDialog(self.service, request, self)
+        progress_dialog.installation_succeeded.connect(self._handle_install_success)
+        progress_dialog.installation_failed.connect(self._handle_install_failure)
+        progress_dialog.finished.connect(lambda _: self._drop_progress_dialog(progress_dialog))
+        self._progress_dialogs.append(progress_dialog)
+        progress_dialog.show()
 
     def _delete_selected_instance(self) -> None:
         if self._selected_item is None:

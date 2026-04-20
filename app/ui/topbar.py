@@ -84,18 +84,16 @@ class ModernButton(QPushButton):
         self._invalid_animation.setEndValue(0.0)
 
     def sizeHint(self):
-        font = QFont(self.font())
-        font.setPointSize(self._font_point_size or (12 if self._role == "toolbar" else 11))
-        font.setWeight(self._font_weight)
+        font = self._button_font()
         metrics = QFontMetrics(font)
         gap = 12 if not self.icon().isNull() else 0
         icon_width = self._icon_size if not self.icon().isNull() else 0
         horizontal_padding = self._horizontal_padding if self._horizontal_padding is not None else (
-            54 if self._role == "toolbar" else 46
+            44 if self._role == "toolbar" else 34
         )
         width = metrics.horizontalAdvance(self.text()) + icon_width + gap + horizontal_padding
         minimum_width = self._minimum_width_override if self._minimum_width_override is not None else (
-            168 if self._role == "toolbar" else 132
+            144 if self._role == "toolbar" else 112
         )
         return QSize(max(width, minimum_width), self.minimumHeight() + 5)
 
@@ -114,6 +112,58 @@ class ModernButton(QPushButton):
 
     def refresh_theme(self) -> None:
         self.update()
+
+    def _button_font(self, point_size: float | None = None) -> QFont:
+        font = QFont(self.font())
+        font.setPointSizeF(point_size if point_size is not None else float(self._font_point_size or (12 if self._role == "toolbar" else 11)))
+        font.setWeight(self._font_weight)
+        return font
+
+    def _fit_text_lines(self, max_width: float, max_height: float) -> tuple[QFont, list[str]]:
+        text = self.text().strip()
+        if not text:
+            return self._button_font(), [""]
+
+        base_size = float(self._font_point_size or (12 if self._role == "toolbar" else 11))
+        minimum_size = 8.0 if self._role == "toolbar" else 7.8
+        has_breaks = " " in text.strip()
+        candidate_size = base_size
+
+        while candidate_size >= minimum_size:
+            font = self._button_font(candidate_size)
+            metrics = QFontMetrics(font)
+            lines = self._wrap_lines(text, metrics, int(max_width), allow_wrap=has_breaks)
+            line_height = metrics.lineSpacing()
+            fits_width = all(metrics.horizontalAdvance(line) <= max_width + 1 for line in lines if line)
+            fits_height = (line_height * len(lines)) <= max_height + 1
+            if fits_width and fits_height:
+                return font, lines
+            candidate_size -= 0.4
+
+        font = self._button_font(minimum_size)
+        metrics = QFontMetrics(font)
+        return font, self._wrap_lines(text, metrics, int(max_width), allow_wrap=has_breaks)
+
+    def _wrap_lines(self, text: str, metrics: QFontMetrics, max_width: int, *, allow_wrap: bool) -> list[str]:
+        if max_width <= 0:
+            return [text]
+        if not allow_wrap or metrics.horizontalAdvance(text) <= max_width:
+            return [text]
+
+        words = text.split()
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            proposal = word if not current else f"{current} {word}"
+            if metrics.horizontalAdvance(proposal) <= max_width:
+                current = proposal
+                continue
+            if current:
+                lines.append(current)
+            current = word
+        if current:
+            lines.append(current)
+        return lines or [text]
 
     def _set_hover_progress(self, value):
         self._hover = float(value)
@@ -201,19 +251,16 @@ class ModernButton(QPushButton):
         painter.drawRoundedRect(rect, self._radius, self._radius)
 
         content_rect = rect.adjusted(18, 0, -18, 0)
-        font = QFont(self.font())
-        font.setPointSize(self._font_point_size or (12 if self._role == "toolbar" else 11))
-        font.setWeight(self._font_weight)
-        painter.setFont(font)
-        metrics = QFontMetrics(font)
         gap = 12 if not self.icon().isNull() else 0
         available_width = max(0.0, content_rect.width())
         icon_width = self._icon_size if not self.icon().isNull() else 0
-        text_width = metrics.horizontalAdvance(self.text())
         reserved_width = icon_width + gap if not self.icon().isNull() else 0
-        max_text_width = max(0, int(available_width - reserved_width))
-        text_value = metrics.elidedText(self.text(), Qt.ElideRight, max_text_width)
-        rendered_text_width = metrics.horizontalAdvance(text_value)
+        max_text_width = max(0.0, available_width - reserved_width)
+
+        font, text_lines = self._fit_text_lines(max_text_width, content_rect.height())
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        rendered_text_width = max((metrics.horizontalAdvance(line) for line in text_lines), default=0)
         rendered_total_width = rendered_text_width
         if not self.icon().isNull():
             rendered_total_width += icon_width + gap
@@ -226,12 +273,18 @@ class ModernButton(QPushButton):
             text_left += self._icon_size + gap
 
         painter.setPen(text_color)
+        line_height = metrics.lineSpacing()
+        total_text_height = line_height * len(text_lines)
+        text_top = content_rect.center().y() - (total_text_height / 2)
         if self.icon().isNull():
-            text_rect = QRectF(content_rect.left(), content_rect.top(), content_rect.width(), content_rect.height())
-            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignHCenter, text_value)
+            for index, line in enumerate(text_lines):
+                line_rect = QRectF(content_rect.left(), text_top + (index * line_height), content_rect.width(), line_height)
+                painter.drawText(line_rect, Qt.AlignHCenter | Qt.AlignVCenter, line)
         else:
-            text_rect = QRectF(text_left, content_rect.top(), content_rect.right() - text_left + 1, content_rect.height())
-            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text_value)
+            text_width = max(0.0, content_rect.right() - text_left + 1)
+            for index, line in enumerate(text_lines):
+                line_rect = QRectF(text_left, text_top + (index * line_height), text_width, line_height)
+                painter.drawText(line_rect, Qt.AlignLeft | Qt.AlignVCenter, line)
 
 
 class ClickableFrame(QFrame):

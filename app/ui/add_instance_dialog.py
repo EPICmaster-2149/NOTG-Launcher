@@ -1189,10 +1189,7 @@ class AddInstanceDialog(QDialog):
     def _sync_loader_availability(self) -> None:
         for loader_id, button in self.loader_buttons.items():
             button.setEnabled(True)
-            if loader_id is None:
-                button.setToolTip("")
-            else:
-                button.setToolTip("Choose a version to fetch compatible loader builds.")
+            button.setToolTip("")
 
     def _refresh_loader_rows(self, force_refresh: bool = False) -> None:
         version = self.current_version_id()

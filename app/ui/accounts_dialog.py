@@ -60,10 +60,6 @@ class AccountsDialog(QDialog):
         title = QLabel("Manage Accounts")
         title.setObjectName("accountsTitle")
         header_layout.addWidget(title)
-
-        subtitle = QLabel("Offline launcher profiles used when starting Minecraft instances.")
-        subtitle.setObjectName("accountsSubtitle")
-        header_layout.addWidget(subtitle)
         root_layout.addWidget(header)
 
         self.table = QTableWidget(0, 2)

@@ -631,6 +631,36 @@ class LauncherService:
         duplicated.icon_path = self.resolve_icon_path(duplicated.icon_path)
         return duplicated
 
+    def prepare_duplicate_request(
+        self,
+        instance: InstanceRecord,
+        *,
+        preferred_name: str | None = None,
+    ) -> InstallRequest:
+        target_name = self._allocate_duplicate_name(preferred_name or f"{instance.name} Copy")
+        slug = _slugify(target_name)[:40] or "instance"
+        instance_id = f"{slug}-{uuid.uuid4().hex[:8]}"
+        final_dir = self.instances_root / instance_id
+        stage_dir = self.staging_root / f"{instance_id}-duplicate"
+        minecraft_dir = stage_dir / ".minecraft"
+        return InstallRequest(
+            instance_id=instance_id,
+            name=target_name,
+            vanilla_version=instance.vanilla_version,
+            mod_loader_id=instance.mod_loader_id,
+            mod_loader_version=instance.mod_loader_version,
+            icon_path=self._normalize_icon_reference(instance.icon_path),
+            stage_dir=str(stage_dir),
+            final_dir=str(final_dir),
+            minecraft_dir=str(minecraft_dir),
+            memory_mb=instance.memory_mb,
+            operation="duplicate_instance",
+            modpack_path=None,
+            minecraft_import_dir=None,
+            copy_source_instance_id=instance.instance_id,
+            copy_user_data=None,
+        )
+
     def prepare_reinstall_request(
         self,
         instance: InstanceRecord,
@@ -764,7 +794,7 @@ class LauncherService:
         return bool(payload["close_ui_on_launch"])
 
     def get_theme_mode(self) -> str:
-        mode = str(self._read_background_payload().get("theme", "dark")).strip().lower()
+        mode = str(self._read_background_payload().get("theme", "light")).strip().lower()
         return "light" if mode == "light" else "dark"
 
     def set_theme_mode(self, mode: str) -> str:
@@ -1333,7 +1363,7 @@ class LauncherService:
         self._write_accounts_payload({"accounts": ["player1"], "active": "player1"})
 
     def _read_background_payload(self) -> dict[str, Any]:
-        payload = {"mode": "default", "close_ui_on_launch": True, "theme": "dark"}
+        payload = {"mode": "default", "close_ui_on_launch": True, "theme": "light"}
         if not self.background_settings_file.is_file():
             return payload
         try:
@@ -1345,13 +1375,13 @@ class LauncherService:
         if _optional_str(loaded.get("mode")) == "custom" and _optional_str(loaded.get("file_name")):
             payload = {"mode": "custom", "file_name": str(loaded["file_name"])}
         payload["close_ui_on_launch"] = bool(loaded.get("close_ui_on_launch", True))
-        payload["theme"] = "light" if str(loaded.get("theme", "dark")).strip().lower() == "light" else "dark"
+        payload["theme"] = "light" if str(loaded.get("theme", "light")).strip().lower() == "light" else "dark"
         return payload
 
     def _write_background_payload(self, payload: dict[str, Any]) -> None:
         payload = dict(payload)
         payload["close_ui_on_launch"] = bool(payload.get("close_ui_on_launch", True))
-        payload["theme"] = "light" if str(payload.get("theme", "dark")).strip().lower() == "light" else "dark"
+        payload["theme"] = "light" if str(payload.get("theme", "light")).strip().lower() == "light" else "dark"
         self.background_settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _read_runtime_session_payload(self, path: Path) -> dict[str, Any]:
@@ -1475,6 +1505,8 @@ def run_install_task(task: dict[str, Any], event_queue: Any) -> None:
             result = _run_minecraft_directory_import(request, callback, event_queue)
         elif request.operation == "reinstall":
             result = _run_reinstall(request, callback, event_queue)
+        elif request.operation == "duplicate_instance":
+            result = _run_duplicate_instance(request, callback, event_queue)
         elif request.operation == "copy_userdata":
             result = _run_copy_userdata(request, callback, event_queue)
         else:
@@ -1633,6 +1665,32 @@ def _run_copy_userdata(
         installed_version=target_instance.installed_version,
         mod_loader_id=target_instance.mod_loader_id,
         mod_loader_version=target_instance.mod_loader_version,
+        icon_path=request.icon_path,
+    )
+
+
+def _run_duplicate_instance(
+    request: InstallRequest,
+    callback: dict[str, Any],
+    event_queue: Any,
+) -> InstallResult:
+    del callback
+    service = LauncherService(Path(__file__).resolve().parents[2])
+    source_instance = service.get_instance(_required_str(request.copy_source_instance_id, "Source instance"))
+    if source_instance is None:
+        raise FileNotFoundError("The instance being copied no longer exists.")
+
+    stage_dir = Path(request.stage_dir)
+    _queue_event(event_queue, "status", text="Copying instance files")
+    _queue_event(event_queue, "log", text=f"Copying all files from {source_instance.name}")
+    _copy_tree_with_progress(source_instance.root_dir, stage_dir, event_queue, "Copying instance files")
+
+    return InstallResult(
+        name=request.name,
+        vanilla_version=source_instance.vanilla_version,
+        installed_version=source_instance.installed_version,
+        mod_loader_id=source_instance.mod_loader_id,
+        mod_loader_version=source_instance.mod_loader_version,
         icon_path=request.icon_path,
     )
 

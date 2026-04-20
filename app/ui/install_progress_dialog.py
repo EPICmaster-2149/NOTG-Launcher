@@ -258,6 +258,7 @@ def _operation_window_title(operation: str) -> str:
         "import_modpack": "Importing Instance",
         "import_minecraft": "Importing Instance",
         "reinstall": "Reinstalling Instance",
+        "duplicate_instance": "Copying Instance",
         "copy_userdata": "Copying Instance Data",
     }.get(operation, "Running Instance Task")
 
@@ -268,6 +269,7 @@ def _operation_title_prefix(operation: str) -> str:
         "import_modpack": "Importing",
         "import_minecraft": "Importing",
         "reinstall": "Reinstalling",
+        "duplicate_instance": "Copying",
         "copy_userdata": "Copying",
     }.get(operation, "Running")
 
@@ -278,6 +280,7 @@ def _operation_initial_status(operation: str) -> str:
         "import_modpack": "Preparing import",
         "import_minecraft": "Preparing import",
         "reinstall": "Preparing replacement files",
+        "duplicate_instance": "Preparing instance copy",
         "copy_userdata": "Preparing staged copy",
     }.get(operation, "Preparing task")
 
@@ -288,12 +291,14 @@ def _operation_log_prefix(operation: str) -> str:
         "import_modpack": "import",
         "import_minecraft": "import",
         "reinstall": "reinstall",
+        "duplicate_instance": "copy",
         "copy_userdata": "copy",
     }.get(operation, "task")
 
 
 def _abort_dialog_title(operation: str) -> str:
     return {
+        "duplicate_instance": "Stop Copy",
         "copy_userdata": "Stop Copy",
         "reinstall": "Stop Reinstall",
     }.get(operation, "Abort Installation")
@@ -301,6 +306,7 @@ def _abort_dialog_title(operation: str) -> str:
 
 def _abort_dialog_message(operation: str) -> str:
     return {
+        "duplicate_instance": "Stop copying this instance?",
         "copy_userdata": "Stop copying files into this instance?",
         "reinstall": "Stop reinstalling this instance?",
     }.get(operation, "Abort this installation and remove the instance being created?")
