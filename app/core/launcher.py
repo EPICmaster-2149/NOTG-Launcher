@@ -316,7 +316,7 @@ class LauncherService:
         self.launcher_ipc_file = self.runtime_root / "launcher-ipc.json"
         self.logs_root = Path(dirs.user_log_dir).resolve()
         self.backgrounds_root = self.data_root / "backgrounds"
-        self.default_background_root = self.project_root / "default-background"
+        self.default_background_root = self.assets_root / "default-background"
         self.generated_icons_root = self.cache_root / "generated-icons"
         self.default_icon = "assets/default-instance-icons/Grass Block.png"
 
