@@ -370,9 +370,15 @@ QScrollArea#instanceEditorScroll {
     border: none;
 }
 
+QScrollArea#settingsScrollArea {
+    background: transparent;
+    border: none;
+}
+
 QWidget#instanceListPage,
 QWidget#instanceEmptyPage,
-QScrollArea#instanceEditorScroll > QWidget > QWidget {
+QScrollArea#instanceEditorScroll > QWidget > QWidget,
+QScrollArea#settingsScrollArea > QWidget > QWidget {
     background: transparent;
 }
 

@@ -123,6 +123,15 @@ QScrollArea#instanceEditorScroll > QWidget > QWidget {
     background: transparent;
 }
 
+QScrollArea#settingsScrollArea {
+    background: transparent;
+    border: none;
+}
+
+QScrollArea#settingsScrollArea > QWidget > QWidget {
+    background: transparent;
+}
+
 QLabel#editorEyebrow {
     color: #4f78b9;
 }

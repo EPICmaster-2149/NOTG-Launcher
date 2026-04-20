@@ -173,16 +173,22 @@ class SettingsDialog(QDialog):
         root_layout.addWidget(title)
 
         self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("settingsScrollArea")
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setAutoFillBackground(False)
         root_layout.addWidget(self.scroll_area, 1)
 
         self.scroll_content = QWidget()
+        self.scroll_content.setObjectName("settingsScrollContent")
+        self.scroll_content.setAutoFillBackground(False)
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.setContentsMargins(0, 0, 6, 0)
         self.scroll_layout.setSpacing(18)
         self.scroll_area.setWidget(self.scroll_content)
+        self.scroll_area.viewport().setAutoFillBackground(False)
+        self.scroll_area.viewport().setAttribute(Qt.WA_StyledBackground, False)
 
         background_title = QLabel("Add Background")
         background_title.setObjectName("editorSectionTitle")
