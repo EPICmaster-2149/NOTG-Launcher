@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QWidget
 
 from ui.icon_utils import load_scaled_icon
 from ui.responsive import scaled_px, screen_scale
+from ui.theme import theme_palette
 
 
 def blend_colors(start: QColor, end: QColor, factor: float) -> QColor:
@@ -47,8 +48,8 @@ class InstanceCard(QWidget):
 
     def sizeHint(self):
         return QSize(
-            scaled_px(self, 198, minimum=176, maximum=206),
-            scaled_px(self, 212, minimum=188, maximum=220),
+            scaled_px(self, 194, minimum=172, maximum=202),
+            scaled_px(self, 206, minimum=184, maximum=214),
         )
 
     def minimumSizeHint(self):
@@ -87,15 +88,16 @@ class InstanceCard(QWidget):
 
     def paintEvent(self, event):
         del event
+        palette = theme_palette(self)["instance_card"]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         scale = screen_scale(self, minimum=0.78, maximum=1.05)
 
-        outer_padding = 10 * scale
+        outer_padding = 9 * scale
         icon_size = int(round(72 * scale))
-        icon_top = 12 * scale
-        info_height = 74 * scale
-        info_gap = 10 * scale
+        icon_top = 11 * scale
+        info_height = 70 * scale
+        info_gap = 9 * scale
         available_width = max(0.0, self.width() - (outer_padding * 2))
         info_width = min(max(134 * scale, available_width * 0.88), available_width)
 
@@ -103,22 +105,22 @@ class InstanceCard(QWidget):
         rect.translate(0, -1.2 * self._hover_progress)
         shadow_rect = rect.adjusted(0, 5 * scale, 0, 7 * scale)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(3, 8, 18, 42))
-        painter.drawRoundedRect(shadow_rect, 20 * scale, 20 * scale)
+        painter.setBrush(palette["shadow"])
+        painter.drawRoundedRect(shadow_rect, 16 * scale, 16 * scale)
 
-        shell_top = blend_colors(QColor("#0d1524"), QColor("#13233b"), self._hover_progress * 0.55)
-        shell_top = blend_colors(shell_top, QColor("#183257"), self._selected_progress)
-        shell_bottom = blend_colors(QColor("#09111d"), QColor("#102036"), self._hover_progress * 0.45)
-        shell_bottom = blend_colors(shell_bottom, QColor("#132b49"), self._selected_progress)
+        shell_top = blend_colors(palette["shell_top"], palette["shell_top_hover"], self._hover_progress * 0.55)
+        shell_top = blend_colors(shell_top, palette["shell_top_selected"], self._selected_progress)
+        shell_bottom = blend_colors(palette["shell_bottom"], palette["shell_bottom_hover"], self._hover_progress * 0.45)
+        shell_bottom = blend_colors(shell_bottom, palette["shell_bottom_selected"], self._selected_progress)
         fill = QLinearGradient(rect.topLeft(), rect.bottomLeft())
         fill.setColorAt(0.0, shell_top)
         fill.setColorAt(1.0, shell_bottom)
 
-        border = blend_colors(QColor("#1b2a42"), QColor("#40679f"), self._hover_progress * 0.55)
-        border = blend_colors(border, QColor("#79b0ff"), self._selected_progress * 0.9)
+        border = blend_colors(palette["shell_border"], palette["shell_border_hover"], self._hover_progress * 0.55)
+        border = blend_colors(border, palette["shell_border_selected"], self._selected_progress * 0.9)
         painter.setPen(QPen(border, 1.15))
         painter.setBrush(fill)
-        painter.drawRoundedRect(rect, 20 * scale, 20 * scale)
+        painter.drawRoundedRect(rect, 16 * scale, 16 * scale)
 
         icon_rect = QRectF(
             rect.center().x() - (icon_size / 2),
@@ -139,22 +141,22 @@ class InstanceCard(QWidget):
             info_width,
             min(info_height, rect.bottom() - (icon_rect.bottom() + info_gap)),
         )
-        info_top = blend_colors(QColor("#16253a"), QColor("#1d3050"), self._hover_progress * 0.45)
-        info_top = blend_colors(info_top, QColor("#203a61"), self._selected_progress * 0.7)
-        info_bottom = blend_colors(QColor("#0f1a2b"), QColor("#15253d"), self._hover_progress * 0.35)
-        info_bottom = blend_colors(info_bottom, QColor("#173251"), self._selected_progress * 0.6)
+        info_top = blend_colors(palette["info_top"], palette["info_top_hover"], self._hover_progress * 0.45)
+        info_top = blend_colors(info_top, palette["info_top_selected"], self._selected_progress * 0.7)
+        info_bottom = blend_colors(palette["info_bottom"], palette["info_bottom_hover"], self._hover_progress * 0.35)
+        info_bottom = blend_colors(info_bottom, palette["info_bottom_selected"], self._selected_progress * 0.6)
         info_fill = QLinearGradient(info_rect.topLeft(), info_rect.bottomLeft())
         info_fill.setColorAt(0.0, info_top)
         info_fill.setColorAt(1.0, info_bottom)
-        info_border = blend_colors(QColor("#2a3d5e"), QColor("#557eb7"), self._hover_progress * 0.5)
-        info_border = blend_colors(info_border, QColor("#8cbcff"), self._selected_progress * 0.65)
+        info_border = blend_colors(palette["info_border"], palette["info_border_hover"], self._hover_progress * 0.5)
+        info_border = blend_colors(info_border, palette["info_border_selected"], self._selected_progress * 0.65)
         painter.setPen(QPen(info_border, 1.0))
         painter.setBrush(info_fill)
-        painter.drawRoundedRect(info_rect, 16 * scale, 16 * scale)
+        painter.drawRoundedRect(info_rect, 12 * scale, 12 * scale)
 
         name_font, wrapped_name = self._fit_name_layout(scale, info_rect.width() - (28 * scale))
         painter.setFont(name_font)
-        painter.setPen(QColor("#eef5ff"))
+        painter.setPen(palette["text"])
         name_metrics = QFontMetrics(name_font)
         version_font = QFont(self.font())
         version_font.setPointSizeF(8.8 * scale)
@@ -179,7 +181,7 @@ class InstanceCard(QWidget):
         )
 
         painter.setFont(version_font)
-        painter.setPen(QColor("#95abd1"))
+        painter.setPen(palette["subtext"])
         version_rect = QRectF(
             info_rect.left() + text_padding_x,
             name_rect.bottom() + (4 * scale),
@@ -194,14 +196,10 @@ class InstanceCard(QWidget):
 
         if self._selected_progress > 0.01 or self._hover_progress > 0.04:
             glow_rect = rect.adjusted(2 * scale, 2 * scale, -2 * scale, -2 * scale)
-            accent = blend_colors(
-                QColor(92, 148, 222, 0),
-                QColor(132, 192, 255, 58),
-                max(self._selected_progress, self._hover_progress * 0.65),
-            )
+            accent = blend_colors(palette["glow_start"], palette["glow_end"], max(self._selected_progress, self._hover_progress * 0.65))
             painter.setPen(QPen(accent, max(1.1, 1.8 * scale)))
             painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(glow_rect, 18 * scale, 18 * scale)
+            painter.drawRoundedRect(glow_rect, 14 * scale, 14 * scale)
 
     def _fit_name_layout(self, scale: float, width: float) -> tuple[QFont, str]:
         base_size = 11.2 * scale

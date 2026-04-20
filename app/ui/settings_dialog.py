@@ -4,10 +4,11 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QFileDialog, QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QFileDialog, QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from core.launcher import LauncherService
 from ui.responsive import fitted_window_size, scaled_px
+from ui.theme import apply_theme, theme_palette
 from ui.topbar import ModernButton
 
 
@@ -23,21 +24,22 @@ class BackgroundPreview(QWidget):
 
     def paintEvent(self, event) -> None:
         del event
+        palette = theme_palette(self)["background_preview"]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
         outer = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        painter.setPen(QPen(QColor(84, 122, 177, 90), 1.2))
-        painter.setBrush(QColor(8, 14, 25, 220))
+        painter.setPen(QPen(palette["outer_border"], 1.2))
+        painter.setBrush(palette["outer_fill"])
         painter.drawRoundedRect(outer, 18, 18)
 
         inner = outer.adjusted(12, 12, -12, -12)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(16, 26, 43, 210))
+        painter.setBrush(palette["inner_fill"])
         painter.drawRoundedRect(inner, 14, 14)
 
         if self._pixmap.isNull():
-            painter.setPen(QColor("#dce9ff"))
+            painter.setPen(palette["text"])
             painter.drawText(inner, Qt.AlignCenter, "No background image selected")
             return
 
@@ -96,11 +98,11 @@ class SettingsDialog(QDialog):
         header_layout.setContentsMargins(18, 16, 18, 16)
         header_layout.setSpacing(6)
 
-        title = QLabel("Insert background")
+        title = QLabel("Settings")
         title.setObjectName("settingsTitle")
         header_layout.addWidget(title)
 
-        subtitle = QLabel("Preview the active background, add a custom image, or switch back to the default one.")
+        subtitle = QLabel("Preview the active background, tune launch behaviour, and switch between dark and light themes.")
         subtitle.setObjectName("settingsSubtitle")
         subtitle.setWordWrap(True)
         header_layout.addWidget(subtitle)
@@ -120,6 +122,46 @@ class SettingsDialog(QDialog):
         self.caption.setWordWrap(True)
         preview_layout.addWidget(self.caption)
         root_layout.addWidget(preview_card, 1)
+
+        divider = QFrame()
+        divider.setObjectName("editorSectionDivider")
+        root_layout.addWidget(divider)
+
+        launch_behavior = QFrame()
+        launch_behavior.setObjectName("editorSelectionSurface")
+        launch_layout = QVBoxLayout(launch_behavior)
+        launch_layout.setContentsMargins(18, 18, 18, 18)
+        launch_layout.setSpacing(8)
+
+        launch_title = QLabel("Gameplay behaviour")
+        launch_title.setObjectName("editorSectionTitle")
+        launch_layout.addWidget(launch_title)
+
+        launch_text = QLabel(
+            "When enabled, the launcher UI closes after Minecraft starts and a lightweight background monitor keeps session state synced until the game exits."
+        )
+        launch_text.setObjectName("settingsCaption")
+        launch_text.setWordWrap(True)
+        launch_layout.addWidget(launch_text)
+
+        self.close_on_launch_checkbox = QCheckBox("Close launcher interface while Minecraft is running")
+        self.close_on_launch_checkbox.setObjectName("editorFilterCheck")
+        self.close_on_launch_checkbox.setChecked(self.service.get_close_ui_on_launch())
+        self.close_on_launch_checkbox.toggled.connect(self._set_close_on_launch)
+        launch_layout.addWidget(self.close_on_launch_checkbox)
+
+        theme_text = QLabel("Use a brighter neutral surface palette with the same glass layout and accent hierarchy.")
+        theme_text.setObjectName("settingsCaption")
+        theme_text.setWordWrap(True)
+        launch_layout.addWidget(theme_text)
+
+        self.light_theme_checkbox = QCheckBox("Use light theme")
+        self.light_theme_checkbox.setObjectName("editorFilterCheck")
+        self.light_theme_checkbox.setChecked(self.service.get_theme_mode() == "light")
+        self.light_theme_checkbox.toggled.connect(self._set_light_theme)
+        launch_layout.addWidget(self.light_theme_checkbox)
+
+        root_layout.addWidget(launch_behavior)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
@@ -181,3 +223,26 @@ class SettingsDialog(QDialog):
         self.service.reset_background()
         self._refresh_preview()
         self.background_changed.emit(self.service.get_active_background_path() or "")
+
+    def _set_close_on_launch(self, checked: bool) -> None:
+        try:
+            self.service.set_close_ui_on_launch(checked)
+        except Exception as exc:  # noqa: BLE001
+            self.close_on_launch_checkbox.blockSignals(True)
+            self.close_on_launch_checkbox.setChecked(not checked)
+            self.close_on_launch_checkbox.blockSignals(False)
+            QMessageBox.warning(self, "Gameplay behaviour", str(exc))
+
+    def _set_light_theme(self, checked: bool) -> None:
+        try:
+            mode = self.service.set_theme_mode("light" if checked else "dark")
+        except Exception as exc:  # noqa: BLE001
+            self.light_theme_checkbox.blockSignals(True)
+            self.light_theme_checkbox.setChecked(not checked)
+            self.light_theme_checkbox.blockSignals(False)
+            QMessageBox.warning(self, "Appearance", str(exc))
+            return
+
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, mode)

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from core.launcher import IconRecord, LauncherService
 from ui.icon_utils import load_scaled_icon
 from ui.responsive import fitted_window_size, scaled_px, screen_scale
+from ui.theme import theme_palette
 from ui.topbar import ModernButton, blend_colors
 
 
@@ -120,6 +121,7 @@ class IconTile(QWidget):
 
     def paintEvent(self, event) -> None:
         del event
+        palette = theme_palette(self)["icon_tile"]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         scale = screen_scale(self, minimum=0.9, maximum=1.05)
@@ -130,24 +132,25 @@ class IconTile(QWidget):
 
         shadow_rect = rect.adjusted(0, 5 * scale + self._press, 0, 7 * scale + self._press)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(4, 8, 17, int(44 + (28 * self._hover))))
+        shadow = blend_colors(palette["shadow"], palette["shadow_hover"], self._hover)
+        painter.setBrush(shadow)
         painter.drawRoundedRect(shadow_rect, 18 * scale, 18 * scale)
 
-        fill_top = blend_colors(QColor("#101a2d"), QColor("#162540"), self._hover)
-        fill_top = blend_colors(fill_top, QColor("#1b345d"), self._selected)
-        fill_bottom = blend_colors(QColor("#0b1423"), QColor("#122037"), self._hover)
-        fill_bottom = blend_colors(fill_bottom, QColor("#132a4b"), self._selected)
-        border = blend_colors(QColor("#253a5d"), QColor("#4f7dd0"), self._selected)
-        border = blend_colors(border, QColor("#6a9cff"), self._hover * 0.4)
+        fill_top = blend_colors(palette["outer_top"], palette["outer_top_hover"], self._hover)
+        fill_top = blend_colors(fill_top, palette["outer_top_selected"], self._selected)
+        fill_bottom = blend_colors(palette["outer_bottom"], palette["outer_bottom_hover"], self._hover)
+        fill_bottom = blend_colors(fill_bottom, palette["outer_bottom_selected"], self._selected)
+        border = blend_colors(palette["border"], palette["border_selected"], self._selected)
+        border = blend_colors(border, palette["border_hover"], self._hover * 0.4)
 
         painter.setPen(QPen(border, max(1.0, 1.15 * scale)))
         painter.setBrush(fill_top)
         painter.drawRoundedRect(rect, 18 * scale, 18 * scale)
 
         inner = rect.adjusted(10 * scale, 10 * scale, -10 * scale, -10 * scale)
-        inner_fill = blend_colors(QColor("#15243a"), QColor("#1a2e4b"), self._hover * 0.5)
-        inner_fill = blend_colors(inner_fill, QColor("#1d3760"), self._selected * 0.7)
-        painter.setPen(QPen(QColor("#2f486f"), max(1.0, scale)))
+        inner_fill = blend_colors(palette["inner_fill"], palette["inner_fill_hover"], self._hover * 0.5)
+        inner_fill = blend_colors(inner_fill, palette["inner_fill_selected"], self._selected * 0.7)
+        painter.setPen(QPen(palette["inner_border"], max(1.0, scale)))
         painter.setBrush(inner_fill)
         painter.drawRoundedRect(inner, 16 * scale, 16 * scale)
 
@@ -160,7 +163,7 @@ class IconTile(QWidget):
 
         if self._selected > 0.02:
             glow = rect.adjusted(2 * scale, 2 * scale, -2 * scale, -2 * scale)
-            accent = blend_colors(QColor(92, 162, 255, 0), QColor(128, 201, 255, 72), self._selected)
+            accent = blend_colors(palette["glow_start"], palette["glow_end"], self._selected)
             painter.setPen(QPen(accent, max(1.2, 1.8 * scale)))
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(glow, 16 * scale, 16 * scale)

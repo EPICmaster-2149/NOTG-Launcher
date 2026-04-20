@@ -1,27 +1,29 @@
 from __future__ import annotations
 
-import time
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPixmap
-from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 from core.launcher import InstanceRecord, LauncherService
-from ui.accounts_dialog import AccountsDialog
-from ui.add_instance_dialog import AddInstanceDialog
-from ui.edit_instance_dialog import EditInstanceDialog
-from ui.install_progress_dialog import InstallProgressDialog
 from ui.instance_card import InstanceCard
 from ui.responsive import fitted_window_size, scaled_px
-from ui.settings_dialog import SettingsDialog
 from ui.sidebar import SideBar
+from ui.theme import theme_palette
 from ui.topbar import ActionPopup, PopupAction, TopBar
+
+if TYPE_CHECKING:
+    from ui.accounts_dialog import AccountsDialog
+    from ui.add_instance_dialog import AddInstanceDialog
+    from ui.edit_instance_dialog import EditInstanceDialog
+    from ui.install_progress_dialog import InstallProgressDialog
+    from ui.settings_dialog import SettingsDialog
 
 
 class LaunchWorker(QThread):
-    launched = Signal(object, object)
+    launched = Signal(object, int)
     failed = Signal(str, str)
 
     def __init__(self, service: LauncherService, instance: InstanceRecord, player_name: str):
@@ -33,46 +35,69 @@ class LaunchWorker(QThread):
     def run(self) -> None:
         try:
             process = self.service.launch_instance(self.instance, self.player_name)
+            pid = int(getattr(process, "pid", 0) or 0)
+            if pid <= 0:
+                raise RuntimeError("Minecraft started without a valid process id.")
+
+            self.service.register_runtime_session(
+                self.instance,
+                pid=pid,
+                player_name=self.player_name,
+                close_ui_on_launch=self.service.get_close_ui_on_launch(),
+            )
+            monitor_pid = self.service.spawn_session_monitor(self.instance.instance_id, pid, self.player_name)
+            self.service.attach_runtime_monitor(self.instance.instance_id, monitor_pid)
+            try:
+                updated = self.service.refresh_instance_last_played(self.instance)
+            except Exception:
+                updated = self.instance
+            updated.pid = pid
+            updated.status = "Launching"
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(self.instance.instance_id, str(exc))
             return
 
-        self.launched.emit(self.instance, process)
+        self.launched.emit(updated, pid)
 
 
 class MainWindow(QWidget):
-    def __init__(self):
+    def __init__(self, *, service: LauncherService | None = None, restore_request: dict[str, Any] | None = None):
         super().__init__()
 
-        self.service = LauncherService()
+        self.service = service or LauncherService()
+        self._restore_request = restore_request or {}
         self._cards: list[tuple[QListWidgetItem, InstanceCard, InstanceRecord]] = []
         self._selected_item: QListWidgetItem | None = None
         self._launch_threads: dict[str, LaunchWorker] = {}
-        self._running_processes: dict[str, Any] = {}
-        self._launch_started_at: dict[str, float] = {}
-        self._progress_dialogs: list[InstallProgressDialog] = []
-        self._edit_dialogs: dict[str, EditInstanceDialog] = {}
-        self._settings_dialog: SettingsDialog | None = None
+        self._progress_dialogs: list["InstallProgressDialog"] = []
+        self._edit_dialogs: dict[str, "EditInstanceDialog"] = {}
+        self._settings_dialog: "SettingsDialog | None" = None
         self._instance_popup_target_id: str | None = None
         self._background_pixmap = QPixmap()
         self._background_path: str | None = None
+        self._background_cache = QPixmap()
+        self._background_cache_size = QSize()
+        self._screen_connected = False
+        self._runtime_sessions: dict[str, dict[str, Any]] = {}
+        self._runtime_session_snapshot: tuple[tuple[str, str, int | None, int | None, bool], ...] = ()
 
         self.setObjectName("appRoot")
         self.setWindowTitle("NOTG Launcher")
         self.setMinimumSize(980, 640)
         self.resize(fitted_window_size(self, 1420, 860, minimum_width=980, minimum_height=640))
-        self._screen_connected = False
 
         self._build_ui()
         self._refresh_background()
         self._apply_responsive_layout()
         self.refresh_instances()
 
-        self.process_monitor = QTimer(self)
-        self.process_monitor.setInterval(1000)
-        self.process_monitor.timeout.connect(self._poll_running_processes)
-        self.process_monitor.timeout.connect(self._update_playtime_bar)
-        self.process_monitor.start()
+        self.runtime_timer = QTimer(self)
+        self.runtime_timer.setInterval(1000)
+        self.runtime_timer.timeout.connect(self._sync_runtime_sessions)
+        self.runtime_timer.timeout.connect(self._update_playtime_bar)
+        self.runtime_timer.start()
+
+        QTimer.singleShot(0, self._apply_initial_restore_request)
 
     def showEvent(self, event) -> None:
         self._ensure_screen_tracking()
@@ -81,25 +106,48 @@ class MainWindow(QWidget):
 
     def resizeEvent(self, event) -> None:
         self._apply_responsive_layout()
+        self._invalidate_background_cache()
         super().resizeEvent(event)
 
     def paintEvent(self, event) -> None:
         del event
+        palette = theme_palette(self)["window"]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
         if not self._background_pixmap.isNull():
-            scaled = self._background_pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-            source_x = max(0, int((scaled.width() - self.width()) / 2))
-            source_y = max(0, int((scaled.height() - self.height()) / 2))
-            painter.drawPixmap(0, 0, scaled, source_x, source_y, self.width(), self.height())
-            painter.fillRect(self.rect(), QColor(6, 11, 20, 118))
+            self._ensure_background_cache()
+            if not self._background_cache.isNull():
+                painter.drawPixmap(0, 0, self._background_cache)
+            painter.fillRect(self.rect(), palette["overlay"])
         else:
             gradient = QLinearGradient(0, 0, 0, self.height())
-            gradient.setColorAt(0.0, QColor("#162742"))
-            gradient.setColorAt(0.35, QColor("#0e192d"))
-            gradient.setColorAt(1.0, QColor("#08111d"))
+            top, middle, bottom = palette["gradient"]
+            gradient.setColorAt(0.0, QColor(top))
+            gradient.setColorAt(0.35, QColor(middle))
+            gradient.setColorAt(1.0, QColor(bottom))
             painter.fillRect(self.rect(), gradient)
+
+    def handle_ipc_message(self, payload: dict[str, Any]) -> None:
+        action = str(payload.get("action") or "")
+        if action not in {"activate", "session-sync"}:
+            return
+
+        instance_id = _optional_text(payload.get("instance_id"))
+        page = _optional_text(payload.get("page"))
+
+        self._sync_runtime_sessions(force_refresh=True)
+        if instance_id:
+            item = self._item_for_instance_id(instance_id)
+            if item is not None:
+                self.instance_list.setCurrentItem(item)
+            if page:
+                instance = self.service.get_instance(instance_id)
+                if instance is not None:
+                    self._open_edit_dialog(instance, page=page)
+
+        if bool(payload.get("activate", True)):
+            self._activate_window()
 
     def _ensure_screen_tracking(self) -> None:
         handle = self.windowHandle()
@@ -244,6 +292,8 @@ class MainWindow(QWidget):
 
     def refresh_instances(self, select_instance_id: str | None = None) -> None:
         instances = self.service.load_instances()
+        self._runtime_sessions = self.service.list_runtime_sessions()
+        self._runtime_session_snapshot = self._build_runtime_session_snapshot(self._runtime_sessions)
         self.instance_list.clear()
         self._cards.clear()
         self._selected_item = None
@@ -256,10 +306,8 @@ class MainWindow(QWidget):
 
         self.content_stack.setCurrentIndex(0)
         for instance in instances:
-            if instance.instance_id in self._launch_threads:
+            if instance.instance_id in self._launch_threads and instance.status == "Quit":
                 instance.status = "Launching"
-            elif instance.instance_id in self._running_processes:
-                instance.status = "Launched"
             item = QListWidgetItem()
             card = InstanceCard(instance.name, instance.version_label, instance.icon_path)
             item.setSizeHint(card.sizeHint())
@@ -308,6 +356,9 @@ class MainWindow(QWidget):
             self._sync_accounts_ui()
 
     def _open_add_instance_dialog(self) -> None:
+        from ui.add_instance_dialog import AddInstanceDialog
+        from ui.install_progress_dialog import InstallProgressDialog
+
         dialog = AddInstanceDialog(self.service, self)
         if dialog.exec() != QDialog.Accepted or dialog.selection is None:
             return
@@ -320,7 +371,7 @@ class MainWindow(QWidget):
         self._progress_dialogs.append(progress_dialog)
         progress_dialog.show()
 
-    def _drop_progress_dialog(self, dialog: InstallProgressDialog) -> None:
+    def _drop_progress_dialog(self, dialog: "InstallProgressDialog") -> None:
         self._progress_dialogs = [item for item in self._progress_dialogs if item is not dialog]
 
     def _handle_install_success(self, instance: InstanceRecord) -> None:
@@ -385,7 +436,7 @@ class MainWindow(QWidget):
             return
 
         instance = self._selected_item.data(Qt.UserRole)
-        if instance.instance_id in self._running_processes or instance.instance_id in self._launch_threads:
+        if self._instance_is_active(instance.instance_id) or instance.instance_id in self._launch_threads:
             return
 
         self._set_instance_status(instance.instance_id, "Launching")
@@ -401,15 +452,7 @@ class MainWindow(QWidget):
             return
 
         instance = self._selected_item.data(Qt.UserRole)
-        process = self._running_processes.get(instance.instance_id)
-        if process is None:
-            return
-
-        if process.pid:
-            self.service.terminate_process_tree(process.pid)
-        self._persist_session_playtime(instance.instance_id)
-        self._running_processes.pop(instance.instance_id, None)
-        self._set_instance_status(instance.instance_id, "Quit")
+        self.service.terminate_runtime_session(instance.instance_id)
 
     def _copy_selected_instance(self) -> None:
         if self._selected_item is None:
@@ -427,7 +470,7 @@ class MainWindow(QWidget):
             return
 
         instance = self._selected_item.data(Qt.UserRole)
-        if instance.instance_id in self._launch_threads or instance.instance_id in self._running_processes:
+        if self._instance_is_active(instance.instance_id) or instance.instance_id in self._launch_threads:
             QMessageBox.warning(self, "Delete Instance", "Stop the instance before deleting it.")
             return
 
@@ -450,19 +493,13 @@ class MainWindow(QWidget):
             dialog.close()
         self.refresh_instances()
 
-    def _handle_launch_success(self, instance: InstanceRecord, process: Any) -> None:
-        self._running_processes[instance.instance_id] = process
-        self._launch_started_at[instance.instance_id] = time.monotonic()
-        instance.pid = getattr(process, "pid", None)
-        try:
-            updated = self.service.refresh_instance_last_played(instance)
-        except Exception:
-            updated = instance
-
-        updated.pid = instance.pid
-        updated.status = "Launched"
-        self._replace_instance(updated)
-        self._set_instance_status(updated.instance_id, "Launched")
+    def _handle_launch_success(self, instance: InstanceRecord, pid: int) -> None:
+        instance.pid = pid
+        instance.status = "Launching"
+        self._replace_instance(instance)
+        self._sync_runtime_sessions(force_refresh=True)
+        if self.service.get_close_ui_on_launch():
+            self._close_for_running_session()
 
     def _handle_launch_failure(self, instance_id: str, message: str) -> None:
         self._set_instance_status(instance_id, "Crashed")
@@ -509,11 +546,15 @@ class MainWindow(QWidget):
         self.topbar.set_accounts(self.service.list_accounts(), self.service.get_player_name())
 
     def _open_manage_accounts_dialog(self) -> None:
+        from ui.accounts_dialog import AccountsDialog
+
         dialog = AccountsDialog(self.service, self)
         dialog.exec()
         self._sync_accounts_ui()
 
     def _open_settings_dialog(self) -> None:
+        from ui.settings_dialog import SettingsDialog
+
         if self._settings_dialog is None:
             self._settings_dialog = SettingsDialog(self.service, self)
             self._settings_dialog.background_changed.connect(lambda *_: self._refresh_background())
@@ -525,9 +566,12 @@ class MainWindow(QWidget):
     def _refresh_background(self) -> None:
         self._background_path = self.service.get_active_background_path()
         self._background_pixmap = QPixmap(self._background_path) if self._background_path else QPixmap()
+        self._invalidate_background_cache()
         self.update()
 
     def _open_edit_dialog(self, instance: InstanceRecord, *, page: str = "Minecraft Log") -> None:
+        from ui.edit_instance_dialog import EditInstanceDialog
+
         dialog = self._edit_dialogs.get(instance.instance_id)
         if dialog is None:
             dialog = EditInstanceDialog(self.service, instance, self, initial_page=page)
@@ -612,56 +656,85 @@ class MainWindow(QWidget):
         elif action == "Delete":
             self._delete_selected_instance()
 
-    def _poll_running_processes(self) -> None:
-        finished: list[tuple[str, int]] = []
-        for instance_id, process in list(self._running_processes.items()):
-            return_code = process.poll()
-            if return_code is None:
+    def _sync_runtime_sessions(self, force_refresh: bool = False) -> None:
+        sessions = self.service.list_runtime_sessions()
+        snapshot = self._build_runtime_session_snapshot(sessions)
+        self._runtime_sessions = sessions
+
+        if force_refresh or snapshot != self._runtime_session_snapshot:
+            selected_id = self._selected_item.data(Qt.UserRole).instance_id if self._selected_item is not None else None
+            self._runtime_session_snapshot = snapshot
+            self.refresh_instances(select_instance_id=selected_id)
+
+        self._process_runtime_attention()
+
+    def _process_runtime_attention(self) -> None:
+        attention_items = self.service.claim_runtime_attention()
+        if not attention_items:
+            return
+
+        for payload in attention_items:
+            instance_id = _optional_text(payload.get("instance_id"))
+            if not instance_id:
                 continue
-            finished.append((instance_id, return_code))
-
-        for instance_id, return_code in finished:
-            self._persist_session_playtime(instance_id)
-            self._running_processes.pop(instance_id, None)
-            status = "Quit" if return_code == 0 else "Crashed"
-            self._set_instance_status(instance_id, status)
-            if return_code != 0:
-                instance = self.service.get_instance(instance_id)
-                if instance is not None:
-                    instance.status = "Crashed"
-                    self._open_edit_dialog(instance, page="Minecraft Log")
-                    dialog = self._edit_dialogs.get(instance_id)
-                    if dialog is not None:
-                        dialog.notify_crash(return_code)
-
-    def _persist_session_playtime(self, instance_id: str) -> None:
-        started_at = self._launch_started_at.pop(instance_id, None)
-        if started_at is None:
-            return
-
-        elapsed_seconds = max(0, int(time.monotonic() - started_at))
-        if elapsed_seconds <= 0:
-            return
-
-        for item, card, instance in self._cards:
-            del card
-            if instance.instance_id != instance_id:
+            self.refresh_instances(select_instance_id=instance_id)
+            instance = self.service.get_instance(instance_id)
+            if instance is None:
                 continue
-            current = item.data(Qt.UserRole)
-            try:
-                updated = self.service.record_instance_playtime(current, elapsed_seconds)
-            except Exception:
-                return
-            updated.status = current.status
-            updated.pid = current.pid
-            self._replace_instance(updated)
-            return
+            page = _optional_text(payload.get("attention_page")) or "Minecraft Log"
+            self._open_edit_dialog(instance, page=page)
+            dialog = self._edit_dialogs.get(instance_id)
+            if dialog is not None:
+                exit_code = payload.get("exit_code")
+                dialog.notify_crash(int(exit_code) if isinstance(exit_code, int) else -1)
+        self._activate_window()
+
+    def _close_for_running_session(self) -> None:
+        if self._settings_dialog is not None:
+            self._settings_dialog.close()
+        for dialog in list(self._edit_dialogs.values()):
+            dialog.close()
+        for dialog in list(self._progress_dialogs):
+            dialog.close()
+        self.hide()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _instance_is_active(self, instance_id: str) -> bool:
+        session = self._runtime_sessions.get(instance_id) or self.service.get_runtime_session(instance_id)
+        status = str(session.get("status") or "") if session else ""
+        return status in {"launching", "running"}
+
+    def _build_runtime_session_snapshot(
+        self,
+        sessions: dict[str, dict[str, Any]],
+    ) -> tuple[tuple[str, str, int | None, int | None, bool], ...]:
+        snapshot: list[tuple[str, str, int | None, int | None, bool]] = []
+        for instance_id, payload in sorted(sessions.items()):
+            pid = payload.get("pid")
+            exit_code = payload.get("exit_code")
+            snapshot.append(
+                (
+                    instance_id,
+                    str(payload.get("status") or ""),
+                    int(pid) if isinstance(pid, int) else None,
+                    int(exit_code) if isinstance(exit_code, int) else None,
+                    bool(payload.get("attention_needed")),
+                )
+            )
+        return tuple(snapshot)
 
     def _current_session_seconds(self, instance_id: str) -> int:
-        started_at = self._launch_started_at.get(instance_id)
+        session = self._runtime_sessions.get(instance_id)
+        if not session:
+            return 0
+        if str(session.get("status") or "") not in {"launching", "running"}:
+            return 0
+        started_at = _parse_runtime_timestamp(session.get("started_at"))
         if started_at is None:
             return 0
-        return max(0, int(time.monotonic() - started_at))
+        return max(0, int((datetime.now().astimezone() - started_at).total_seconds()))
 
     def _update_playtime_bar(self) -> None:
         selected_instance = self._selected_item.data(Qt.UserRole) if self._selected_item is not None else None
@@ -685,6 +758,35 @@ class MainWindow(QWidget):
             f"Session: {_format_duration(session_seconds)} | Instance total: {_format_duration(instance_total)}"
         )
         self.playtime_total.setText(f"Total playtime: {_format_duration(aggregate_total)}")
+
+    def _apply_initial_restore_request(self) -> None:
+        self._sync_runtime_sessions(force_refresh=True)
+        if self._restore_request:
+            self.handle_ipc_message(self._restore_request)
+
+    def _activate_window(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _ensure_background_cache(self) -> None:
+        if self._background_pixmap.isNull():
+            self._background_cache = QPixmap()
+            self._background_cache_size = QSize()
+            return
+        if self._background_cache_size == self.size() and not self._background_cache.isNull():
+            return
+        scaled = self._background_pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        source_x = max(0, int((scaled.width() - self.width()) / 2))
+        source_y = max(0, int((scaled.height() - self.height()) / 2))
+        self._background_cache = scaled.copy(source_x, source_y, self.width(), self.height())
+        self._background_cache_size = QSize(self.size())
+
+    def _invalidate_background_cache(self) -> None:
+        self._background_cache = QPixmap()
+        self._background_cache_size = QSize()
 
 
 def _format_duration(total_seconds: int) -> str:
@@ -712,3 +814,19 @@ def _format_last_played(value: str | None) -> str:
     except ValueError:
         return value
     return parsed.astimezone().strftime("on %m/%d/%y %I:%M %p")
+
+
+def _parse_runtime_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return None
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

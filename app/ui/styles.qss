@@ -47,8 +47,8 @@ QFrame#brandMark {
 }
 
 QFrame#accountChip {
-    background-color: rgba(88, 128, 196, 0.08);
-    border: 1px solid rgba(121, 165, 237, 0.3);
+    background-color: rgba(22, 35, 56, 0.78);
+    border: 1px solid rgba(122, 166, 237, 0.52);
     border-radius: 12px;
 }
 
@@ -126,8 +126,8 @@ QFrame#sideDivider {
 }
 
 QFrame#contentSurface {
-    background-color: rgba(7, 14, 24, 0.14);
-    border: 1px solid rgba(118, 156, 216, 0.26);
+    background-color: rgba(10, 19, 34, 0.08);
+    border: 1px solid rgba(110, 148, 205, 0.22);
     border-radius: 28px;
 }
 
@@ -227,13 +227,13 @@ QFrame#accountsHeader,
 QFrame#settingsHeader {
     background-color: rgba(13, 22, 37, 0.9);
     border: 1px solid rgba(92, 132, 192, 0.3);
-    border-radius: 16px;
+    border-radius: 14px;
 }
 
 QFrame#iconPresentationSurface {
     background-color: rgba(11, 18, 31, 0.88);
     border: 1px solid rgba(84, 122, 177, 0.3);
-    border-radius: 18px;
+    border-radius: 14px;
 }
 
 QLabel#editorInstanceIcon {
@@ -286,8 +286,8 @@ QFrame#instanceEditorShell {
 QFrame#instanceEditorNav {
     background-color: rgba(10, 18, 31, 0.92);
     border: 1px solid rgba(77, 111, 158, 0.28);
-    border-top-left-radius: 18px;
-    border-bottom-left-radius: 18px;
+    border-top-left-radius: 14px;
+    border-bottom-left-radius: 14px;
 }
 
 QLabel#editorNavTitle {
@@ -309,11 +309,11 @@ QListWidget#instanceEditorNavList {
 QListWidget#instanceEditorNavList::item {
     background: rgba(17, 29, 47, 0.82);
     border: 1px solid rgba(61, 88, 126, 0.28);
-    border-radius: 12px;
-    padding: 16px 18px;
+    border-radius: 9px;
+    padding: 10px 12px;
     margin: 0 0 6px 0;
     color: #f0f5ff;
-    font-size: 19px;
+    font-size: 14px;
     font-weight: 600;
 }
 
@@ -333,8 +333,8 @@ QListWidget#instanceEditorNavList::item:selected {
 QFrame#instanceEditorContent {
     background-color: rgba(11, 18, 31, 0.88);
     border: 1px solid rgba(77, 111, 158, 0.28);
-    border-top-right-radius: 18px;
-    border-bottom-right-radius: 18px;
+    border-top-right-radius: 14px;
+    border-bottom-right-radius: 14px;
 }
 
 QLabel#editorPageTitle {
@@ -346,7 +346,7 @@ QLabel#editorPageTitle {
 
 QLabel#editorCompactPageTitle {
     color: #f5f9ff;
-    font-size: 22px;
+    font-size: 18px;
     font-weight: 700;
     background: transparent;
 }
@@ -378,7 +378,7 @@ QScrollArea#instanceEditorScroll > QWidget > QWidget {
 QFrame#editorSelectionSurface {
     background-color: rgba(7, 14, 25, 0.72);
     border: 1px solid rgba(72, 105, 151, 0.26);
-    border-radius: 14px;
+    border-radius: 10px;
 }
 
 QTabWidget#editorCreateTabs::pane {
@@ -390,12 +390,12 @@ QTabWidget#editorCreateTabs::pane {
 QTabWidget#editorCreateTabs QTabBar::tab {
     background-color: rgba(17, 29, 47, 0.78);
     border: 1px solid rgba(72, 105, 151, 0.26);
-    border-top-left-radius: 10px;
-    border-top-right-radius: 10px;
-    padding: 10px 18px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    padding: 8px 16px;
     margin-right: 6px;
     color: #dce9ff;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 600;
 }
 
@@ -416,7 +416,7 @@ QFrame#editorSectionCard {
 
 QLabel#editorSectionTitle {
     color: #edf4ff;
-    font-size: 20px;
+    font-size: 17px;
     font-weight: 700;
     background: transparent;
 }
@@ -424,16 +424,16 @@ QLabel#editorSectionTitle {
 QFrame#editorSidePanel {
     background-color: rgba(13, 22, 37, 0.9);
     border: 1px solid rgba(84, 119, 170, 0.28);
-    border-radius: 12px;
+    border-radius: 10px;
 }
 
 QComboBox#editorComboBox {
     background-color: rgba(16, 26, 43, 0.96);
     border: 1px solid rgba(84, 122, 177, 0.35);
-    border-radius: 10px;
+    border-radius: 8px;
     color: #eef5ff;
-    padding: 10px 14px;
-    font-size: 14px;
+    padding: 8px 12px;
+    font-size: 13px;
 }
 
 QComboBox#editorComboBox:hover,
@@ -457,7 +457,7 @@ QComboBox#editorComboBox QAbstractItemView,
 QListWidget#editorTransferList {
     background-color: rgba(12, 20, 33, 0.97);
     border: 1px solid rgba(79, 111, 159, 0.26);
-    border-radius: 10px;
+    border-radius: 8px;
     color: #eef5ff;
     outline: 0;
     padding: 6px;
@@ -486,7 +486,7 @@ QComboBox#editorComboBox QLineEdit {
 
 QLabel#editorFilterTitle {
     color: #f2f7ff;
-    font-size: 18px;
+    font-size: 16px;
     font-weight: 600;
     background: transparent;
     padding-bottom: 2px;
@@ -498,7 +498,7 @@ QTableView#loaderCatalogTable {
     background-color: rgba(12, 20, 33, 0.94);
     alternate-background-color: rgba(18, 29, 47, 0.88);
     border: 1px solid rgba(79, 111, 159, 0.25);
-    border-radius: 10px;
+    border-radius: 8px;
     color: #eef5ff;
     gridline-color: rgba(63, 92, 137, 0.18);
     outline: 0;
@@ -552,7 +552,7 @@ QHeaderView::section {
 QCheckBox#editorFilterCheck,
 QRadioButton#editorFilterRadio {
     color: #eef4ff;
-    font-size: 15px;
+    font-size: 14px;
     spacing: 12px;
     background: transparent;
 }
@@ -689,7 +689,7 @@ QPlainTextEdit#installLogOutput {
 QPlainTextEdit#instanceLogOutput {
     background-color: rgba(9, 16, 28, 0.96);
     border: 1px solid rgba(82, 119, 172, 0.28);
-    border-radius: 12px;
+    border-radius: 8px;
     color: #74ff86;
     padding: 14px;
     selection-background-color: rgba(92, 150, 232, 0.35);
@@ -699,7 +699,7 @@ QTableWidget#modsTable {
     background-color: rgba(12, 20, 33, 0.94);
     alternate-background-color: rgba(18, 29, 47, 0.88);
     border: 1px solid rgba(79, 111, 159, 0.25);
-    border-radius: 10px;
+    border-radius: 8px;
     color: #eef5ff;
     gridline-color: rgba(63, 92, 137, 0.18);
     outline: 0;

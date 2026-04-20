@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 import traceback
 import uuid
@@ -16,7 +17,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-import minecraft_launcher_lib
 import psutil
 from platformdirs import PlatformDirs
 
@@ -101,6 +101,30 @@ USER_ICON_PREFIX = "user-icons"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 BACKGROUND_FILE_NAME = "active-background"
 UNSET = object()
+SESSION_STATUS_TO_INSTANCE_STATUS = {
+    "launching": "Launching",
+    "running": "Launched",
+    "finished": "Quit",
+    "stopped": "Quit",
+    "crashed": "Crashed",
+}
+
+
+class _LazyModuleProxy:
+    def __init__(self, module_name: str):
+        self._module_name = module_name
+        self._module = None
+
+    def _load(self):
+        if self._module is None:
+            self._module = __import__(self._module_name)
+        return self._module
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
+
+
+minecraft_launcher_lib = _LazyModuleProxy("minecraft_launcher_lib")
 
 
 @dataclass(slots=True)
@@ -288,6 +312,8 @@ class LauncherService:
         self.instances_root = self.data_root / "instances"
         self.runtime_root = self.data_root / "runtime"
         self.staging_root = self.runtime_root / "staging"
+        self.sessions_root = self.runtime_root / "sessions"
+        self.launcher_ipc_file = self.runtime_root / "launcher-ipc.json"
         self.logs_root = Path(dirs.user_log_dir).resolve()
         self.backgrounds_root = self.data_root / "backgrounds"
         self.default_background_root = self.project_root / "default-background"
@@ -302,6 +328,7 @@ class LauncherService:
             self.instances_root,
             self.runtime_root,
             self.staging_root,
+            self.sessions_root,
             self.logs_root,
             self.generated_icons_root,
         ):
@@ -502,6 +529,7 @@ class LauncherService:
         return entries
 
     def load_instances(self) -> list[InstanceRecord]:
+        runtime_sessions = self.list_runtime_sessions()
         instances: list[InstanceRecord] = []
         for instance_dir in sorted(self.instances_root.iterdir(), key=lambda item: item.name.lower()):
             metadata_path = instance_dir / "instance.json"
@@ -512,6 +540,7 @@ class LauncherService:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 instance = InstanceRecord.from_metadata(metadata, instance_dir)
                 instance.icon_path = self.resolve_icon_path(instance.icon_path)
+                self._apply_runtime_session(instance, runtime_sessions.get(instance.instance_id))
                 instances.append(instance)
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                 continue
@@ -522,6 +551,7 @@ class LauncherService:
     def delete_instance(self, instance: InstanceRecord) -> None:
         if instance.root_dir.exists():
             shutil.rmtree(instance.root_dir)
+        self.clear_runtime_session(instance.instance_id)
 
     def instance_metadata_path(self, instance: InstanceRecord) -> Path:
         return instance.root_dir / "instance.json"
@@ -713,11 +743,35 @@ class LauncherService:
 
         target = self.backgrounds_root / f"{BACKGROUND_FILE_NAME}{source.suffix.lower()}"
         shutil.copy2(source, target)
-        self._write_background_payload({"mode": "custom", "file_name": target.name})
+        payload = self._read_background_payload()
+        payload.update({"mode": "custom", "file_name": target.name})
+        self._write_background_payload(payload)
         return str(target.resolve())
 
     def reset_background(self) -> None:
-        self._write_background_payload({"mode": "default"})
+        payload = self._read_background_payload()
+        payload.pop("file_name", None)
+        payload["mode"] = "default"
+        self._write_background_payload(payload)
+
+    def get_close_ui_on_launch(self) -> bool:
+        return bool(self._read_background_payload().get("close_ui_on_launch", True))
+
+    def set_close_ui_on_launch(self, enabled: bool) -> bool:
+        payload = self._read_background_payload()
+        payload["close_ui_on_launch"] = bool(enabled)
+        self._write_background_payload(payload)
+        return bool(payload["close_ui_on_launch"])
+
+    def get_theme_mode(self) -> str:
+        mode = str(self._read_background_payload().get("theme", "dark")).strip().lower()
+        return "light" if mode == "light" else "dark"
+
+    def set_theme_mode(self, mode: str) -> str:
+        payload = self._read_background_payload()
+        payload["theme"] = "light" if str(mode).strip().lower() == "light" else "dark"
+        self._write_background_payload(payload)
+        return str(payload["theme"])
 
     def list_mods(self, instance: InstanceRecord) -> list[dict[str, Any]]:
         mods_dir = self.get_instance_mods_dir(instance)
@@ -1054,6 +1108,170 @@ class LauncherService:
 
         return subprocess.Popen(command, **kwargs)
 
+    def build_launcher_command(self, *args: str) -> list[str]:
+        if getattr(sys, "frozen", False):
+            return [sys.executable, *args]
+        main_path = self.project_root / "app" / "main.py"
+        return [sys.executable, str(main_path), *args]
+
+    def spawn_session_monitor(self, instance_id: str, pid: int, player_name: str) -> int | None:
+        command = self.build_launcher_command(
+            "--monitor-session",
+            instance_id,
+            "--pid",
+            str(pid),
+            "--player-name",
+            player_name,
+        )
+        kwargs: dict[str, Any] = {
+            "cwd": str(self.project_root),
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+
+        monitor = subprocess.Popen(command, **kwargs)
+        return int(monitor.pid) if getattr(monitor, "pid", None) else None
+
+    def get_runtime_session_path(self, instance_id: str) -> Path:
+        return self.sessions_root / f"{instance_id}.json"
+
+    def list_runtime_sessions(self) -> dict[str, dict[str, Any]]:
+        sessions: dict[str, dict[str, Any]] = {}
+        if not self.sessions_root.is_dir():
+            return sessions
+
+        for path in sorted(self.sessions_root.glob("*.json"), key=lambda item: item.name.lower()):
+            payload = self._read_runtime_session_payload(path)
+            instance_id = _optional_str(payload.get("instance_id"))
+            if instance_id:
+                sessions[instance_id] = payload
+        return sessions
+
+    def get_runtime_session(self, instance_id: str) -> dict[str, Any] | None:
+        payload = self._read_runtime_session_payload(self.get_runtime_session_path(instance_id))
+        return payload or None
+
+    def register_runtime_session(
+        self,
+        instance: InstanceRecord,
+        *,
+        pid: int,
+        player_name: str,
+        close_ui_on_launch: bool,
+    ) -> dict[str, Any]:
+        payload = {
+            "instance_id": instance.instance_id,
+            "instance_name": instance.name,
+            "pid": int(pid),
+            "monitor_pid": None,
+            "player_name": player_name,
+            "status": "launching",
+            "outcome": None,
+            "exit_code": None,
+            "started_at": _utc_now(),
+            "ended_at": None,
+            "stop_requested": False,
+            "attention_needed": False,
+            "attention_page": None,
+            "close_ui_on_launch": bool(close_ui_on_launch),
+        }
+        self._write_runtime_session_payload(self.get_runtime_session_path(instance.instance_id), payload)
+        return payload
+
+    def attach_runtime_monitor(self, instance_id: str, monitor_pid: int | None) -> dict[str, Any] | None:
+        if monitor_pid is None:
+            return self.get_runtime_session(instance_id)
+        return self.update_runtime_session(instance_id, monitor_pid=int(monitor_pid))
+
+    def mark_runtime_session_running(self, instance_id: str) -> dict[str, Any] | None:
+        session = self.get_runtime_session(instance_id)
+        if session is None:
+            return None
+        if _optional_str(session.get("status")) in {"finished", "stopped", "crashed"}:
+            return session
+        return self.update_runtime_session(instance_id, status="running")
+
+    def mark_runtime_session_stop_requested(self, instance_id: str) -> dict[str, Any] | None:
+        session = self.get_runtime_session(instance_id)
+        if session is None:
+            return None
+        return self.update_runtime_session(instance_id, stop_requested=True)
+
+    def complete_runtime_session(self, instance_id: str, exit_code: int | None) -> dict[str, Any] | None:
+        session = self.get_runtime_session(instance_id)
+        if session is None:
+            return None
+
+        if bool(session.get("stop_requested")):
+            final_status = "stopped"
+        elif exit_code in (0, None):
+            final_status = "finished"
+        else:
+            final_status = "crashed"
+
+        payload = self.update_runtime_session(
+            instance_id,
+            pid=None,
+            monitor_pid=None,
+            status=final_status,
+            outcome=final_status,
+            exit_code=exit_code,
+            ended_at=_utc_now(),
+            attention_needed=final_status == "crashed",
+            attention_page="Minecraft Log" if final_status == "crashed" else None,
+        )
+        return payload
+
+    def clear_runtime_session(self, instance_id: str) -> None:
+        path = self.get_runtime_session_path(instance_id)
+        if path.is_file():
+            path.unlink(missing_ok=True)
+
+    def claim_runtime_attention(self) -> list[dict[str, Any]]:
+        claimed: list[dict[str, Any]] = []
+        for instance_id, payload in self.list_runtime_sessions().items():
+            if not bool(payload.get("attention_needed")):
+                continue
+            claimed.append(payload)
+            self.update_runtime_session(instance_id, attention_needed=False)
+        return claimed
+
+    def update_runtime_session(self, instance_id: str, **changes: Any) -> dict[str, Any] | None:
+        path = self.get_runtime_session_path(instance_id)
+        payload = self._read_runtime_session_payload(path)
+        if not payload:
+            return None
+        payload.update(changes)
+        payload["instance_id"] = instance_id
+        self._write_runtime_session_payload(path, payload)
+        return payload
+
+    def runtime_session_pid(self, instance_id: str) -> int | None:
+        session = self.get_runtime_session(instance_id)
+        if session is None:
+            return None
+        try:
+            pid = int(session.get("pid"))
+        except (TypeError, ValueError):
+            return None
+        return pid if pid > 0 else None
+
+    def runtime_session_started_at(self, instance_id: str) -> str | None:
+        session = self.get_runtime_session(instance_id)
+        return _optional_str(session.get("started_at")) if session else None
+
+    def terminate_runtime_session(self, instance_id: str) -> bool:
+        pid = self.runtime_session_pid(instance_id)
+        if pid is None:
+            return False
+        self.mark_runtime_session_stop_requested(instance_id)
+        self.terminate_process_tree(pid)
+        return True
+
     def open_instance_dir(self, instance: InstanceRecord) -> Path:
         return instance.root_dir
 
@@ -1115,7 +1333,7 @@ class LauncherService:
         self._write_accounts_payload({"accounts": ["player1"], "active": "player1"})
 
     def _read_background_payload(self) -> dict[str, Any]:
-        payload = {"mode": "default"}
+        payload = {"mode": "default", "close_ui_on_launch": True, "theme": "dark"}
         if not self.background_settings_file.is_file():
             return payload
         try:
@@ -1125,11 +1343,42 @@ class LauncherService:
         if not isinstance(loaded, dict):
             return payload
         if _optional_str(loaded.get("mode")) == "custom" and _optional_str(loaded.get("file_name")):
-            return {"mode": "custom", "file_name": str(loaded["file_name"])}
+            payload = {"mode": "custom", "file_name": str(loaded["file_name"])}
+        payload["close_ui_on_launch"] = bool(loaded.get("close_ui_on_launch", True))
+        payload["theme"] = "light" if str(loaded.get("theme", "dark")).strip().lower() == "light" else "dark"
         return payload
 
     def _write_background_payload(self, payload: dict[str, Any]) -> None:
+        payload = dict(payload)
+        payload["close_ui_on_launch"] = bool(payload.get("close_ui_on_launch", True))
+        payload["theme"] = "light" if str(payload.get("theme", "dark")).strip().lower() == "light" else "dark"
         self.background_settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _read_runtime_session_payload(self, path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_runtime_session_payload(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _apply_runtime_session(self, instance: InstanceRecord, session: dict[str, Any] | None) -> None:
+        if not session:
+            return
+        status = _optional_str(session.get("status"))
+        if not status:
+            return
+        instance.status = SESSION_STATUS_TO_INSTANCE_STATUS.get(status, instance.status)
+        try:
+            pid = int(session.get("pid"))
+        except (TypeError, ValueError):
+            pid = None
+        instance.pid = pid if pid and pid > 0 else None
 
     def _copy_tree_if_target_empty(self, source: Path, destination: Path) -> None:
         if not source.exists() or not source.is_dir():

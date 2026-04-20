@@ -6,6 +6,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QIcon, Q
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from ui.responsive import scaled_px
+from ui.theme import theme_palette
 
 
 def blend_colors(start: QColor, end: QColor, factor: float) -> QColor:
@@ -19,53 +20,6 @@ def blend_colors(start: QColor, end: QColor, factor: float) -> QColor:
 
 
 class ModernButton(QPushButton):
-    ROLE_COLORS = {
-        "toolbar": {
-            "bg": QColor(22, 35, 56, 214),
-            "hover": QColor(40, 62, 94, 230),
-            "press": QColor(28, 46, 74, 238),
-            "active": QColor(54, 84, 126, 232),
-            "border": QColor("#39557e"),
-            "border_hover": QColor("#7aa6e3"),
-            "border_active": QColor("#aac9f4"),
-            "text": QColor("#e6efff"),
-            "shadow": QColor(8, 17, 31, 74),
-        },
-        "sidebar": {
-            "bg": QColor(34, 50, 80, 208),
-            "hover": QColor(44, 66, 103, 224),
-            "press": QColor(28, 43, 70, 232),
-            "active": QColor(54, 81, 126, 228),
-            "border": QColor("#3d567f"),
-            "border_hover": QColor("#6b8fc6"),
-            "border_active": QColor("#93b7eb"),
-            "text": QColor("#edf4ff"),
-            "shadow": QColor(8, 16, 29, 76),
-        },
-        "accent": {
-            "bg": QColor(42, 72, 98, 222),
-            "hover": QColor(55, 89, 120, 230),
-            "press": QColor(33, 61, 84, 236),
-            "active": QColor(67, 104, 138, 232),
-            "border": QColor("#567da4"),
-            "border_hover": QColor("#7ea4cb"),
-            "border_active": QColor("#a2c2e5"),
-            "text": QColor("#f7fbff"),
-            "shadow": QColor(18, 45, 72, 74),
-        },
-        "danger": {
-            "bg": QColor("#391926"),
-            "hover": QColor("#482031"),
-            "press": QColor("#331724"),
-            "active": QColor("#5c2740"),
-            "border": QColor("#75405a"),
-            "border_hover": QColor("#b4688b"),
-            "border_active": QColor("#d78aa7"),
-            "text": QColor("#ffcedd"),
-            "shadow": QColor(50, 12, 25, 72),
-        },
-    }
-
     def __init__(
         self,
         text,
@@ -83,13 +37,12 @@ class ModernButton(QPushButton):
     ):
         super().__init__(text, parent)
         self._role = role
-        self._colors = self.ROLE_COLORS[role]
         self._hover = 0.0
         self._press = 0.0
         self._active = 0.0
         self._invalid = 0.0
         self._icon_size = icon_size
-        self._radius = radius if radius is not None else (12 if role == "toolbar" else 14)
+        self._radius = radius if radius is not None else (10 if role == "toolbar" else 10)
         self._font_point_size = font_point_size
         self._font_weight = font_weight if font_weight is not None else QFont.DemiBold
         self._minimum_width_override = minimum_width
@@ -138,11 +91,11 @@ class ModernButton(QPushButton):
         gap = 12 if not self.icon().isNull() else 0
         icon_width = self._icon_size if not self.icon().isNull() else 0
         horizontal_padding = self._horizontal_padding if self._horizontal_padding is not None else (
-            58 if self._role == "toolbar" else 54
+            54 if self._role == "toolbar" else 46
         )
         width = metrics.horizontalAdvance(self.text()) + icon_width + gap + horizontal_padding
         minimum_width = self._minimum_width_override if self._minimum_width_override is not None else (
-            176 if self._role == "toolbar" else 152
+            168 if self._role == "toolbar" else 132
         )
         return QSize(max(width, minimum_width), self.minimumHeight() + 5)
 
@@ -157,6 +110,9 @@ class ModernButton(QPushButton):
             self.setMaximumHeight(height + 5)
         self.setMinimumWidth(self.sizeHint().width())
         self.updateGeometry()
+        self.update()
+
+    def refresh_theme(self) -> None:
         self.update()
 
     def _set_hover_progress(self, value):
@@ -208,6 +164,7 @@ class ModernButton(QPushButton):
 
     def paintEvent(self, event):
         del event
+        colors = theme_palette(self)["buttons"][self._role]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
@@ -215,17 +172,17 @@ class ModernButton(QPushButton):
         rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -(shadow_offset + 1.5))
         rect.translate(0, 0.8 * self._press)
 
-        bg = blend_colors(self._colors["bg"], self._colors["hover"], self._hover)
-        bg = blend_colors(bg, self._colors["press"], self._press)
-        bg = blend_colors(bg, self._colors["active"], self._active)
+        bg = blend_colors(colors["bg"], colors["hover"], self._hover)
+        bg = blend_colors(bg, colors["press"], self._press)
+        bg = blend_colors(bg, colors["active"], self._active)
         bg = blend_colors(bg, QColor("#5c2740"), self._invalid * 0.9)
 
-        border = blend_colors(self._colors["border"], self._colors["border_hover"], self._hover)
-        border = blend_colors(border, self._colors["border_hover"], self._press * 0.45)
-        border = blend_colors(border, self._colors["border_active"], self._active)
+        border = blend_colors(colors["border"], colors["border_hover"], self._hover)
+        border = blend_colors(border, colors["border_hover"], self._press * 0.45)
+        border = blend_colors(border, colors["border_active"], self._active)
         border = blend_colors(border, QColor("#ff91bc"), self._invalid)
 
-        text_color = blend_colors(self._colors["text"], QColor("#ffe2ee"), self._invalid * 0.8)
+        text_color = blend_colors(colors["text"], QColor("#ffe2ee"), self._invalid * 0.8)
 
         if not self.isEnabled():
             bg.setAlpha(int(bg.alpha() * 0.4))
@@ -233,7 +190,7 @@ class ModernButton(QPushButton):
             text_color.setAlpha(int(text_color.alpha() * 0.58))
 
         painter.setPen(Qt.NoPen)
-        shadow = QColor(self._colors["shadow"])
+        shadow = QColor(colors["shadow"])
         shadow_strength = 0.7 + (self._hover * 0.3) + (self._invalid * 0.2)
         shadow.setAlpha(int(shadow.alpha() * shadow_strength))
         painter.setBrush(shadow)

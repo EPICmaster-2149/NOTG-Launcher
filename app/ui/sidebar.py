@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from ui.topbar import ModernButton
 from ui.icon_utils import load_scaled_icon
 from ui.responsive import scaled_px
+from ui.theme import theme_palette
 
 
 class SideBar(QWidget):
@@ -167,33 +168,6 @@ def _clean_version(version):
 
 
 class StatusBadge(QWidget):
-    COLORS = {
-        "launched": {
-            "bg": QColor(28, 64, 46, 210),
-            "border": QColor("#3f8a62"),
-            "text": QColor("#dfffe9"),
-            "dot": QColor("#49d17c"),
-        },
-        "launching": {
-            "bg": QColor(26, 50, 82, 214),
-            "border": QColor("#4f86d8"),
-            "text": QColor("#dcedff"),
-            "dot": QColor("#6fb0ff"),
-        },
-        "quit": {
-            "bg": QColor(44, 55, 74, 215),
-            "border": QColor("#627897"),
-            "text": QColor("#eef4ff"),
-            "dot": QColor("#aab8cf"),
-        },
-        "crashed": {
-            "bg": QColor(69, 30, 45, 214),
-            "border": QColor("#af5f7d"),
-            "text": QColor("#ffe3eb"),
-            "dot": QColor("#ff7caa"),
-        },
-    }
-
     LABELS = {
         "launched": "Running",
         "launching": "Launching",
@@ -218,14 +192,15 @@ class StatusBadge(QWidget):
 
     def set_status(self, status):
         status_key = status.lower().replace(" ", "-")
-        self._status_key = status_key if status_key in self.COLORS else "quit"
+        colors = theme_palette(self)["status_badge"]
+        self._status_key = status_key if status_key in colors else "quit"
         self._label = self.LABELS.get(self._status_key, status.title())
         self.updateGeometry()
         self.update()
 
     def paintEvent(self, event):
         del event
-        colors = self.COLORS[self._status_key]
+        colors = theme_palette(self)["status_badge"][self._status_key]
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)

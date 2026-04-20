@@ -51,6 +51,7 @@ from core.launcher import LauncherService
 from ui.icon_selector_dialog import IconSelectorDialog
 from ui.icon_utils import load_scaled_icon
 from ui.responsive import fitted_window_size, scaled_px, screen_scale
+from ui.theme import theme_palette
 from ui.topbar import ModernButton, blend_colors
 
 
@@ -85,32 +86,40 @@ class AccentLineEdit(QLineEdit):
         self._focus_animation.start()
 
     def _apply_style(self) -> None:
-        border = blend_colors(QColor("#2f496e"), QColor("#7bc4ff"), self._focus_progress)
-        background = blend_colors(QColor("#101a2d"), QColor("#12213a"), self._focus_progress * 0.55)
-        shadow = QColor(123, 196, 255, int(120 * self._focus_progress))
+        palette = theme_palette(self)["line_edit"]
+        border = blend_colors(palette["border"], palette["border_focus"], self._focus_progress)
+        background = blend_colors(palette["background"], palette["background_focus"], self._focus_progress * 0.55)
+        shadow_base = QColor(palette["shadow"])
+        shadow = QColor(shadow_base.red(), shadow_base.green(), shadow_base.blue(), int(shadow_base.alpha() * self._focus_progress))
         self._shadow.setBlurRadius(24 * self._focus_progress)
         self._shadow.setColor(shadow)
 
         font_size = 22 if self._large else 13
         padding = "16px 18px" if self._large else "12px 14px"
         radius = 12 if self._large else 10
+        text = palette["text"]
+        placeholder = palette["placeholder"]
+        selection = palette["selection"]
         self.setStyleSheet(
             f"""
             QLineEdit {{
                 background-color: rgba({background.red()}, {background.green()}, {background.blue()}, {background.alpha()});
                 border: 1px solid rgba({border.red()}, {border.green()}, {border.blue()}, {border.alpha()});
                 border-radius: {radius}px;
-                color: #f1f6ff;
+                color: rgba({text.red()}, {text.green()}, {text.blue()}, {text.alpha()});
                 padding: {padding};
                 font-size: {font_size}px;
                 font-weight: {'700' if self._large else '500'};
-                selection-background-color: rgba(124, 199, 255, 0.35);
+                selection-background-color: rgba({selection.red()}, {selection.green()}, {selection.blue()}, {selection.alpha()});
             }}
             QLineEdit::placeholder {{
-                color: rgba(186, 205, 235, 0.55);
+                color: rgba({placeholder.red()}, {placeholder.green()}, {placeholder.blue()}, {placeholder.alpha()});
             }}
             """
         )
+
+    def refresh_theme(self) -> None:
+        self._apply_style()
 
     def focusInEvent(self, event) -> None:
         self._animate_to(1.0)
@@ -297,12 +306,13 @@ class LoaderPlaceholder(QWidget):
 
     def paintEvent(self, event) -> None:
         del event
+        palette = theme_palette(self)["loader_placeholder"]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
         outer = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        painter.setPen(QPen(QColor("#253756"), 1.2))
-        painter.setBrush(QColor(11, 18, 30, 180))
+        painter.setPen(QPen(palette["outer_border"], 1.2))
+        painter.setBrush(palette["outer_fill"])
         painter.drawRoundedRect(outer, 12, 12)
 
         box = QRectF(
@@ -311,15 +321,15 @@ class LoaderPlaceholder(QWidget):
             self.width() * 0.76,
             min(96.0, self.height() * 0.28),
         )
-        painter.setPen(QPen(QColor("#d5ebff"), 1.0))
-        painter.setBrush(QColor(235, 244, 255, 235))
+        painter.setPen(QPen(palette["inner_border"], 1.0))
+        painter.setBrush(palette["inner_fill"])
         painter.drawRoundedRect(box, 10, 10)
 
         font = QFont(self.font())
         font.setPointSize(13)
         font.setWeight(QFont.Bold)
         painter.setFont(font)
-        painter.setPen(QColor("#3f5778"))
+        painter.setPen(palette["text"])
         painter.drawText(box, Qt.AlignCenter, self._text)
 
 
@@ -477,6 +487,7 @@ class HeaderIconButton(QWidget):
 
     def paintEvent(self, event) -> None:
         del event
+        palette = theme_palette(self)["header_icon"]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         scale = screen_scale(self, minimum=0.78, maximum=1.05)
@@ -484,10 +495,10 @@ class HeaderIconButton(QWidget):
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         rect.translate(0, -1.0 * self._hover + 0.8 * self._press)
 
-        top_fill = blend_colors(QColor("#17263d"), QColor("#1d3354"), self._hover)
-        bottom_fill = blend_colors(QColor("#112036"), QColor("#182c47"), self._hover)
-        border = blend_colors(QColor("#43618c"), QColor("#7bc4ff"), self._hover)
-        border = blend_colors(border, QColor("#9bd4ff"), self._press * 0.5)
+        top_fill = blend_colors(palette["outer_top"], palette["outer_top_hover"], self._hover)
+        bottom_fill = blend_colors(palette["outer_bottom"], palette["outer_bottom_hover"], self._hover)
+        border = blend_colors(palette["border"], palette["border_hover"], self._hover)
+        border = blend_colors(border, palette["border_press"], self._press * 0.5)
 
         painter.setPen(QPen(border, max(1.0, 1.25 * scale)))
         painter.setBrush(top_fill)
@@ -495,7 +506,7 @@ class HeaderIconButton(QWidget):
 
         inset = 8 * scale
         inner = rect.adjusted(inset, inset, -inset, -inset)
-        painter.setPen(QPen(QColor("#2e4669"), max(1.0, scale)))
+        painter.setPen(QPen(palette["inner_border"], max(1.0, scale)))
         painter.setBrush(bottom_fill)
         painter.drawRoundedRect(inner, 14 * scale, 14 * scale)
 
@@ -509,7 +520,8 @@ class HeaderIconButton(QWidget):
         if self._hover > 0.04:
             glow_inset = 2 * scale
             glow = rect.adjusted(glow_inset, glow_inset, -glow_inset, -glow_inset)
-            accent = QColor(126, 194, 255, int(54 * self._hover))
+            glow_color = QColor(palette["glow"])
+            accent = QColor(glow_color.red(), glow_color.green(), glow_color.blue(), int(glow_color.alpha() * self._hover))
             painter.setPen(QPen(accent, max(1.2, 2.0 * scale)))
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(glow, 14 * scale, 14 * scale)

@@ -91,33 +91,33 @@ class EditInstanceDialog(QDialog):
         self._log_read_position = 0
         self._log_placeholder_shown = False
         self._last_crash_report: Path | None = None
+        self._versions_loaded = False
+        self._mods_loaded = False
+        self._screenshots_loaded = False
+        self._advanced_loaded = False
 
         self.setObjectName("editInstanceDialog")
         self.setWindowTitle(f"Edit {instance.name}")
         self.setModal(False)
-        self.setMinimumSize(960, 700)
-        self.resize(fitted_window_size(self.parentWidget() or self, 1280, 860, minimum_width=960, minimum_height=700))
+        self.setMinimumSize(920, 680)
+        self.resize(fitted_window_size(self.parentWidget() or self, 1240, 800, minimum_width=920, minimum_height=680))
+
+        self.log_timer = QTimer(self)
+        self.log_timer.setInterval(1100)
+        self.log_timer.timeout.connect(self._poll_log_output)
 
         self._build_ui()
         self._apply_responsive_layout()
         self._sync_header_icon()
-        self._reload_copy_source_instances()
-        self._reload_mods()
-        self._reload_screenshots()
         self._update_ram_slider_range()
         self._set_ram_value(instance.memory_mb)
         self._update_runtime_buttons()
         self._set_page(initial_page)
-
-        self.log_timer = QTimer(self)
-        self.log_timer.setInterval(700)
-        self.log_timer.timeout.connect(self._poll_log_output)
-        self.log_timer.start()
-
-        QTimer.singleShot(0, lambda: self._load_versions(force_refresh=False))
+        self._sync_log_polling_state()
 
     def showEvent(self, event) -> None:
         self._apply_responsive_layout()
+        self._sync_log_polling_state()
         super().showEvent(event)
 
     def resizeEvent(self, event) -> None:
@@ -204,13 +204,27 @@ class EditInstanceDialog(QDialog):
         divider.setObjectName("editorPrimaryDivider")
         content_layout.addWidget(divider)
 
+        self.page_scroll = QScrollArea()
+        self.page_scroll.setObjectName("instanceEditorScroll")
+        self.page_scroll.setWidgetResizable(True)
+        self.page_scroll.setFrameShape(QFrame.NoFrame)
+        self.page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.page_scroll_container = QWidget()
+        self.page_scroll_layout = QVBoxLayout(self.page_scroll_container)
+        self.page_scroll_layout.setContentsMargins(0, 0, 6, 0)
+        self.page_scroll_layout.setSpacing(0)
+
         self.page_stack = QStackedWidget()
+        self.page_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.page_stack.addWidget(self._build_log_page())
         self.page_stack.addWidget(self._build_versions_page())
         self.page_stack.addWidget(self._build_mods_page())
         self.page_stack.addWidget(self._build_screenshots_page())
         self.page_stack.addWidget(self._build_advanced_page())
-        content_layout.addWidget(self.page_stack, 1)
+        self.page_scroll_layout.addWidget(self.page_stack)
+        self.page_scroll.setWidget(self.page_scroll_container)
+        content_layout.addWidget(self.page_scroll, 1)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
@@ -225,9 +239,9 @@ class EditInstanceDialog(QDialog):
         self.kill_button.clicked.connect(lambda: self.kill_requested.emit(self.instance))
         footer.addWidget(self.kill_button)
 
-        self.close_button = ModernButton("Close", role="sidebar", height=42, icon_size=0)
-        self.close_button.clicked.connect(self.close)
-        footer.addWidget(self.close_button)
+        self.ok_button = ModernButton("OK", role="sidebar", height=42, icon_size=0, minimum_width=106, horizontal_padding=26)
+        self.ok_button.clicked.connect(self.accept)
+        footer.addWidget(self.ok_button)
         content_layout.addLayout(footer)
 
         shell_layout.addWidget(content, 1)
@@ -264,6 +278,7 @@ class EditInstanceDialog(QDialog):
         self.log_output.setObjectName("instanceLogOutput")
         self.log_output.setReadOnly(True)
         self.log_output.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.log_output.setMaximumBlockCount(5000)
         layout.addWidget(self.log_output, 1)
 
         bottom_row = QHBoxLayout()
@@ -645,7 +660,8 @@ class EditInstanceDialog(QDialog):
 
         side_layout.addStretch()
 
-        self.version_refresh = ModernButton("Refresh", role="sidebar", height=40, icon_size=0)
+        self.version_refresh = ModernButton("Refresh", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=108, horizontal_padding=22)
+        self.version_refresh.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.version_refresh.clicked.connect(lambda: self._load_versions(force_refresh=True))
         self.version_refresh.setEnabled(False)
         side_layout.addWidget(self.version_refresh)
@@ -722,7 +738,8 @@ class EditInstanceDialog(QDialog):
 
         side_layout.addStretch()
 
-        self.loader_refresh = ModernButton("Refresh", role="sidebar", height=40, icon_size=0)
+        self.loader_refresh = ModernButton("Refresh", role="sidebar", height=38, icon_size=0, radius=10, minimum_width=108, horizontal_padding=22)
+        self.loader_refresh.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.loader_refresh.clicked.connect(lambda: self._refresh_loader_rows(force_refresh=True))
         self.loader_refresh.setEnabled(False)
         side_layout.addWidget(self.loader_refresh)
@@ -783,16 +800,17 @@ class EditInstanceDialog(QDialog):
             layout.setContentsMargins(root_margin, root_margin, root_margin, scaled_px(self, 20, minimum=14, maximum=22))
             layout.setSpacing(scaled_px(self, 14, minimum=10, maximum=16))
 
-        self.icon_button.set_side_length(scaled_px(self, 104, minimum=76, maximum=108))
-        self.name_edit.setMinimumHeight(scaled_px(self, 66, minimum=52, maximum=68))
-        self.nav_frame.setFixedWidth(scaled_px(self, 212, minimum=176, maximum=220))
-        self.version_side_panel.setFixedWidth(scaled_px(self, 184, minimum=150, maximum=190))
-        self.loader_side_panel.setFixedWidth(scaled_px(self, 184, minimum=150, maximum=190))
+        compact_layout = self.width() < 1220
+        self.icon_button.set_side_length(scaled_px(self, 96, minimum=74, maximum=100))
+        self.name_edit.setMinimumHeight(scaled_px(self, 54, minimum=44, maximum=56))
+        self.nav_frame.setFixedWidth(scaled_px(self, 168 if compact_layout else 178, minimum=148, maximum=184))
+        self.version_side_panel.setFixedWidth(scaled_px(self, 152 if compact_layout else 168, minimum=136, maximum=172))
+        self.loader_side_panel.setFixedWidth(scaled_px(self, 152 if compact_layout else 168, minimum=136, maximum=172))
 
         for button in (
             self.launch_button,
             self.kill_button,
-            self.close_button,
+            self.ok_button,
             self.log_copy_button,
             self.log_clear_button,
             self.log_find_button,
@@ -819,14 +837,17 @@ class EditInstanceDialog(QDialog):
         ):
             button.set_metrics(height=scaled_px(self, button.minimumHeight(), minimum=36, maximum=max(40, button.minimumHeight() + 2)), icon_size=0)
 
-        self.ram_display.setMinimumWidth(scaled_px(self, 180, minimum=156, maximum=188))
-        self.version_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 36, minimum=32, maximum=38))
-        self.loader_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 36, minimum=32, maximum=38))
-        self.mods_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 44, minimum=40, maximum=48))
+        self.ram_display.setMinimumWidth(scaled_px(self, 170, minimum=148, maximum=176))
+        self.version_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 34, minimum=30, maximum=36))
+        self.loader_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 34, minimum=30, maximum=36))
+        self.mods_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 40, minimum=36, maximum=44))
+        self.version_stack.setMinimumHeight(scaled_px(self, 260, minimum=228, maximum=286))
+        self.loader_stack.setMinimumHeight(scaled_px(self, 206, minimum=182, maximum=226))
         self.screenshots_list.setGridSize(QSize(scaled_px(self, 214, minimum=188, maximum=224), scaled_px(self, 178, minimum=164, maximum=190)))
         self.screenshots_list.setIconSize(QSize(scaled_px(self, 190, minimum=164, maximum=196), scaled_px(self, 108, minimum=96, maximum=114)))
         self.copy_available_list.setMinimumHeight(scaled_px(self, 220, minimum=180, maximum=260))
         self.copy_selected_list.setMinimumHeight(scaled_px(self, 220, minimum=180, maximum=260))
+        self._sync_page_stack_height()
 
     def _set_page(self, page_name: str) -> None:
         target_index = self.PAGE_NAMES.index(page_name) if page_name in self.PAGE_NAMES else 0
@@ -837,8 +858,21 @@ class EditInstanceDialog(QDialog):
         self.page_stack.setCurrentIndex(target_index)
         page_name = self.PAGE_NAMES[target_index]
         self.page_title.setText(page_name)
+        self._ensure_page_loaded(page_name)
+        self._sync_page_stack_height()
+        self.page_scroll.verticalScrollBar().setValue(0)
+        self._sync_log_polling_state()
         if page_name == "Minecraft Log":
             self._poll_log_output()
+
+    def _sync_page_stack_height(self) -> None:
+        current_page = self.page_stack.currentWidget()
+        if current_page is None:
+            return
+        current_page.adjustSize()
+        self.page_stack.setMinimumHeight(max(0, current_page.sizeHint().height()))
+        self.page_stack.updateGeometry()
+        self.page_scroll_container.adjustSize()
 
     def _sync_header_icon(self) -> None:
         self.icon_button.set_icon_path(self.service.resolve_icon_path(self._selected_icon_path))
@@ -876,10 +910,14 @@ class EditInstanceDialog(QDialog):
         self._sync_header_icon()
         self._update_runtime_buttons()
         self._set_ram_value(instance.memory_mb)
-        self._reload_copy_source_instances()
-        self._reload_mods()
-        self._reload_screenshots()
-        self._sync_selected_version_to_instance()
+        if self._advanced_loaded:
+            self._reload_copy_source_instances()
+        if self._mods_loaded:
+            self._reload_mods()
+        if self._screenshots_loaded:
+            self._reload_screenshots()
+        if self._versions_loaded:
+            self._sync_selected_version_to_instance()
         self.instance_changed.emit(instance)
 
     def sync_runtime_state(self, instance: InstanceRecord) -> None:
@@ -907,6 +945,32 @@ class EditInstanceDialog(QDialog):
         is_running = status_key in {"launched", "launching"}
         self.launch_button.setEnabled(not is_running)
         self.kill_button.setEnabled(is_running)
+
+    def _ensure_page_loaded(self, page_name: str) -> None:
+        if page_name == "Versions" and not self._versions_loaded:
+            self._versions_loaded = True
+            self._load_versions(force_refresh=False)
+            return
+        if page_name == "Mods" and not self._mods_loaded:
+            self._mods_loaded = True
+            self._reload_mods()
+            return
+        if page_name == "Screenshots" and not self._screenshots_loaded:
+            self._screenshots_loaded = True
+            self._reload_screenshots()
+            return
+        if page_name == "Advanced" and not self._advanced_loaded:
+            self._advanced_loaded = True
+            self._reload_copy_source_instances()
+
+    def _sync_log_polling_state(self) -> None:
+        if not hasattr(self, "log_timer"):
+            return
+        should_poll = self.isVisible() and self.page_stack.currentIndex() == 0
+        if should_poll and not self.log_timer.isActive():
+            self.log_timer.start()
+        elif not should_poll and self.log_timer.isActive():
+            self.log_timer.stop()
 
     def _poll_log_output(self) -> None:
         log_path = self.service.get_instance_latest_log_path(self.instance)
