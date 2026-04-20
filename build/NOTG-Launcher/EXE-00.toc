@@ -70,7 +70,7 @@
  [],
  False,
  False,
- 1776696223,
+ 1776699616,
  [('runw.exe',
    'D:\\AI_WORKSPACE\\MinecraftLauncher\\NOTG-Launcher\\.venv\\Lib\\site-packages\\PyInstaller\\bootloader\\Windows-64bit-intel\\runw.exe',
    'EXECUTABLE')],

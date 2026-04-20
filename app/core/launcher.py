@@ -1133,8 +1133,15 @@ class LauncherService:
             self.build_launch_options(player_name, minecraft_directory, instance.memory_mb),
         )
 
-        kwargs: dict[str, Any] = {"cwd": str(minecraft_directory)}
-        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        kwargs: dict[str, Any] = {
+            "cwd": str(minecraft_directory),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
@@ -1166,7 +1173,9 @@ class LauncherService:
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
         }
-        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
