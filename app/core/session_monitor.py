@@ -48,7 +48,7 @@ def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
     if str(finished_session.get("status")) == "crashed":
         command.extend(["--restore-page", "Minecraft Log"])
     kwargs: dict[str, object] = {
-        "cwd": str(service.project_root),
+        "cwd": str(service.get_launcher_working_directory()),
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
     }

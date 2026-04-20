@@ -295,7 +295,10 @@ class InstallResult:
 
 class LauncherService:
     def __init__(self, project_root: Path | None = None):
-        self.project_root = project_root or Path(__file__).resolve().parents[2]
+        if hasattr(sys, '_MEIPASS'):
+            self.project_root = Path(sys._MEIPASS)
+        else:
+            self.project_root = project_root or Path(__file__).resolve().parents[2]
         self.install_root = self.project_root
         self.assets_root = self.project_root / "assets"
         self.default_icons_root = self.assets_root / "default-instance-icons"
@@ -1144,6 +1147,11 @@ class LauncherService:
         main_path = self.project_root / "app" / "main.py"
         return [sys.executable, str(main_path), *args]
 
+    def get_launcher_working_directory(self) -> Path:
+        if getattr(sys, "frozen", False):
+            return self.data_root
+        return self.project_root
+
     def spawn_session_monitor(self, instance_id: str, pid: int, player_name: str) -> int | None:
         command = self.build_launcher_command(
             "--monitor-session",
@@ -1154,7 +1162,7 @@ class LauncherService:
             player_name,
         )
         kwargs: dict[str, Any] = {
-            "cwd": str(self.project_root),
+            "cwd": str(self.get_launcher_working_directory()),
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
         }

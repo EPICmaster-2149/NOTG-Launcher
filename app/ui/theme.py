@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -352,9 +353,14 @@ def apply_theme(app: QApplication, mode: str) -> str:
     normalized = normalize_theme_mode(mode)
     app.setProperty(THEME_PROPERTY, normalized)
 
-    base_qss = (Path(__file__).with_name("styles.qss")).read_text(encoding="utf-8")
+    if hasattr(sys, '_MEIPASS'):
+        base_path = Path(sys._MEIPASS) / "ui"
+    else:
+        base_path = Path(__file__).with_name("styles.qss").parent
+
+    base_qss = (base_path / "styles.qss").read_text(encoding="utf-8")
     if normalized == "light":
-        light_qss = (Path(__file__).with_name("styles_light.qss")).read_text(encoding="utf-8")
+        light_qss = (base_path / "styles_light.qss").read_text(encoding="utf-8")
         app.setStyleSheet(f"{base_qss}\n\n{light_qss}")
     else:
         app.setStyleSheet(base_qss)

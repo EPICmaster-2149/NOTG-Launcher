@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
@@ -134,7 +135,10 @@ class SideBar(QWidget):
         self._current_instance = None
         self.name_label.setText("No instance")
         self.version_label.setText("Select an instance")
-        asset_root = Path(__file__).resolve().parents[2] / "assets" / "default-instance-icons"
+        if hasattr(sys, '_MEIPASS'):
+            asset_root = Path(sys._MEIPASS) / "assets" / "default-instance-icons"
+        else:
+            asset_root = Path(__file__).resolve().parents[2] / "assets" / "default-instance-icons"
         pixmap = load_scaled_icon(asset_root / "Grass Block.png", 78, 78)
         self.icon_label.setPixmap(pixmap)
         self.update_status("Quit")

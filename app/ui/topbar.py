@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 
 from PySide6.QtCore import QEasingCurve, QPoint, QRectF, QSize, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QPainter, QPen
@@ -384,7 +385,10 @@ class TopBar(QWidget):
         super().__init__()
         self.setObjectName("topBar")
 
-        asset_root = Path(__file__).resolve().parents[2] / "assets"
+        if hasattr(sys, '_MEIPASS'):
+            asset_root = Path(sys._MEIPASS) / "assets"
+        else:
+            asset_root = Path(__file__).resolve().parents[2] / "assets"
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
