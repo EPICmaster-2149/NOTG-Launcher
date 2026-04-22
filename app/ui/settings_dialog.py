@@ -24,6 +24,7 @@ from ui.app_icon import application_icon
 from ui.responsive import fitted_window_size, scaled_px
 from ui.theme import apply_theme, theme_palette
 from ui.topbar import ModernButton, blend_colors
+from ui.update_settings import UpdateSettingsPanel
 
 
 class BackgroundPreview(QWidget):
@@ -252,6 +253,20 @@ class SettingsDialog(QDialog):
         self.close_on_launch_checkbox.setChecked(self.service.get_close_ui_on_launch())
         self.close_on_launch_checkbox.toggled.connect(self._set_close_on_launch)
         self.scroll_layout.addWidget(self.close_on_launch_checkbox)
+
+        # Add divider before Update section
+        divider2 = QFrame()
+        divider2.setObjectName("editorSectionDivider")
+        self.scroll_layout.addWidget(divider2)
+
+        # Add Update section
+        self.update_settings = UpdateSettingsPanel(
+            parent=self,
+            github_owner="EPICmaster-2149",  # Your GitHub username
+            github_repo="NOTG-Launcher"      # Your repository name
+        )
+        self.scroll_layout.addWidget(self.update_settings, 0)
+
         self.scroll_layout.addStretch()
 
         footer = QHBoxLayout()
