@@ -2,21 +2,39 @@ from __future__ import annotations
 
 import subprocess
 from datetime import datetime, timezone
+import time
 
 import psutil
 
+from core.discord_presence import DiscordRichPresence
 from core.ipc import send_ipc_message
 from core.launcher import LauncherService, _parse_timestamp
 
 
 def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
-    del player_name
     service = LauncherService()
     session = service.get_runtime_session(instance_id)
     if session is None:
         return 1
 
-    service.mark_runtime_session_running(instance_id)
+    session = service.mark_runtime_session_running(instance_id) or session
+
+    instance = service.get_instance(instance_id)
+
+    presence = None
+    if instance is not None and instance.rich_presence_enabled:
+        started = _parse_timestamp(session.get("started_at"))
+        started_at = started.timestamp() if started != datetime.min.replace(tzinfo=timezone.utc) else time.time()
+        presence = DiscordRichPresence(
+        )
+        if presence.connect():
+            presence.update(
+                state=service.build_instance_rich_presence_state(instance),
+                details=instance.rich_presence_details or service.build_instance_rich_presence_details(instance),
+                started_at=started_at,
+                large_text="NOTG Launcher",
+                small_text=instance.name or player_name,
+            )
 
     return_code: int | None = None
     try:
@@ -24,6 +42,10 @@ def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
         return_code = process.wait()
     except (psutil.Error, ValueError):
         return_code = None
+
+    if presence is not None:
+        presence.clear()
+        presence.close()
 
     finished_session = service.complete_runtime_session(instance_id, return_code)
     if finished_session is None:

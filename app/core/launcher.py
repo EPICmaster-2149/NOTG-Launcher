@@ -151,14 +151,15 @@ class InstanceRecord:
     minecraft_dir: Path
     memory_mb: int = DEFAULT_MEMORY_MB
     total_played_seconds: int = 0
+    rich_presence_enabled: bool = True
+    rich_presence_state: str | None = None
+    rich_presence_details: str | None = None
     status: str = "Quit"
     pid: int | None = None
 
     @property
     def version_label(self) -> str:
-        if self.mod_loader_id:
-            return f"{self.vanilla_version} • {self.loader_name}"
-        return self.vanilla_version
+        return f"Version {self.vanilla_version} | {self.loader_name}"
 
     @property
     def loader_name(self) -> str:
@@ -179,6 +180,9 @@ class InstanceRecord:
             "last_played": self.last_played,
             "memory_mb": self.memory_mb,
             "total_played_seconds": self.total_played_seconds,
+            "rich_presence_enabled": self.rich_presence_enabled,
+            "rich_presence_state": self.rich_presence_state,
+            "rich_presence_details": self.rich_presence_details,
         }
 
     @classmethod
@@ -196,6 +200,9 @@ class InstanceRecord:
             last_played=_optional_str(metadata.get("last_played")),
             memory_mb=_coerce_memory_mb(metadata.get("memory_mb")),
             total_played_seconds=_coerce_non_negative_int(metadata.get("total_played_seconds")),
+            rich_presence_enabled=bool(metadata.get("rich_presence_enabled", True)),
+            rich_presence_state=_optional_str(metadata.get("rich_presence_state")),
+            rich_presence_details=_optional_str(metadata.get("rich_presence_details")),
             root_dir=root_dir,
             minecraft_dir=root_dir / ".minecraft",
         )
@@ -572,6 +579,9 @@ class LauncherService:
         mod_loader_version: Any = UNSET,
         last_played: str | None = None,
         total_played_seconds: int | None = None,
+        rich_presence_enabled: bool | None = None,
+        rich_presence_state: Any = UNSET,
+        rich_presence_details: Any = UNSET,
     ) -> InstanceRecord:
         metadata_path = self.instance_metadata_path(instance)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -597,6 +607,12 @@ class LauncherService:
             metadata["last_played"] = last_played
         if total_played_seconds is not None:
             metadata["total_played_seconds"] = _coerce_non_negative_int(total_played_seconds)
+        if rich_presence_enabled is not None:
+            metadata["rich_presence_enabled"] = bool(rich_presence_enabled)
+        if rich_presence_state is not UNSET:
+            metadata["rich_presence_state"] = _optional_str(rich_presence_state)
+        if rich_presence_details is not UNSET:
+            metadata["rich_presence_details"] = _optional_str(rich_presence_details)
 
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         refreshed = InstanceRecord.from_metadata(metadata, instance.root_dir)
@@ -611,6 +627,27 @@ class LauncherService:
 
     def set_instance_memory(self, instance: InstanceRecord, memory_mb: int) -> InstanceRecord:
         return self.update_instance(instance, memory_mb=memory_mb)
+
+    def set_instance_rich_presence(
+        self,
+        instance: InstanceRecord,
+        *,
+        enabled: bool,
+        state: str | None,
+        details: str | None,
+    ) -> InstanceRecord:
+        return self.update_instance(
+            instance,
+            rich_presence_enabled=enabled,
+            rich_presence_state=state,
+            rich_presence_details=details,
+        )
+
+    def build_instance_rich_presence_state(self, instance: InstanceRecord) -> str:
+        return instance.rich_presence_state or "Playing Minecraft"
+
+    def build_instance_rich_presence_details(self, instance: InstanceRecord) -> str:
+        return instance.version_label
 
     def duplicate_instance(self, instance: InstanceRecord, preferred_name: str | None = None) -> InstanceRecord:
         target_name = self._allocate_duplicate_name(preferred_name or f"{instance.name} Copy")
@@ -797,7 +834,7 @@ class LauncherService:
         return bool(payload["close_ui_on_launch"])
 
     def get_theme_mode(self) -> str:
-        mode = str(self._read_background_payload().get("theme", "light")).strip().lower()
+        mode = str(self._read_background_payload().get("theme", "dark")).strip().lower()
         return "light" if mode == "light" else "dark"
 
     def set_theme_mode(self, mode: str) -> str:
@@ -991,6 +1028,9 @@ class LauncherService:
             "last_played": existing_metadata.get("last_played"),
             "memory_mb": _coerce_memory_mb(request.memory_mb),
             "total_played_seconds": _coerce_non_negative_int(existing_metadata.get("total_played_seconds")),
+            "rich_presence_enabled": bool(existing_metadata.get("rich_presence_enabled", True)),
+            "rich_presence_state": _optional_str(existing_metadata.get("rich_presence_state")),
+            "rich_presence_details": _optional_str(existing_metadata.get("rich_presence_details")),
         }
         (stage_dir / "instance.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         if replace_existing and final_dir.exists():
@@ -1380,7 +1420,11 @@ class LauncherService:
         self._write_accounts_payload({"accounts": ["player1"], "active": "player1"})
 
     def _read_background_payload(self) -> dict[str, Any]:
-        payload = {"mode": "default", "close_ui_on_launch": True, "theme": "light"}
+        payload = {
+            "mode": "default",
+            "close_ui_on_launch": True,
+            "theme": "dark",
+        }
         if not self.background_settings_file.is_file():
             return payload
         try:
@@ -1392,13 +1436,13 @@ class LauncherService:
         if _optional_str(loaded.get("mode")) == "custom" and _optional_str(loaded.get("file_name")):
             payload = {"mode": "custom", "file_name": str(loaded["file_name"])}
         payload["close_ui_on_launch"] = bool(loaded.get("close_ui_on_launch", True))
-        payload["theme"] = "light" if str(loaded.get("theme", "light")).strip().lower() == "light" else "dark"
+        payload["theme"] = "light" if str(loaded.get("theme", "dark")).strip().lower() == "light" else "dark"
         return payload
 
     def _write_background_payload(self, payload: dict[str, Any]) -> None:
         payload = dict(payload)
         payload["close_ui_on_launch"] = bool(payload.get("close_ui_on_launch", True))
-        payload["theme"] = "light" if str(payload.get("theme", "light")).strip().lower() == "light" else "dark"
+        payload["theme"] = "light" if str(payload.get("theme", "dark")).strip().lower() == "light" else "dark"
         self.background_settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _read_runtime_session_payload(self, path: Path) -> dict[str, Any]:

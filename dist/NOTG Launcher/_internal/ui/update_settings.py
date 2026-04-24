@@ -3,19 +3,26 @@ Update settings panel for NOTG Launcher settings dialog.
 Handles UI for checking and installing updates.
 """
 
-from PySide6.QtCore import QThread, Signal, Qt, QSize, QTimer
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+
+from PySide6.QtCore import QThread, Signal, Qt, QSize, QTimer, QUrl
+from PySide6.QtGui import QFont, QImage, QTextCursor, QTextDocument
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, 
-    QTextEdit, QMessageBox
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
+    QTextBrowser, QMessageBox
 )
-from PySide6.QtGui import QFont, QTextCursor
 
 from core.updater import UpdateChecker, UpdateInstaller, UpdateState
 from ui.topbar import ModernButton
 from ui.responsive import scaled_px
 from ui.theme import theme_palette
 from version import APP_VERSION
-from pathlib import Path
 import sys
 
 
@@ -65,10 +72,10 @@ class DownloadUpdateWorker(QThread):
         """Download in background."""
         try:
             installer = UpdateInstaller(self.current_exe, self.cache_dir)
-            exe_path = installer.download_update(self.progress.emit)
+            zip_path = installer.download_update(self.download_url, self.progress.emit)
             
-            if exe_path and installer.verify_download(exe_path):
-                self.download_complete.emit(str(exe_path))
+            if zip_path and installer.verify_download(zip_path):
+                self.download_complete.emit(str(zip_path))
             else:
                 self.error.emit("Downloaded file verification failed")
         
@@ -76,33 +83,164 @@ class DownloadUpdateWorker(QThread):
             self.error.emit(f"Download error: {str(e)}")
 
 
+@dataclass(slots=True)
+class ReleaseNotesContext:
+    owner: str
+    repo: str
+    ref: str
+
+    @property
+    def link_base(self) -> str:
+        return f"https://github.com/{self.owner}/{self.repo}/blob/{self.ref}/"
+
+    @property
+    def repository_root(self) -> str:
+        return f"https://github.com/{self.owner}/{self.repo}/blob/{self.ref}/"
+
+
+class ReleaseNotesBrowser(QTextBrowser):
+    def __init__(self, cache_dir: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._context: ReleaseNotesContext | None = None
+        self._raw_markdown = ""
+        self._loaded_images: dict[str, QImage] = {}
+        self._pending_replies: dict[str, QNetworkReply] = {}
+        self._placeholder = QImage(2, 2, QImage.Format_ARGB32_Premultiplied)
+        self._placeholder.fill(Qt.transparent)
+
+        self._network = QNetworkAccessManager(self)
+        cache = QNetworkDiskCache(self)
+        cache_path = Path(cache_dir) / "release-notes-images"
+        cache_path.mkdir(parents=True, exist_ok=True)
+        cache.setCacheDirectory(str(cache_path))
+        self._network.setCache(cache)
+
+        self.setReadOnly(True)
+        self.setObjectName("releaseNotesText")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setOpenExternalLinks(True)
+        self.setOpenLinks(True)
+        self.document().setDocumentMargin(4)
+
+    def set_release_notes(self, markdown: str, context: ReleaseNotesContext | None = None) -> None:
+        self._context = context
+        self._raw_markdown = (markdown or "").strip() or "No release notes available."
+        self.document().setBaseUrl(QUrl(context.link_base if context else "https://github.com/"))
+        self.document().setDefaultStyleSheet(self._document_css())
+        self.setMarkdown(_rewrite_markdown_images(self._raw_markdown, context))
+        self.moveCursor(QTextCursor.MoveOperation.Start)
+        self._refresh_loaded_images()
+        self.viewport().update()
+
+    def refresh_theme(self) -> None:
+        self.document().setDefaultStyleSheet(self._document_css())
+        self._refresh_loaded_images()
+        self.viewport().update()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refresh_loaded_images()
+
+    def loadResource(self, resource_type: int, name: QUrl):
+        image_resource = getattr(QTextDocument, "ImageResource", QTextDocument.ResourceType.ImageResource)
+        if resource_type == image_resource:
+            url = name.toString()
+            if url in self._loaded_images:
+                return self._scaled_image(self._loaded_images[url])
+            if url.startswith(("http://", "https://")):
+                self._queue_image(url)
+                return self._placeholder
+        return super().loadResource(resource_type, name)
+
+    def _queue_image(self, url: str) -> None:
+        if url in self._pending_replies or url in self._loaded_images:
+            return
+        reply = self._network.get(QNetworkRequest(QUrl(url)))
+        self._pending_replies[url] = reply
+        reply.finished.connect(lambda target=url, current=reply: self._handle_image_loaded(target, current))
+
+    def _handle_image_loaded(self, url: str, reply: QNetworkReply) -> None:
+        self._pending_replies.pop(url, None)
+        try:
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                return
+            data = bytes(reply.readAll())
+        finally:
+            reply.deleteLater()
+
+        image = QImage()
+        if not image.loadFromData(data):
+            return
+        self._loaded_images[url] = image
+        self._update_image_resource(url, image)
+
+    def _refresh_loaded_images(self) -> None:
+        for url, image in self._loaded_images.items():
+            self._update_image_resource(url, image)
+
+    def _update_image_resource(self, url: str, image: QImage) -> None:
+        image_resource = getattr(QTextDocument, "ImageResource", QTextDocument.ResourceType.ImageResource)
+        self.document().addResource(image_resource, QUrl(url), self._scaled_image(image))
+        self.document().markContentsDirty(0, self.document().characterCount())
+        self.viewport().update()
+
+    def _scaled_image(self, image: QImage) -> QImage:
+        target_width = max(220, self.viewport().width() - 40)
+        if image.width() <= target_width or target_width <= 0:
+            return image
+        return image.scaledToWidth(target_width, Qt.SmoothTransformation)
+
+    def _document_css(self) -> str:
+        palette = theme_palette(self)
+        base_text = palette["line_edit"]["text"].name()
+        heading = palette["buttons"]["sidebar"]["text"].name()
+        muted = palette["loader_placeholder"]["text"].name()
+        link = palette["buttons"]["accent"]["bg"].name()
+        return (
+            "body { margin: 0; color: %s; font-size: 13px; line-height: 1.5; }"
+            "p { margin: 0 0 10px 0; }"
+            "h1, h2, h3, h4 { color: %s; font-weight: 700; margin: 16px 0 8px 0; }"
+            "ul, ol { margin: 6px 0 12px 20px; }"
+            "li { margin: 0 0 4px 0; }"
+            "blockquote { margin: 10px 0; padding-left: 12px; color: %s; }"
+            "a { color: %s; text-decoration: none; }"
+            "img { margin: 8px 0; }"
+        ) % (base_text, heading, muted, link)
+
+
 class ReleaseNotesPreview(QFrame):
     """Custom widget to display release notes with proper styling."""
     
-    def __init__(self, parent=None):
+    def __init__(self, cache_dir: str, github_owner: str, github_repo: str, parent=None):
         super().__init__(parent)
         self.setObjectName("releaseNotesPreview")
         self.setMinimumHeight(200)
+        self._github_owner = github_owner
+        self._github_repo = github_repo
+        self._context: ReleaseNotesContext | None = None
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
         
-        self.text_display = QTextEdit()
-        self.text_display.setReadOnly(True)
-        self.text_display.setObjectName("releaseNotesText")
-        self.text_display.setFrameShape(QFrame.NoFrame)
+        self.text_display = ReleaseNotesBrowser(cache_dir, self)
         
-        # Use monospace font for better code/changelog readability
-        font = QFont("Courier New" if sys.platform == "win32" else "Monospace", 9)
+        font = QFont("Segoe UI" if sys.platform == "win32" else "Sans Serif", 10)
         self.text_display.setFont(font)
         
         layout.addWidget(self.text_display)
     
-    def set_content(self, content: str):
+    def set_content(self, content: str, *, release_ref: str | None = None):
         """Set the content to display."""
-        self.text_display.setText(content)
-        self.text_display.moveCursor(QTextCursor.MoveOperation.Start)
+        self._context = (
+            ReleaseNotesContext(self._github_owner, self._github_repo, release_ref)
+            if release_ref
+            else None
+        )
+        self.text_display.set_release_notes(content, self._context)
+
+    def refresh_theme(self) -> None:
+        self.text_display.refresh_theme()
 
 
 class UpdateSettingsPanel(QWidget):
@@ -113,7 +251,7 @@ class UpdateSettingsPanel(QWidget):
     def __init__(self, parent=None, github_owner: str = "YourUsername", github_repo: str = "NOTG-Launcher"):
         super().__init__(parent)
         self.github_owner = github_owner
-        self.github_repo = github_repo
+        self.github_repo = github_repo  # GitHub repo (uses hyphen)
         self.check_worker = None
         self.download_worker = None
         self.downloaded_exe = None
@@ -128,7 +266,7 @@ class UpdateSettingsPanel(QWidget):
         if getattr(sys, "frozen", False):
             self.current_exe = sys.executable
         else:
-            self.current_exe = str(Path(__file__).resolve().parents[2] / "dist" / "NOTG-Launcher" / "NOTG-Launcher.exe")
+            self.current_exe = str(Path(__file__).resolve().parents[2] / "dist" / "NOTG Launcher" / "NOTG Launcher.exe")
         
         self.state_file = Path(self.cache_dir) / "update_state.json"
         self.update_state = UpdateState(self.state_file)
@@ -173,7 +311,7 @@ class UpdateSettingsPanel(QWidget):
         root_layout.addLayout(button_row)
         
         # Release notes preview
-        self.preview = ReleaseNotesPreview()
+        self.preview = ReleaseNotesPreview(self.cache_dir, self.github_owner, self.github_repo)
         self.preview.set_content("Up to date")
         root_layout.addWidget(self.preview, 1)
         
@@ -228,7 +366,6 @@ class UpdateSettingsPanel(QWidget):
         
         if has_update:
             self.status_label.setText(f"Update available: {version}")
-            self.preview.set_content(notes)
             self.install_button.setEnabled(True)
             
             # Save state
@@ -239,8 +376,8 @@ class UpdateSettingsPanel(QWidget):
             self.update_state.save_state(state)
         else:
             self.status_label.setText("You have the latest version")
-            self.preview.set_content("Up to date")
             self.install_button.setEnabled(False)
+        self.preview.set_content(notes, release_ref=version)
     
     def _on_check_error(self, error: str):
         """Called on check error."""
@@ -322,3 +459,49 @@ class UpdateSettingsPanel(QWidget):
         if font_size:
             font = self.check_button.font()
             font.setPointSize(font_size)
+
+
+def _rewrite_markdown_images(markdown: str, context: ReleaseNotesContext | None) -> str:
+    image_pattern = re.compile(r"!\[([^\]]*)\]\((<[^>]+>|[^)\s]+)([^)]*)\)")
+    html_image_pattern = re.compile(r'(<img\b[^>]*\bsrc=["\'])([^"\']+)(["\'])', re.IGNORECASE)
+
+    def replace_markdown(match: re.Match[str]) -> str:
+        alt_text, url_token, suffix = match.groups()
+        resolved = _resolve_image_url(url_token.strip("<>"), context)
+        wrapped = f"<{resolved}>" if url_token.startswith("<") else resolved
+        return f"![{alt_text}]({wrapped}{suffix})"
+
+    def replace_html(match: re.Match[str]) -> str:
+        prefix, source, suffix = match.groups()
+        return f"{prefix}{_resolve_image_url(source, context)}{suffix}"
+
+    updated = image_pattern.sub(replace_markdown, markdown)
+    return html_image_pattern.sub(replace_html, updated)
+
+
+def _resolve_image_url(url: str, context: ReleaseNotesContext | None) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme in {"http", "https"}:
+        return _normalize_github_image_url(url)
+    if context is None:
+        return url
+    if url.startswith("/"):
+        return _normalize_github_image_url(f"{context.repository_root}{url.lstrip('/')}")
+    return _normalize_github_image_url(urljoin(context.link_base, url))
+
+
+def _normalize_github_image_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return url
+    if parsed.netloc == "raw.githubusercontent.com":
+        return url
+    if parsed.netloc != "github.com":
+        return url
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) >= 5 and parts[2] == "blob":
+        owner, repo, _, ref = parts[:4]
+        remainder = "/".join(parts[4:])
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{remainder}"
+    return url

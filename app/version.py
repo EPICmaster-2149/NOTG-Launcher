@@ -4,4 +4,4 @@ Update this file when releasing a new version.
 Keep format as MAJOR.MINOR.PATCH
 """
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"

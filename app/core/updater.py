@@ -58,7 +58,7 @@ class UpdateChecker:
         """Extract .zip download URL from release assets (contains exe + _internal)."""
         assets = latest_release.get('assets', [])
         for asset in assets:
-            # Look for NOTG-Launcher.zip which contains the full bundled app
+            # Look for NOTG Launcher.zip which contains the full bundled app
             if asset['name'].endswith('.zip'):
                 return asset['browser_download_url']
         return None
@@ -76,7 +76,7 @@ class UpdateInstaller:
     
     def __init__(self, current_exe_path: str, cache_dir: str):
         self.current_exe = Path(current_exe_path)
-        self.installation_dir = self.current_exe.parent  # Parent dir (NOTG-Launcher/)
+        self.installation_dir = self.current_exe.parent  # Parent dir (NOTG Launcher/)
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
     
@@ -87,7 +87,7 @@ class UpdateInstaller:
         Returns path to downloaded ZIP file or None on failure.
         """
         try:
-            new_zip = self.cache_dir / "NOTG-Launcher-update.zip"
+            new_zip = self.cache_dir / "NOTG Launcher-update.zip"
             
             # Remove old download if exists
             if new_zip.exists():
@@ -132,8 +132,8 @@ class UpdateInstaller:
         try:
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 namelist = zf.namelist()
-                # Should contain NOTG-Launcher.exe and _internal folder
-                has_exe = any('NOTG-Launcher.exe' in name for name in namelist)
+                # Should contain NOTG Launcher.exe and _internal folder
+                has_exe = any('NOTG Launcher.exe' in name for name in namelist)
                 has_internal = any('_internal' in name for name in namelist)
                 return has_exe and has_internal
         except zipfile.BadZipFile:
@@ -147,13 +147,14 @@ class UpdateInstaller:
         script = self.cache_dir / "updater.bat"
         extract_dir = self.cache_dir / "extracted"
         
-        # Build paths with forward slashes for batch compatibility
-        zip_str = str(zip_path).replace("\\", "/")
-        extract_str = str(extract_dir).replace("\\", "/")
-        install_dir_str = str(self.installation_dir).replace("\\", "/")
-        current_exe_str = str(self.current_exe).replace("\\", "/")
-        old_backup_dir = str(self.installation_dir.with_name(self.installation_dir.name + ".old")).replace("\\", "/")
+        # Use backslashes for Windows batch (proper paths)
+        zip_str = str(zip_path)
+        extract_str = str(extract_dir)
+        install_dir_str = str(self.installation_dir)
+        current_exe_str = str(self.current_exe)
+        old_backup_dir = str(self.installation_dir.with_name(self.installation_dir.name + ".old"))
         backup_name = self.installation_dir.name + ".old"
+        parent_dir = str(self.installation_dir.parent)
         
         batch_content = f"""@echo off
 chcp 65001 >nul
@@ -162,47 +163,77 @@ setlocal enabledelayedexpansion
 REM Give main exe time to fully exit
 timeout /t 3 /nobreak
 
-REM Extract ZIP to temp location
-cd /d "{extract_str}"
-powershell -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory('{zip_str}', '.')" >nul 2>&1
+REM Create extraction directory
+if exist "{extract_str}" rmdir /s /q "{extract_str}"
+mkdir "{extract_str}"
 
-if not exist "{extract_str}/NOTG-Launcher/NOTG-Launcher.exe" (
-    echo Update extraction failed
+REM Extract ZIP using Windows built-in (VBScript fallback)
+cd /d "{extract_str}"
+powershell -NoProfile -Command "Add-Type -AssemblyName 'System.IO.Compression.FileSystem'; [System.IO.Compression.ZipFile]::ExtractToDirectory('{zip_str}', '{extract_str}')" >nul 2>&1
+
+if errorlevel 1 (
+    echo PowerShell extraction failed, trying alternative method...
+    REM Alternative: Use tar command (Windows 10+)
+    tar -xf "{zip_str}" -C "{extract_str}" 2>nul
+    if errorlevel 1 (
+        echo Extraction failed
+        exit /b 1
+    )
+)
+
+REM Verify extracted files exist
+if not exist "{extract_str}\\NOTG Launcher\\NOTG Launcher.exe" (
+    echo Error: NOTG Launcher.exe not found in extracted files
+    echo Extract dir: {extract_str}
+    dir "{extract_str}"
     exit /b 1
 )
 
 REM Backup old installation
 if exist "{install_dir_str}" (
+    echo Backing up old installation...
     if exist "{old_backup_dir}" rmdir /s /q "{old_backup_dir}" 2>nul
-    cd /d "{install_dir_str}/.."
-    for /f "tokens=*" %%A in ("{install_dir_str}") do (
-        set "oldname=%%~nA"
-    )
     ren "{install_dir_str}" "{backup_name}"
+    if errorlevel 1 (
+        echo Failed to rename old installation
+        exit /b 1
+    )
 )
 
 REM Move new files to installation location
-if exist "{extract_dir}/NOTG-Launcher" (
-    move /Y "{extract_str}/NOTG-Launcher" "{install_dir_str}"
+echo Installing new version...
+if exist "{extract_str}\\NOTG Launcher" (
+    move /Y "{extract_str}\\NOTG Launcher" "{install_dir_str}"
+    if errorlevel 1 (
+        echo Failed to move new installation
+        exit /b 1
+    )
+) else (
+    echo New launcher folder not found at {extract_str}\\NOTG Launcher
+    exit /b 1
 )
 
 REM Launch new exe
 if exist "{current_exe_str}" (
+    echo Launching updated application...
     start "" "{current_exe_str}"
 ) else (
-    echo Update failed: exe not found
+    echo Error: Updated exe not found at {current_exe_str}
     exit /b 1
 )
 
 REM Cleanup old installation in background
 if exist "{old_backup_dir}" (
-    timeout /t 10 /nobreak
+    timeout /t 15 /nobreak
     rmdir /s /q "{old_backup_dir}" 2>nul
 )
 
-REM Clean up extracted files and this script
+REM Clean up extracted files
 if exist "{extract_str}" rmdir /s /q "{extract_str}" 2>nul
+
+REM Self-destruct this script
 del "%~f0" 2>nul
+exit /b 0
 """
         
         script.write_text(batch_content, encoding='utf-8')
@@ -211,7 +242,7 @@ del "%~f0" 2>nul
     def extract_update_zip(self, zip_path: Path) -> Optional[Path]:
         """
         Extract ZIP file to cache directory.
-        Returns path to extracted NOTG-Launcher folder or None on failure.
+        Returns path to extracted NOTG Launcher folder or None on failure.
         """
         try:
             extract_dir = self.cache_dir / "extracted"
@@ -222,17 +253,17 @@ del "%~f0" 2>nul
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 zf.extractall(extract_dir)
             
-            # Find NOTG-Launcher folder in extracted content
-            launcher_folder = extract_dir / "NOTG-Launcher"
+            # Find NOTG Launcher folder in extracted content
+            launcher_folder = extract_dir / "NOTG Launcher"
             if launcher_folder.exists():
                 return launcher_folder
             
             # Try finding it if wrapped in another folder
             for item in extract_dir.iterdir():
-                if item.is_dir() and "NOTG-Launcher" in item.name:
+                if item.is_dir() and "NOTG Launcher" in item.name:
                     return item
             
-            print(f"Could not find NOTG-Launcher folder in extracted ZIP")
+            print(f"Could not find NOTG Launcher folder in extracted ZIP")
             return None
         except Exception as e:
             print(f"ZIP extraction failed: {e}")
@@ -269,7 +300,7 @@ del "%~f0" 2>nul
     def cleanup_cache(self):
         """Remove old files from cache."""
         try:
-            for file in self.cache_dir.glob("NOTG-Launcher-*.zip"):
+            for file in self.cache_dir.glob("NOTG Launcher-*.zip"):
                 file.unlink()
             for file in self.cache_dir.glob("*.bat"):
                 file.unlink()

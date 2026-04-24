@@ -316,21 +316,22 @@ class LoaderPlaceholder(QWidget):
         painter.drawRoundedRect(outer, 12, 12)
 
         box = QRectF(
-            self.width() * 0.12,
-            self.height() * 0.38,
-            self.width() * 0.76,
-            min(96.0, self.height() * 0.28),
+            self.width() * 0.08,
+            self.height() * 0.24,
+            self.width() * 0.84,
+            self.height() * 0.52,
         )
         painter.setPen(QPen(palette["inner_border"], 1.0))
         painter.setBrush(palette["inner_fill"])
         painter.drawRoundedRect(box, 10, 10)
 
         font = QFont(self.font())
-        font.setPointSize(13)
+        font.setPointSize(12)
         font.setWeight(QFont.Bold)
         painter.setFont(font)
         painter.setPen(palette["text"])
-        painter.drawText(box, Qt.AlignCenter, self._text)
+        text_rect = box.adjusted(16, 12, -16, -12)
+        painter.drawText(text_rect, Qt.AlignCenter | Qt.TextWordWrap, self._text)
 
 
 class ClickableAccentLineEdit(AccentLineEdit):

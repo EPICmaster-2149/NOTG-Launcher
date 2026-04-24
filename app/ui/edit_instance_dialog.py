@@ -6,7 +6,7 @@ from typing import Any
 import psutil
 
 from PySide6.QtCore import QSize, QSortFilterProxyModel, QThread, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QClipboard, QGuiApplication, QIcon, QImage, QImageReader, QPixmap, QTextCursor
+from PySide6.QtGui import QClipboard, QGuiApplication, QIcon, QImage, QImageReader, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -61,6 +61,23 @@ def _read_scaled_image(path: str | Path, width: int, height: int) -> QImage:
         if source_size.isValid():
             reader.setScaledSize(source_size.scaled(QSize(width, height), Qt.KeepAspectRatio))
     return reader.read()
+
+
+def _compose_screenshot_thumbnail(image: QImage, target_size: QSize) -> QPixmap:
+    canvas = QPixmap(target_size)
+    canvas.fill(Qt.transparent)
+    if image.isNull() or not target_size.isValid():
+        return canvas
+
+    scaled = QPixmap.fromImage(image).scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    x = max(0, (target_size.width() - scaled.width()) // 2)
+    y = max(0, (target_size.height() - scaled.height()) // 2)
+
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    painter.drawPixmap(x, y, scaled)
+    painter.end()
+    return canvas
 
 
 class InstanceAssetWorker(QThread):
@@ -141,8 +158,13 @@ class EditInstanceDialog(QDialog):
         "Versions",
         "Mods",
         "Screenshots",
+        "Rich Presence",
         "Advanced",
     ]
+    PAGE_LABELS = {
+        "Minecraft Log": "Minecraft\nLog",
+        "Rich Presence": "Rich\nPresence",
+    }
 
     def __init__(
         self,
@@ -276,7 +298,9 @@ class EditInstanceDialog(QDialog):
         self.nav_list.setTextElideMode(Qt.ElideNone)
         self.nav_list.currentRowChanged.connect(self._update_page_state)
         for title in self.PAGE_NAMES:
-            self.nav_list.addItem(QListWidgetItem(title))
+            item = QListWidgetItem(self.PAGE_LABELS.get(title, title))
+            item.setTextAlignment(Qt.AlignCenter)
+            self.nav_list.addItem(item)
         nav_layout.addWidget(self.nav_list, 1)
         shell_layout.addWidget(self.nav_frame)
 
@@ -311,6 +335,7 @@ class EditInstanceDialog(QDialog):
         self.page_stack.addWidget(self._build_versions_page())
         self.page_stack.addWidget(self._build_mods_page())
         self.page_stack.addWidget(self._build_screenshots_page())
+        self.page_stack.addWidget(self._build_presence_page())
         self.page_stack.addWidget(self._build_advanced_page())
         self.page_scroll_layout.addWidget(self.page_stack)
         self.page_scroll.setWidget(self.page_scroll_container)
@@ -557,6 +582,65 @@ class EditInstanceDialog(QDialog):
         )
         screenshot_actions_layout.addWidget(self.view_screenshots_folder_button)
         content_row.addWidget(screenshot_actions)
+        return page
+
+    def _build_presence_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        content = QFrame()
+        content.setObjectName("editorSelectionSurface")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(14, 14, 14, 14)
+        content_layout.setSpacing(14)
+        layout.addWidget(content, 1)
+
+        title = QLabel("Rich Presence")
+        title.setObjectName("editorSectionTitle")
+        content_layout.addWidget(title)
+
+        description = QLabel("Customize how this instance appears on Discord while Minecraft is running.")
+        description.setObjectName("editorStatusText")
+        description.setWordWrap(True)
+        content_layout.addWidget(description)
+
+        self.rich_presence_enabled_checkbox = QCheckBox("Enable Rich Presence for this instance")
+        self.rich_presence_enabled_checkbox.setObjectName("editorFilterCheck")
+        self.rich_presence_enabled_checkbox.toggled.connect(self._save_presence_settings)
+        content_layout.addWidget(self.rich_presence_enabled_checkbox)
+
+        state_label = QLabel("State")
+        state_label.setObjectName("editorFilterTitle")
+        content_layout.addWidget(state_label)
+
+        self.rich_presence_state_input = AccentLineEdit("Playing Minecraft")
+        self.rich_presence_state_input.setMinimumHeight(46)
+        self.rich_presence_state_input.editingFinished.connect(self._save_presence_settings)
+        content_layout.addWidget(self.rich_presence_state_input)
+
+        state_hint = QLabel("Leave this empty to use the default state text.")
+        state_hint.setObjectName("editorStatusText")
+        state_hint.setWordWrap(True)
+        content_layout.addWidget(state_hint)
+
+        details_label = QLabel("Details")
+        details_label.setObjectName("editorFilterTitle")
+        content_layout.addWidget(details_label)
+
+        self.rich_presence_details_input = AccentLineEdit("")
+        self.rich_presence_details_input.setMinimumHeight(46)
+        self.rich_presence_details_input.editingFinished.connect(self._save_presence_settings)
+        content_layout.addWidget(self.rich_presence_details_input)
+
+        details_hint = QLabel("Leave this empty to show the instance version and loader automatically.")
+        details_hint.setObjectName("editorStatusText")
+        details_hint.setWordWrap(True)
+        content_layout.addWidget(details_hint)
+        content_layout.addStretch()
+
+        self._apply_rich_presence_fields()
         return page
 
     def _build_advanced_page(self) -> QWidget:
@@ -895,9 +979,14 @@ class EditInstanceDialog(QDialog):
         compact_layout = self.width() < 1220
         self.icon_button.set_side_length(scaled_px(self, 82, minimum=66, maximum=88))
         self.name_edit.setMinimumHeight(scaled_px(self, 48, minimum=42, maximum=50))
-        self.nav_frame.setFixedWidth(scaled_px(self, 158 if compact_layout else 166, minimum=148, maximum=172))
+        self.nav_frame.setFixedWidth(scaled_px(self, 162 if compact_layout else 172, minimum=152, maximum=178))
         self.version_side_panel.setFixedWidth(scaled_px(self, 144 if compact_layout else 156, minimum=132, maximum=160))
-        self.loader_side_panel.setFixedWidth(scaled_px(self, 144 if compact_layout else 156, minimum=132, maximum=160))
+        self.loader_side_panel.setFixedWidth(scaled_px(self, 156 if compact_layout else 170, minimum=144, maximum=176))
+        for row in range(self.nav_list.count()):
+            item = self.nav_list.item(row)
+            if item is None:
+                continue
+            item.setSizeHint(QSize(0, scaled_px(self, 50, minimum=44, maximum=54)))
 
         for button in (
             self.launch_button,
@@ -935,8 +1024,8 @@ class EditInstanceDialog(QDialog):
         self.mods_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 36, minimum=32, maximum=40))
         self.version_stack.setMinimumHeight(scaled_px(self, 240, minimum=210, maximum=260))
         self.loader_stack.setMinimumHeight(scaled_px(self, 192, minimum=170, maximum=212))
-        self.screenshots_list.setGridSize(QSize(scaled_px(self, 204, minimum=180, maximum=212), scaled_px(self, 160, minimum=148, maximum=170)))
-        self.screenshots_list.setIconSize(QSize(scaled_px(self, 178, minimum=152, maximum=184), scaled_px(self, 96, minimum=88, maximum=102)))
+        self.screenshots_list.setGridSize(QSize(scaled_px(self, 214, minimum=190, maximum=222), scaled_px(self, 164, minimum=150, maximum=174)))
+        self.screenshots_list.setIconSize(QSize(scaled_px(self, 184, minimum=160, maximum=190), scaled_px(self, 104, minimum=92, maximum=108)))
         self.copy_available_list.setMinimumHeight(scaled_px(self, 196, minimum=168, maximum=224))
         self.copy_selected_list.setMinimumHeight(scaled_px(self, 196, minimum=168, maximum=224))
         self._sync_page_stack_height()
@@ -971,6 +1060,56 @@ class EditInstanceDialog(QDialog):
         self.page_stack.setMinimumHeight(max(0, current_page.sizeHint().height()))
         self.page_stack.updateGeometry()
         self.page_scroll_container.adjustSize()
+
+    def _resolved_rich_presence_state(self) -> str:
+        text = self.rich_presence_state_input.text().strip()
+        return text or self.service.build_instance_rich_presence_state(self.instance)
+
+    def _resolved_rich_presence_details(self) -> str:
+        text = self.rich_presence_details_input.text().strip()
+        return text or self.service.build_instance_rich_presence_details(self.instance)
+
+    def _apply_rich_presence_fields(self) -> None:
+        if not hasattr(self, "rich_presence_enabled_checkbox"):
+            return
+        self.rich_presence_enabled_checkbox.blockSignals(True)
+        self.rich_presence_enabled_checkbox.setChecked(self.instance.rich_presence_enabled)
+        self.rich_presence_enabled_checkbox.blockSignals(False)
+
+        self.rich_presence_state_input.blockSignals(True)
+        self.rich_presence_state_input.setPlaceholderText("Playing Minecraft")
+        self.rich_presence_state_input.setText(self.instance.rich_presence_state or "")
+        self.rich_presence_state_input.blockSignals(False)
+
+        self.rich_presence_details_input.blockSignals(True)
+        self.rich_presence_details_input.setPlaceholderText(self.service.build_instance_rich_presence_details(self.instance))
+        self.rich_presence_details_input.setText(self.instance.rich_presence_details or "")
+        self.rich_presence_details_input.blockSignals(False)
+
+        self._sync_rich_presence_inputs()
+
+    def _sync_rich_presence_inputs(self) -> None:
+        enabled = bool(self.rich_presence_enabled_checkbox.isChecked())
+        self.rich_presence_state_input.setEnabled(enabled)
+        self.rich_presence_details_input.setEnabled(enabled)
+
+    def _save_presence_settings(self) -> None:
+        enabled = bool(self.rich_presence_enabled_checkbox.isChecked())
+        state = self.rich_presence_state_input.text().strip() or None
+        details = self.rich_presence_details_input.text().strip() or None
+        self._sync_rich_presence_inputs()
+        try:
+            updated = self.service.set_instance_rich_presence(
+                self.instance,
+                enabled=enabled,
+                state=state,
+                details=details,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Rich Presence", str(exc))
+            self._apply_rich_presence_fields()
+            return
+        self._apply_instance(updated)
 
     def _sync_header_icon(self) -> None:
         self.icon_button.set_icon_path(self.service.resolve_icon_path(self._selected_icon_path))
@@ -1007,6 +1146,7 @@ class EditInstanceDialog(QDialog):
         self.setWindowTitle(f"Edit {instance.name}")
         self._sync_header_icon()
         self._update_runtime_buttons()
+        self._apply_rich_presence_fields()
         self._set_ram_value(instance.memory_mb)
         if self._advanced_loaded:
             self._reload_copy_source_instances()
@@ -1265,6 +1405,8 @@ class EditInstanceDialog(QDialog):
             for row in self._screenshots_cache:
                 item = QListWidgetItem(str(row["label"]))
                 item.setData(Qt.UserRole, row["file_name"])
+                item.setSizeHint(self.screenshots_list.gridSize())
+                item.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
                 self.screenshots_list.addItem(item)
                 self._screenshot_items[str(row["file_name"])] = item
                 if row["file_name"] in selected_names:
@@ -1287,7 +1429,7 @@ class EditInstanceDialog(QDialog):
         item = self._screenshot_items.get(file_name)
         if item is None:
             return
-        item.setIcon(QIcon(QPixmap.fromImage(image)))
+        item.setIcon(QIcon(_compose_screenshot_thumbnail(image, self.screenshots_list.iconSize())))
 
     def _handle_thumbnail_failed(self, request_id: int, message: str) -> None:
         if request_id == self._thumbnail_request_id:

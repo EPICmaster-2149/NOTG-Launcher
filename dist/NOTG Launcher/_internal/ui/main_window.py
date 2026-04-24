@@ -14,6 +14,7 @@ from ui.sidebar import SideBar
 from ui.app_icon import application_icon
 from ui.theme import theme_palette
 from ui.topbar import ActionPopup, PopupAction, TopBar
+from ui.version_display import format_launcher_version_label
 
 if TYPE_CHECKING:
     from ui.accounts_dialog import AccountsDialog
@@ -318,7 +319,11 @@ class MainWindow(QWidget):
             if instance.instance_id in self._launch_threads and instance.status == "Quit":
                 instance.status = "Launching"
             item = QListWidgetItem()
-            card = InstanceCard(instance.name, instance.version_label, instance.icon_path)
+            card = InstanceCard(
+                instance.name,
+                format_launcher_version_label(instance.vanilla_version, instance.loader_name),
+                instance.icon_path,
+            )
             item.setSizeHint(card.sizeHint())
             item.setData(Qt.UserRole, instance)
 
@@ -530,7 +535,7 @@ class MainWindow(QWidget):
             item.setData(Qt.UserRole, updated)
             self._cards[index] = (item, card, updated)
             card.name = updated.name
-            card.version = updated.version_label
+            card.version = format_launcher_version_label(updated.vanilla_version, updated.loader_name)
             card.icon_path = updated.icon_path
             card.update()
             dialog = self._edit_dialogs.get(updated.instance_id)

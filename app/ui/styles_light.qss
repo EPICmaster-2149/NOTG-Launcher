@@ -117,6 +117,36 @@ QDialog#settingsDialog {
     );
 }
 
+QMessageBox {
+    background-color: rgba(250, 252, 255, 0.98);
+}
+
+QMessageBox QLabel {
+    color: #17324d;
+    background: transparent;
+    font-size: 13px;
+}
+
+QMessageBox QPushButton {
+    min-width: 92px;
+    min-height: 34px;
+    padding: 8px 18px;
+    border-radius: 8px;
+    background-color: rgba(245, 249, 255, 0.98);
+    border: 1px solid rgba(149, 176, 217, 0.96);
+    color: #17324d;
+    font-weight: 600;
+}
+
+QMessageBox QPushButton:hover {
+    background-color: rgba(232, 240, 252, 0.98);
+    border: 1px solid rgba(111, 157, 224, 0.96);
+}
+
+QMessageBox QPushButton:pressed {
+    background-color: rgba(220, 232, 249, 1.0);
+}
+
 QWidget#instanceListPage,
 QWidget#instanceEmptyPage,
 QScrollArea#instanceEditorScroll > QWidget > QWidget {
@@ -242,6 +272,26 @@ QListWidget#screenshotsGrid {
     border-radius: 8px;
     color: #17324d;
     gridline-color: rgba(205, 216, 232, 0.88);
+}
+
+QFrame#releaseNotesPreview {
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid rgba(191, 205, 225, 0.88);
+    border-radius: 16px;
+}
+
+QTextBrowser#releaseNotesText {
+    background: transparent;
+    border: none;
+    color: #17324d;
+    font-size: 13px;
+    line-height: 1.45;
+    padding: 2px 4px;
+    selection-background-color: rgba(214, 229, 250, 0.96);
+}
+
+QTextBrowser#releaseNotesText a {
+    color: #2f6feb;
 }
 
 QTableView#catalogTable::item:selected,

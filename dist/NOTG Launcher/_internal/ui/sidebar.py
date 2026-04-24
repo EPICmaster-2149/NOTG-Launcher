@@ -15,6 +15,7 @@ from ui.topbar import ModernButton
 from ui.icon_utils import load_scaled_icon
 from ui.responsive import scaled_px
 from ui.theme import theme_palette
+from ui.version_display import format_launcher_version_label
 
 
 class SideBar(QWidget):
@@ -125,7 +126,7 @@ class SideBar(QWidget):
     def set_instance(self, instance):
         self._current_instance = instance
         self.name_label.setText(instance.name)
-        self.version_label.setText(_clean_version(instance.version_label))
+        self.version_label.setText(format_launcher_version_label(instance.vanilla_version, instance.loader_name))
 
         pixmap = load_scaled_icon(instance.icon_path, 78, 78)
         self.icon_label.setPixmap(pixmap)
@@ -162,15 +163,6 @@ class SideBar(QWidget):
 
         self.status_badge.setMinimumHeight(scaled_px(self, 40, minimum=34, maximum=42))
         self.status_badge.updateGeometry()
-
-
-def _clean_version(version):
-    prefix = "Minecraft "
-    if version.startswith(prefix):
-        return version[len(prefix) :]
-    return version
-
-
 class StatusBadge(QWidget):
     LABELS = {
         "launched": "Running",

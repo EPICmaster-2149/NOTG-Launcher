@@ -254,7 +254,6 @@ class SettingsDialog(QDialog):
         self.close_on_launch_checkbox.toggled.connect(self._set_close_on_launch)
         self.scroll_layout.addWidget(self.close_on_launch_checkbox)
 
-        # Add divider before Update section
         divider2 = QFrame()
         divider2.setObjectName("editorSectionDivider")
         self.scroll_layout.addWidget(divider2)
@@ -348,3 +347,4 @@ class SettingsDialog(QDialog):
         app = QApplication.instance()
         if app is not None:
             apply_theme(app, mode)
+
