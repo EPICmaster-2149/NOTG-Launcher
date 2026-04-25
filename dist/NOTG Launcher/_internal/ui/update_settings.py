@@ -26,6 +26,24 @@ from version import APP_VERSION
 import sys
 
 
+def _resolve_dev_executable() -> str:
+    project_root = Path(__file__).resolve().parents[2]
+    dist_root = project_root / "dist"
+    candidates = [
+        dist_root / "NOTG-Launcher" / "NOTG-Launcher.exe",
+        dist_root / "NOTG Launcher" / "NOTG Launcher.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    matches = sorted(dist_root.glob("*/*.exe"))
+    if matches:
+        return str(matches[0])
+
+    return str(candidates[0])
+
+
 class CheckUpdateWorker(QThread):
     """Worker thread for checking updates - prevents UI freezing."""
     
@@ -266,7 +284,7 @@ class UpdateSettingsPanel(QWidget):
         if getattr(sys, "frozen", False):
             self.current_exe = sys.executable
         else:
-            self.current_exe = str(Path(__file__).resolve().parents[2] / "dist" / "NOTG Launcher" / "NOTG Launcher.exe")
+            self.current_exe = _resolve_dev_executable()
         
         self.state_file = Path(self.cache_dir) / "update_state.json"
         self.update_state = UpdateState(self.state_file)

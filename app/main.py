@@ -1,5 +1,6 @@
 import argparse
 import multiprocessing
+import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
@@ -31,6 +32,12 @@ def main():
 
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     service = LauncherService()
+    if getattr(sys, "frozen", False):
+        from core.updater import UpdateInstaller
+        try:
+            UpdateInstaller(sys.executable, str(service.cache_root)).cleanup_stale_update_artifacts()
+        except Exception:
+            pass
 
     restore_request = {
         "action": "activate",

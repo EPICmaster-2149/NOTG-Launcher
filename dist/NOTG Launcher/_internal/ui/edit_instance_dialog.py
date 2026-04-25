@@ -240,6 +240,11 @@ class EditInstanceDialog(QDialog):
                 worker.wait()
         super().closeEvent(event)
 
+    def accept(self) -> None:
+        if not self._commit_pending_mod_changes():
+            return
+        super().accept()
+
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(18, 18, 18, 16)
@@ -986,7 +991,7 @@ class EditInstanceDialog(QDialog):
             item = self.nav_list.item(row)
             if item is None:
                 continue
-            item.setSizeHint(QSize(0, scaled_px(self, 50, minimum=44, maximum=54)))
+            item.setSizeHint(QSize(0, scaled_px(self, 62, minimum=56, maximum=66)))
 
         for button in (
             self.launch_button,
@@ -1388,7 +1393,7 @@ class EditInstanceDialog(QDialog):
         if job == "mods":
             if request_id != self._mods_request_id:
                 return
-            self._mods_cache = rows
+            self._mods_cache = [self._normalize_mod_row(dict(row)) for row in rows]
             self.mods_title.setText(f"Mods ({len(self._mods_cache)} installed)")
             self._apply_mod_search()
             return
@@ -1646,10 +1651,27 @@ class EditInstanceDialog(QDialog):
         self._sync_mod_actions()
         self._start_asset_worker("mods", self._mods_request_id)
 
-    def _apply_mod_search(self) -> None:
+    def _normalize_mod_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        row["enabled"] = bool(row.get("enabled"))
+        row["original_enabled"] = bool(row.get("enabled"))
+        row["file_name"] = str(row.get("file_name", ""))
+        return row
+
+    def _find_mod_row(self, file_name: str) -> dict[str, Any] | None:
+        return next((row for row in self._mods_cache if str(row.get("file_name")) == file_name), None)
+
+    def _mod_checkbox_at_row(self, row_index: int) -> QCheckBox | None:
+        container = self.mods_table.cellWidget(row_index, 0)
+        if container is None:
+            return None
+        return container.findChild(QCheckBox)
+
+    def _apply_mod_search(self, preserve_scroll: bool = False) -> None:
         query = self.mods_search.text().strip().lower() if hasattr(self, "mods_search") else ""
         selected_names = set(self._pending_mod_selection) or set(self._selected_mod_file_names())
         self._pending_mod_selection = []
+        scroll_bar = self.mods_table.verticalScrollBar()
+        scroll_value = scroll_bar.value() if preserve_scroll else 0
         rows = [
             row
             for row in self._mods_cache
@@ -1664,6 +1686,8 @@ class EditInstanceDialog(QDialog):
                 self.mods_table.selectRow(row_index)
         self._sync_mod_table_columns()
         self.mods_table.setUpdatesEnabled(True)
+        if preserve_scroll:
+            scroll_bar.setValue(min(scroll_value, scroll_bar.maximum()))
         self._sync_mod_actions()
 
     def _sync_mod_table_columns(self) -> None:
@@ -1720,27 +1744,31 @@ class EditInstanceDialog(QDialog):
         self.disable_mod_button.setEnabled(has_selected)
 
     def _toggle_mod(self, file_name: str, enabled: bool) -> None:
-        try:
-            target_path = self.service.set_mod_enabled(self.instance, file_name, enabled)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Mods", str(exc))
-            self._reload_mods()
+        row = self._find_mod_row(file_name)
+        if row is None:
             return
-        self._pending_mod_selection = [target_path.name]
-        self._reload_mods()
+        row["enabled"] = bool(enabled)
+        self._sync_mod_actions()
 
     def _set_selected_mods_enabled(self, enabled: bool) -> None:
         selected = self._selected_mod_file_names()
         if not selected:
             return
-        try:
-            updated_names = [self.service.set_mod_enabled(self.instance, name, enabled).name for name in selected]
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Mods", str(exc))
-            self._reload_mods()
-            return
-        self._pending_mod_selection = list(updated_names)
-        self._reload_mods()
+        selected_names = set(selected)
+        for row in self._mods_cache:
+            if str(row.get("file_name")) in selected_names:
+                row["enabled"] = bool(enabled)
+        for row_index in range(self.mods_table.rowCount()):
+            item = self.mods_table.item(row_index, 2)
+            if item is None or item.data(Qt.UserRole) not in selected_names:
+                continue
+            checkbox = self._mod_checkbox_at_row(row_index)
+            if checkbox is None:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(enabled))
+            checkbox.blockSignals(False)
+        self._sync_mod_actions()
 
     def _remove_selected_mods(self) -> None:
         selected = self._selected_mod_file_names()
@@ -1755,7 +1783,12 @@ class EditInstanceDialog(QDialog):
             QMessageBox.warning(self, "Mods", str(exc))
             return
         self._pending_mod_selection = []
-        self._reload_mods()
+        selected_names = set(selected)
+        self._mods_cache = [
+            row for row in self._mods_cache if str(row.get("file_name")) not in selected_names
+        ]
+        self.mods_title.setText(f"Mods ({len(self._mods_cache)} installed)")
+        self._apply_mod_search(preserve_scroll=True)
 
     def _select_mod_by_file_name(self, file_name: str) -> None:
         for row in range(self.mods_table.rowCount()):
@@ -1763,6 +1796,24 @@ class EditInstanceDialog(QDialog):
             if item is not None and item.data(Qt.UserRole) == file_name:
                 self.mods_table.selectRow(row)
                 break
+
+    def _commit_pending_mod_changes(self) -> bool:
+        pending_rows = [
+            row for row in self._mods_cache
+            if bool(row.get("enabled")) != bool(row.get("original_enabled"))
+        ]
+        if not pending_rows:
+            return True
+
+        try:
+            for row in pending_rows:
+                self.service.set_mod_enabled(self.instance, str(row["file_name"]), bool(row["enabled"]))
+                row["original_enabled"] = bool(row["enabled"])
+            return True
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Mods", f"Failed to save mod changes: {exc}")
+            self._reload_mods()
+            return False
 
     def _reload_screenshots(self) -> None:
         current_selection = self._selected_screenshot_names() if self.screenshots_list.count() else []
