@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import configparser
+import gzip
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,11 +19,16 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import psutil
 from platformdirs import PlatformDirs
+
+try:
+    from version import APP_VERSION
+except ImportError:  # pragma: no cover - defensive for isolated imports
+    APP_VERSION = "0.0.0"
 
 
 EXPERIMENT_TYPES = {
@@ -363,6 +371,7 @@ class LauncherService:
         self.default_background_root = self.assets_root / "default-background"
         self.generated_icons_root = self.cache_root / "generated-icons"
         self.default_icon = "assets/default-instance-icons/Grass Block.png"
+        self._server_resolution_cache: dict[tuple[str, int | None], set[str]] = {}
 
         for path in (
             self.data_root,
@@ -710,7 +719,35 @@ class LauncherService:
                 text = handle.read().decode("utf-8", errors="replace")
         except OSError:
             return None
-        return _detect_minecraft_activity_from_log(text)
+        server_addresses = self.get_instance_server_addresses(instance)
+        return _detect_minecraft_activity_from_log(
+            text,
+            server_addresses=server_addresses,
+            resolver=self._resolve_server_host,
+        )
+
+    def get_instance_server_addresses(self, instance: InstanceRecord) -> list[str]:
+        return _read_servers_dat_addresses(instance.minecraft_dir / "servers.dat")
+
+    def _resolve_server_host(self, host: str, port: int | None = None) -> set[str]:
+        normalized_host = _normalize_server_host(host)
+        if not normalized_host or _is_ip_address(normalized_host):
+            return {normalized_host} if normalized_host else set()
+
+        cache_key = (normalized_host.lower(), port)
+        cached = self._server_resolution_cache.get(cache_key)
+        if cached is not None:
+            return set(cached)
+
+        resolved: set[str] = set()
+        try:
+            for _, _, _, _, sockaddr in socket.getaddrinfo(normalized_host, port or 25565, type=socket.SOCK_STREAM):
+                if sockaddr:
+                    resolved.add(_normalize_server_host(str(sockaddr[0])))
+        except OSError:
+            resolved = set()
+        self._server_resolution_cache[cache_key] = set(resolved)
+        return resolved
 
     def duplicate_instance(self, instance: InstanceRecord, preferred_name: str | None = None) -> InstanceRecord:
         target_name = self._allocate_duplicate_name(preferred_name or f"{instance.name} Copy")
@@ -1424,8 +1461,8 @@ class LauncherService:
             "username": player_name,
             "uuid": _offline_uuid(player_name),
             "token": "offline-token",
-            "launcherName": "Minecraft",
-            "launcherVersion": "0.1",
+            "launcherName": APP_NAME,
+            "launcherVersion": APP_VERSION,
             "gameDirectory": str(game_directory),
             "jvmArguments": [f"-Xmx{resolved_memory}M"],
             "enableLoggingConfig": True,
@@ -2977,14 +3014,135 @@ def _normalize_minecraft_version_argument(command: list[str], vanilla_version: s
         command[value_index] = vanilla_version
 
 
-def _detect_minecraft_activity_from_log(text: str) -> str | None:
+class _NbtParseError(ValueError):
+    pass
+
+
+class _NbtReader:
+    def __init__(self, data: bytes):
+        self._data = memoryview(data)
+        self._offset = 0
+
+    def _read(self, length: int) -> bytes:
+        if self._offset + length > len(self._data):
+            raise _NbtParseError("Unexpected end of NBT data.")
+        chunk = self._data[self._offset : self._offset + length].tobytes()
+        self._offset += length
+        return chunk
+
+    def read_u8(self) -> int:
+        return self._read(1)[0]
+
+    def read_i16(self) -> int:
+        return int.from_bytes(self._read(2), "big", signed=True)
+
+    def read_u16(self) -> int:
+        return int.from_bytes(self._read(2), "big", signed=False)
+
+    def read_i32(self) -> int:
+        return int.from_bytes(self._read(4), "big", signed=True)
+
+    def read_string(self) -> str:
+        length = self.read_u16()
+        return self._read(length).decode("utf-8", errors="replace")
+
+    def read_payload(self, tag_type: int) -> Any:
+        if tag_type == 0:
+            return None
+        if tag_type == 1:
+            return int.from_bytes(self._read(1), "big", signed=True)
+        if tag_type == 2:
+            return self.read_i16()
+        if tag_type == 3:
+            return self.read_i32()
+        if tag_type == 4:
+            return int.from_bytes(self._read(8), "big", signed=True)
+        if tag_type == 5:
+            self._read(4)
+            return None
+        if tag_type == 6:
+            self._read(8)
+            return None
+        if tag_type == 7:
+            self._read(max(0, self.read_i32()))
+            return None
+        if tag_type == 8:
+            return self.read_string()
+        if tag_type == 9:
+            child_type = self.read_u8()
+            length = max(0, self.read_i32())
+            return [self.read_payload(child_type) for _ in range(length)]
+        if tag_type == 10:
+            compound: dict[str, Any] = {}
+            while True:
+                child_type = self.read_u8()
+                if child_type == 0:
+                    break
+                name = self.read_string()
+                compound[name] = self.read_payload(child_type)
+            return compound
+        if tag_type == 11:
+            self._read(max(0, self.read_i32()) * 4)
+            return None
+        if tag_type == 12:
+            self._read(max(0, self.read_i32()) * 8)
+            return None
+        raise _NbtParseError(f"Unsupported NBT tag type: {tag_type}")
+
+
+def _read_servers_dat_addresses(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    try:
+        data = path.read_bytes()
+        if data.startswith(b"\x1f\x8b"):
+            data = gzip.decompress(data)
+        reader = _NbtReader(data)
+        root_type = reader.read_u8()
+        if root_type != 10:
+            return []
+        reader.read_string()
+        root = reader.read_payload(root_type)
+    except (OSError, EOFError, _NbtParseError, gzip.BadGzipFile, UnicodeDecodeError):
+        return []
+
+    if not isinstance(root, dict):
+        return []
+    servers = root.get("servers")
+    if not isinstance(servers, list):
+        return []
+
+    addresses: list[str] = []
+    for entry in servers:
+        if not isinstance(entry, dict):
+            continue
+        address = _optional_str(entry.get("ip"))
+        if address:
+            addresses.append(address)
+    return addresses
+
+
+def _detect_minecraft_activity_from_log(
+    text: str,
+    *,
+    server_addresses: list[str] | None = None,
+    resolver: Callable[[str, int | None], set[str]] | None = None,
+) -> str | None:
     activity: str | None = None
+    configured_addresses = list(server_addresses or [])
     for line in text.splitlines():
-        connect_match = re.search(r"Connecting to\s+(.+?)(?:,\s*\d+|\s*$)", line, flags=re.IGNORECASE)
+        connect_match = re.search(r"Connecting to\s+(.+?)(?:,\s*(\d+)|\s*$)", line, flags=re.IGNORECASE)
         if connect_match:
             server = connect_match.group(1).strip()
+            port = _optional_int(connect_match.group(2))
             if server:
-                activity = f"Playing in {server}"
+                display_address = _resolve_display_server_address(
+                    server,
+                    port,
+                    configured_addresses,
+                    resolver=resolver,
+                )
+                activity = _format_server_activity(display_address)
                 continue
 
         lowered = line.lower()
@@ -2996,6 +3154,110 @@ def _detect_minecraft_activity_from_log(text: str) -> str | None:
         ):
             activity = "Playing in singleplayer"
     return activity
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_server_activity(address: str) -> str:
+    normalized = address.lower()
+    if "mineberry" in normalized:
+        return "Playing in Mineberry"
+    if "amplifiedsmp" in normalized:
+        return "Playing in Amplified SMP"
+    return f"Playing in {address}"
+
+
+def _resolve_display_server_address(
+    logged_address: str,
+    logged_port: int | None,
+    configured_addresses: list[str],
+    *,
+    resolver: Callable[[str, int | None], set[str]] | None = None,
+) -> str:
+    logged_host, parsed_logged_port = _split_server_address(logged_address)
+    logged_port = logged_port or parsed_logged_port
+    normalized_logged_host = _normalize_server_host(logged_host)
+    if not normalized_logged_host:
+        return logged_address
+
+    for configured_address in configured_addresses:
+        configured_host, configured_port = _split_server_address(configured_address)
+        if not _ports_match(logged_port, configured_port):
+            continue
+        if _normalize_server_host(configured_host).lower() == normalized_logged_host.lower():
+            return configured_address
+
+    if not _is_ip_address(normalized_logged_host):
+        return logged_address
+
+    logged_ip = _parse_ip_address(normalized_logged_host)
+    if logged_ip is None:
+        return logged_address
+
+    for configured_address in configured_addresses:
+        configured_host, configured_port = _split_server_address(configured_address)
+        if not _ports_match(logged_port, configured_port):
+            continue
+        configured_ip = _parse_ip_address(configured_host)
+        if configured_ip is not None and configured_ip == logged_ip:
+            return configured_address
+
+    if resolver is None:
+        return logged_address
+
+    for configured_address in configured_addresses:
+        configured_host, configured_port = _split_server_address(configured_address)
+        if not _ports_match(logged_port, configured_port):
+            continue
+        resolved_hosts = resolver(configured_host, configured_port or logged_port)
+        if any(_parse_ip_address(host) == logged_ip for host in resolved_hosts):
+            return configured_address
+
+    return logged_address
+
+
+def _split_server_address(address: str) -> tuple[str, int | None]:
+    text = str(address).strip()
+    if text.startswith("/"):
+        text = text[1:].strip()
+    if text.startswith("[") and "]" in text:
+        host, _, remainder = text[1:].partition("]")
+        if remainder.startswith(":"):
+            return host, _optional_int(remainder[1:])
+        return host, None
+    if text.count(":") == 1:
+        host, port = text.rsplit(":", 1)
+        parsed_port = _optional_int(port)
+        if parsed_port is not None:
+            return host, parsed_port
+    return text, None
+
+
+def _normalize_server_host(host: str) -> str:
+    normalized = str(host).strip().strip("[]")
+    if normalized.startswith("/"):
+        normalized = normalized[1:].strip()
+    return normalized.rstrip(".")
+
+
+def _ports_match(logged_port: int | None, configured_port: int | None) -> bool:
+    return logged_port is None or configured_port is None or logged_port == configured_port
+
+
+def _is_ip_address(host: str) -> bool:
+    return _parse_ip_address(host) is not None
+
+
+def _parse_ip_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(_normalize_server_host(host))
+    except ValueError:
+        return None
 
 
 def _friendly_asset_name(value: str) -> str:
@@ -3293,8 +3555,16 @@ def _coerce_memory_mb(value: Any) -> int:
     try:
         memory_mb = int(value)
     except (TypeError, ValueError):
-        return DEFAULT_MEMORY_MB
-    return max(1024, min(65536, memory_mb))
+        return max(1024, min(_system_memory_cap_mb(), DEFAULT_MEMORY_MB))
+    return max(1024, min(_system_memory_cap_mb(), memory_mb))
+
+
+def _system_memory_cap_mb() -> int:
+    try:
+        total_mb = int(psutil.virtual_memory().total / (1024 * 1024))
+    except Exception:  # noqa: BLE001
+        total_mb = 65536
+    return max(1024, total_mb)
 
 
 def _coerce_str_list(value: Any) -> list[str]:

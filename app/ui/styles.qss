@@ -716,6 +716,13 @@ QLabel#installProgressTitle {
     background: transparent;
 }
 
+QLabel#installProgressSummary {
+    color: #d8e8ff;
+    font-size: 14px;
+    font-weight: 700;
+    background: transparent;
+}
+
 QLabel#installProgressStatus {
     color: #9fb7db;
     font-size: 13px;

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 import multiprocessing
+import time
 from queue import Empty
 from typing import Any
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -39,6 +41,8 @@ class InstallProgressDialog(QDialog):
         self._completed = False
         self._aborting = False
         self._last_status = ""
+        self._started_at = time.monotonic()
+        self._display_percent = 0
 
         self.setObjectName("installProgressDialog")
         self.setWindowTitle(_operation_window_title(request.operation))
@@ -75,6 +79,12 @@ class InstallProgressDialog(QDialog):
         self.status_label.setObjectName("installProgressStatus")
         text_column.addWidget(self.status_label)
         header_layout.addLayout(text_column, 1)
+
+        self.progress_summary_label = QLabel("0% | approx. calculating")
+        self.progress_summary_label.setObjectName("installProgressSummary")
+        self.progress_summary_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.progress_summary_label.setMinimumWidth(180)
+        header_layout.addWidget(self.progress_summary_label)
         root_layout.addWidget(header)
 
         self.progress_bar = QProgressBar()
@@ -145,11 +155,13 @@ class InstallProgressDialog(QDialog):
         if event_type == "max":
             maximum = max(1, int(event.get("value", 1)))
             self.progress_bar.setMaximum(maximum)
+            self._update_progress_summary()
             return
 
         if event_type == "progress":
             value = max(0, int(event.get("value", 0)))
             self.progress_bar.setValue(value)
+            self._update_progress_summary()
             return
 
         if event_type == "complete":
@@ -183,6 +195,7 @@ class InstallProgressDialog(QDialog):
             return
 
         self._append_log("Install finished successfully.")
+        self._update_progress_summary(force_percent=100)
         self.installation_succeeded.emit(instance)
         self.close()
 
@@ -222,6 +235,26 @@ class InstallProgressDialog(QDialog):
         self._completed = True
         self._poll_timer.stop()
         self.close()
+
+    def _update_progress_summary(self, *, force_percent: int | None = None) -> None:
+        if force_percent is None:
+            maximum = max(1, self.progress_bar.maximum())
+            raw_percent = int(round((self.progress_bar.value() / maximum) * 100))
+            raw_percent = min(99, max(0, raw_percent))
+            self._display_percent = max(self._display_percent, raw_percent)
+        else:
+            self._display_percent = max(0, min(100, int(force_percent)))
+
+        if self._display_percent <= 0:
+            remaining_text = "calculating"
+        elif self._display_percent >= 100:
+            remaining_text = "0 min"
+        else:
+            elapsed = max(0.1, time.monotonic() - self._started_at)
+            remaining_seconds = elapsed * ((100 - self._display_percent) / self._display_percent)
+            remaining_text = f"{max(1, math.ceil(remaining_seconds / 60))} min"
+
+        self.progress_summary_label.setText(f"{self._display_percent}% | approx. {remaining_text}")
 
     def _terminate_process(self) -> None:
         if self._process is None:

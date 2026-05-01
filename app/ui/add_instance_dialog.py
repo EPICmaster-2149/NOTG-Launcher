@@ -797,6 +797,12 @@ class AddInstanceDialog(QDialog):
         self.ram_display.setMinimumWidth(180)
         ram_row.addWidget(self.ram_display)
 
+        self.ram_go_beyond_checkbox = QCheckBox("Go Beyond")
+        self.ram_go_beyond_checkbox.setObjectName("editorFilterCheck")
+        self.ram_go_beyond_checkbox.setChecked(False)
+        self.ram_go_beyond_checkbox.toggled.connect(self._on_ram_go_beyond_toggled)
+        advanced_layout.addWidget(self.ram_go_beyond_checkbox)
+
         ram_actions = QHBoxLayout()
         ram_actions.setContentsMargins(0, 0, 0, 0)
         ram_actions.setSpacing(12)
@@ -1371,11 +1377,24 @@ class AddInstanceDialog(QDialog):
         ]
 
     def _update_ram_slider_range(self) -> None:
-        total_mb = int(psutil.virtual_memory().total / (1024 * 1024))
-        maximum_mb = max(self._ram_default_mb, min(16384, (int(total_mb * 0.75) // 1024) * 1024))
+        maximum_mb = self._ram_slider_limit_mb()
         minimum_mb = 1024
         self.ram_slider.setMinimum(minimum_mb // self._ram_slider_step_mb)
         self.ram_slider.setMaximum(maximum_mb // self._ram_slider_step_mb)
+
+    def _system_ram_limit_mb(self) -> int:
+        total_mb = int(psutil.virtual_memory().total / (1024 * 1024))
+        return max(1024, (total_mb // self._ram_slider_step_mb) * self._ram_slider_step_mb)
+
+    def _safe_ram_limit_mb(self) -> int:
+        total_mb = int(psutil.virtual_memory().total / (1024 * 1024))
+        safe_mb = (int(total_mb * 0.75) // 1024) * 1024
+        return max(self._ram_default_mb, min(16384, safe_mb))
+
+    def _ram_slider_limit_mb(self) -> int:
+        if getattr(self, "ram_go_beyond_checkbox", None) is not None and self.ram_go_beyond_checkbox.isChecked():
+            return self._system_ram_limit_mb()
+        return self._safe_ram_limit_mb()
 
     def _slider_to_mb(self, slider_value: int) -> int:
         return slider_value * self._ram_slider_step_mb
@@ -1384,7 +1403,7 @@ class AddInstanceDialog(QDialog):
         return max(self.ram_slider.minimum(), min(self.ram_slider.maximum(), memory_mb // self._ram_slider_step_mb))
 
     def _snap_memory_mb(self, memory_mb: int) -> int:
-        snapped = int(round(memory_mb / 1024.0) * 1024)
+        snapped = int(round(memory_mb / self._ram_slider_step_mb) * self._ram_slider_step_mb)
         minimum = self._slider_to_mb(self.ram_slider.minimum())
         maximum = self._slider_to_mb(self.ram_slider.maximum())
         return max(minimum, min(maximum, snapped))
@@ -1416,6 +1435,13 @@ class AddInstanceDialog(QDialog):
 
     def _on_ram_slider_changed(self, value: int) -> None:
         self._set_ram_value(self._slider_to_mb(value), animate=False)
+
+    def _on_ram_go_beyond_toggled(self, checked: bool) -> None:
+        selected_mb = self._ram_selected_mb
+        self._update_ram_slider_range()
+        if not checked:
+            selected_mb = min(selected_mb, self._slider_to_mb(self.ram_slider.maximum()))
+        self._set_ram_value(selected_mb, animate=False)
 
     def _revert_ram_value(self) -> None:
         self._set_ram_value(self._ram_default_mb, animate=True)

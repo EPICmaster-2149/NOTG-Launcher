@@ -213,6 +213,7 @@ class EditInstanceDialog(QDialog):
         self._build_ui()
         self._apply_responsive_layout()
         self._sync_header_icon()
+        self._sync_ram_go_beyond_for_value(instance.memory_mb)
         self._update_ram_slider_range()
         self._set_ram_value(instance.memory_mb)
         self._update_runtime_buttons()
@@ -755,6 +756,12 @@ class EditInstanceDialog(QDialog):
         self.ram_display.setMinimumWidth(180)
         ram_row.addWidget(self.ram_display)
 
+        self.ram_go_beyond_checkbox = QCheckBox("Go Beyond")
+        self.ram_go_beyond_checkbox.setObjectName("editorFilterCheck")
+        self.ram_go_beyond_checkbox.setChecked(False)
+        self.ram_go_beyond_checkbox.toggled.connect(self._on_ram_go_beyond_toggled)
+        advanced_layout.addWidget(self.ram_go_beyond_checkbox)
+
         ram_actions = QHBoxLayout()
         ram_actions.setContentsMargins(0, 0, 0, 0)
         ram_actions.setSpacing(12)
@@ -1166,6 +1173,8 @@ class EditInstanceDialog(QDialog):
         self._sync_header_icon()
         self._update_runtime_buttons()
         self._apply_rich_presence_fields()
+        self._sync_ram_go_beyond_for_value(instance.memory_mb)
+        self._update_ram_slider_range()
         self._set_ram_value(instance.memory_mb)
         if self._advanced_loaded:
             self._reload_copy_source_instances()
@@ -2015,7 +2024,8 @@ class EditInstanceDialog(QDialog):
     def _set_ram_value(self, memory_mb: int) -> None:
         slider_max_mb = self.ram_slider.maximum() * self._ram_slider_step_mb
         self.ram_slider.blockSignals(True)
-        self._ram_selected_mb = max(1024, min(slider_max_mb, int(memory_mb)))
+        snapped_mb = int(round(int(memory_mb) / self._ram_slider_step_mb) * self._ram_slider_step_mb)
+        self._ram_selected_mb = max(1024, min(slider_max_mb, snapped_mb))
         self.ram_slider.setValue(self._ram_selected_mb // self._ram_slider_step_mb)
         self.ram_slider.blockSignals(False)
         self.ram_display.setText(f"{self._ram_selected_mb} MB")
@@ -2034,7 +2044,35 @@ class EditInstanceDialog(QDialog):
             self._set_ram_value(self.instance.memory_mb)
 
     def _update_ram_slider_range(self) -> None:
-        total_mb = int(psutil.virtual_memory().total / (1024 * 1024))
-        maximum_mb = max(self.instance.memory_mb, min(16384, (int(total_mb * 0.75) // 1024) * 1024))
+        maximum_mb = self._ram_slider_limit_mb()
         self.ram_slider.setMinimum(1024 // self._ram_slider_step_mb)
         self.ram_slider.setMaximum(maximum_mb // self._ram_slider_step_mb)
+
+    def _system_ram_limit_mb(self) -> int:
+        total_mb = int(psutil.virtual_memory().total / (1024 * 1024))
+        return max(1024, (total_mb // self._ram_slider_step_mb) * self._ram_slider_step_mb)
+
+    def _safe_ram_limit_mb(self) -> int:
+        total_mb = int(psutil.virtual_memory().total / (1024 * 1024))
+        safe_mb = (int(total_mb * 0.75) // 1024) * 1024
+        return max(1024, min(16384, safe_mb))
+
+    def _ram_slider_limit_mb(self) -> int:
+        if getattr(self, "ram_go_beyond_checkbox", None) is not None and self.ram_go_beyond_checkbox.isChecked():
+            return self._system_ram_limit_mb()
+        return self._safe_ram_limit_mb()
+
+    def _sync_ram_go_beyond_for_value(self, memory_mb: int) -> None:
+        if not hasattr(self, "ram_go_beyond_checkbox"):
+            return
+        should_enable = int(memory_mb) > self._safe_ram_limit_mb()
+        self.ram_go_beyond_checkbox.blockSignals(True)
+        self.ram_go_beyond_checkbox.setChecked(should_enable)
+        self.ram_go_beyond_checkbox.blockSignals(False)
+
+    def _on_ram_go_beyond_toggled(self, checked: bool) -> None:
+        selected_mb = self._ram_selected_mb
+        self._update_ram_slider_range()
+        if not checked:
+            selected_mb = min(selected_mb, self.ram_slider.maximum() * self._ram_slider_step_mb)
+        self._set_ram_value(selected_mb)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
@@ -8,12 +9,11 @@ from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, Q
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 try:
-    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-    from PySide6.QtMultimediaWidgets import QVideoWidget
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 except ImportError:  # pragma: no cover - depends on the local Qt build
     QAudioOutput = None
     QMediaPlayer = None
-    QVideoWidget = None
+    QVideoSink = None
 
 from core.launcher import InstanceRecord, JavaCompatibilityError, LauncherService, VIDEO_SUFFIXES
 from ui.instance_card import InstanceCard
@@ -89,9 +89,12 @@ class MainWindow(QWidget):
         self._background_is_video = False
         self._background_cache = QPixmap()
         self._background_cache_size = QSize()
-        self._background_video_widget = None
         self._background_video_player = None
         self._background_audio_output = None
+        self._background_video_sink = None
+        self._background_video_source: str | None = None
+        self._background_video_last_frame_at = 0.0
+        self._background_video_min_frame_interval = 1.0 / 24.0
         self._screen_connected = False
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._runtime_session_snapshot: tuple[tuple[str, str, int | None, int | None, bool], ...] = ()
@@ -123,7 +126,6 @@ class MainWindow(QWidget):
     def resizeEvent(self, event) -> None:
         self._apply_responsive_layout()
         self._invalidate_background_cache()
-        self._sync_background_video_geometry()
         super().resizeEvent(event)
 
     def paintEvent(self, event) -> None:
@@ -637,12 +639,8 @@ class MainWindow(QWidget):
         self.update()
 
     def _set_video_background(self, video_path: str) -> None:
-        if QMediaPlayer is None or QVideoWidget is None:
+        if QMediaPlayer is None or QVideoSink is None:
             return
-        if self._background_video_widget is None:
-            self._background_video_widget = QVideoWidget(self)
-            self._background_video_widget.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self._background_video_widget.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
         if self._background_video_player is None:
             self._background_video_player = QMediaPlayer(self)
             if QAudioOutput is not None:
@@ -650,31 +648,32 @@ class MainWindow(QWidget):
                 self._background_audio_output.setMuted(True)
                 self._background_audio_output.setVolume(0)
                 self._background_video_player.setAudioOutput(self._background_audio_output)
-            self._background_video_player.setVideoOutput(self._background_video_widget)
+            self._background_video_sink = QVideoSink(self)
+            self._background_video_sink.videoFrameChanged.connect(self._handle_background_video_frame)
+            self._background_video_player.setVideoSink(self._background_video_sink)
             self._background_video_player.mediaStatusChanged.connect(self._handle_background_media_status)
             try:
                 self._background_video_player.setLoops(QMediaPlayer.Loops.Infinite)
             except Exception:  # noqa: BLE001
                 pass
 
-        self._sync_background_video_geometry()
-        self._background_video_widget.show()
-        self._background_video_widget.lower()
-        self._background_video_player.setSource(QUrl.fromLocalFile(video_path))
+        if self._background_video_source != video_path:
+            self._background_video_source = video_path
+            self._background_video_last_frame_at = 0.0
+            self._background_video_player.stop()
+            self._background_video_player.setSource(QUrl.fromLocalFile(video_path))
         self._background_video_player.play()
 
     def _clear_video_background(self) -> None:
         if self._background_video_player is not None:
             self._background_video_player.stop()
-            self._background_video_player.setSource(QUrl())
-        if self._background_video_widget is not None:
-            self._background_video_widget.hide()
+            if self._background_video_source is not None:
+                self._background_video_player.setSource(QUrl())
+        self._background_video_source = None
+        self._background_video_last_frame_at = 0.0
 
     def _sync_background_video_geometry(self) -> None:
-        if self._background_video_widget is None:
-            return
-        self._background_video_widget.setGeometry(self.rect())
-        self._background_video_widget.lower()
+        self._invalidate_background_cache()
 
     def _handle_background_media_status(self, status) -> None:
         if QMediaPlayer is None or self._background_video_player is None:
@@ -682,6 +681,23 @@ class MainWindow(QWidget):
         if status == QMediaPlayer.MediaStatus.EndOfMedia and self._background_is_video:
             self._background_video_player.setPosition(0)
             self._background_video_player.play()
+
+    def _handle_background_video_frame(self, frame) -> None:
+        if not self._background_is_video:
+            return
+        now = monotonic()
+        if now - self._background_video_last_frame_at < self._background_video_min_frame_interval:
+            return
+        try:
+            image = frame.toImage()
+        except Exception:  # noqa: BLE001
+            return
+        if image.isNull():
+            return
+        self._background_video_last_frame_at = now
+        self._background_pixmap = QPixmap.fromImage(image)
+        self._invalidate_background_cache()
+        self.update()
 
     def _open_edit_dialog(self, instance: InstanceRecord, *, page: str = "Minecraft Log") -> None:
         from ui.edit_instance_dialog import EditInstanceDialog
@@ -892,7 +908,8 @@ class MainWindow(QWidget):
             return
         if self._background_cache_size == self.size() and not self._background_cache.isNull():
             return
-        scaled = self._background_pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        transform_mode = Qt.FastTransformation if self._background_is_video else Qt.SmoothTransformation
+        scaled = self._background_pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, transform_mode)
         source_x = max(0, int((scaled.width() - self.width()) / 2))
         source_y = max(0, int((scaled.height() - self.height()) / 2))
         self._background_cache = scaled.copy(source_x, source_y, self.width(), self.height())

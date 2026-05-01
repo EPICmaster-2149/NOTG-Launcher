@@ -48,6 +48,7 @@ QLabel#editorPageTitle,
 QLabel#editorCompactPageTitle,
 QLabel#accountsTitle,
 QLabel#installProgressTitle,
+QLabel#installProgressSummary,
 QLabel#settingsTitle {
     color: #17324d;
 }
