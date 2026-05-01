@@ -206,6 +206,7 @@ QDialog#instanceEditor,
 QDialog#editInstanceDialog,
 QDialog#installProgressDialog,
 QDialog#iconSelectorDialog,
+QDialog#backgroundSelectorDialog,
 QDialog#accountsDialog,
 QDialog#settingsDialog {
     background-color: qradialgradient(
@@ -263,6 +264,13 @@ QFrame#iconPresentationSurface {
     background-color: rgba(11, 18, 31, 0.88);
     border: 1px solid rgba(84, 122, 177, 0.3);
     border-radius: 14px;
+}
+
+QScrollArea#iconPresentationScroll,
+QScrollArea#iconPresentationScroll > QWidget > QWidget,
+QWidget#iconGridHolder {
+    background: transparent;
+    border: none;
 }
 
 QLabel#editorInstanceIcon {

@@ -3,10 +3,12 @@ from __future__ import annotations
 import configparser
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 import traceback
 import uuid
@@ -98,8 +100,12 @@ MMCPACK_LOADER_UIDS = {
 
 APP_NAME = "NOTG Launcher"
 USER_ICON_PREFIX = "user-icons"
+USER_BACKGROUND_PREFIX = "user-backgrounds"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".avi", ".mkv", ".webm", ".wmv"}
+BACKGROUND_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES
 BACKGROUND_FILE_NAME = "active-background"
+JAVA_DOWNLOAD_URL = "https://www.oracle.com/in/java/technologies/downloads/#java25"
 UNSET = object()
 SESSION_STATUS_TO_INSTANCE_STATUS = {
     "launching": "Launching",
@@ -137,6 +143,27 @@ class IconRecord:
 
 
 @dataclass(slots=True)
+class BackgroundRecord:
+    background_id: str
+    name: str
+    relative_path: str
+    absolute_path: str
+    is_default: bool
+    is_video: bool
+
+
+@dataclass(slots=True)
+class JavaRuntimeCandidate:
+    executable_path: str
+    major_version: int
+    label: str
+
+
+class JavaCompatibilityError(RuntimeError):
+    """Raised when no installed Java runtime can launch the selected Minecraft version."""
+
+
+@dataclass(slots=True)
 class InstanceRecord:
     instance_id: str
     name: str
@@ -154,11 +181,16 @@ class InstanceRecord:
     rich_presence_enabled: bool = True
     rich_presence_state: str | None = None
     rich_presence_details: str | None = None
+    rich_presence_adaptive_details: bool = True
     status: str = "Quit"
     pid: int | None = None
 
     @property
     def version_label(self) -> str:
+        return f"Version {self.vanilla_version} | {self.loader_name}"
+
+    @property
+    def compact_version_label(self) -> str:
         return f"Version {self.vanilla_version} | {self.loader_name}"
 
     @property
@@ -183,6 +215,7 @@ class InstanceRecord:
             "rich_presence_enabled": self.rich_presence_enabled,
             "rich_presence_state": self.rich_presence_state,
             "rich_presence_details": self.rich_presence_details,
+            "rich_presence_adaptive_details": self.rich_presence_adaptive_details,
         }
 
     @classmethod
@@ -203,6 +236,7 @@ class InstanceRecord:
             rich_presence_enabled=bool(metadata.get("rich_presence_enabled", True)),
             rich_presence_state=_optional_str(metadata.get("rich_presence_state")),
             rich_presence_details=_optional_str(metadata.get("rich_presence_details")),
+            rich_presence_adaptive_details=bool(metadata.get("rich_presence_adaptive_details", True)),
             root_dir=root_dir,
             minecraft_dir=root_dir / ".minecraft",
         )
@@ -582,6 +616,7 @@ class LauncherService:
         rich_presence_enabled: bool | None = None,
         rich_presence_state: Any = UNSET,
         rich_presence_details: Any = UNSET,
+        rich_presence_adaptive_details: bool | None = None,
     ) -> InstanceRecord:
         metadata_path = self.instance_metadata_path(instance)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -613,6 +648,8 @@ class LauncherService:
             metadata["rich_presence_state"] = _optional_str(rich_presence_state)
         if rich_presence_details is not UNSET:
             metadata["rich_presence_details"] = _optional_str(rich_presence_details)
+        if rich_presence_adaptive_details is not None:
+            metadata["rich_presence_adaptive_details"] = bool(rich_presence_adaptive_details)
 
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         refreshed = InstanceRecord.from_metadata(metadata, instance.root_dir)
@@ -635,19 +672,45 @@ class LauncherService:
         enabled: bool,
         state: str | None,
         details: str | None,
+        adaptive_details: bool | None = None,
     ) -> InstanceRecord:
-        return self.update_instance(
-            instance,
-            rich_presence_enabled=enabled,
-            rich_presence_state=state,
-            rich_presence_details=details,
-        )
+        changes: dict[str, Any] = {
+            "rich_presence_enabled": enabled,
+            "rich_presence_state": state,
+            "rich_presence_details": details,
+        }
+        if adaptive_details is not None:
+            changes["rich_presence_adaptive_details"] = adaptive_details
+        return self.update_instance(instance, **changes)
 
     def build_instance_rich_presence_state(self, instance: InstanceRecord) -> str:
         return instance.rich_presence_state or "Playing Minecraft"
 
     def build_instance_rich_presence_details(self, instance: InstanceRecord) -> str:
-        return instance.version_label
+        return instance.compact_version_label
+
+    def resolve_instance_rich_presence_details(self, instance: InstanceRecord) -> str:
+        if instance.rich_presence_details:
+            return instance.rich_presence_details
+        if instance.rich_presence_adaptive_details:
+            activity = self.detect_instance_activity(instance)
+            if activity:
+                return activity
+        return self.build_instance_rich_presence_details(instance)
+
+    def detect_instance_activity(self, instance: InstanceRecord) -> str | None:
+        log_path = self.get_instance_latest_log_path(instance)
+        if not log_path.is_file():
+            return None
+        try:
+            with log_path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - 96_000), os.SEEK_SET)
+                text = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+        return _detect_minecraft_activity_from_log(text)
 
     def duplicate_instance(self, instance: InstanceRecord, preferred_name: str | None = None) -> InstanceRecord:
         target_name = self._allocate_duplicate_name(preferred_name or f"{instance.name} Copy")
@@ -781,48 +844,131 @@ class LauncherService:
         return reports[0] if reports else None
 
     def get_default_background_path(self) -> str | None:
-        if not self.default_background_root.is_dir():
-            return None
-        for candidate in sorted(self.default_background_root.iterdir(), key=lambda item: item.name.lower()):
-            if candidate.is_file() and candidate.suffix.lower() in IMAGE_SUFFIXES:
-                return str(candidate.resolve())
+        defaults = self._default_background_records()
+        if defaults:
+            return defaults[0].absolute_path
         return None
 
-    def get_active_background_path(self) -> str | None:
+    def backgrounds_folder(self) -> Path:
+        return self.backgrounds_root
+
+    def list_backgrounds(self) -> list[BackgroundRecord]:
+        return [*self._default_background_records(), *self._user_background_records()]
+
+    def get_active_background_reference(self) -> str | None:
         payload = self._read_background_payload()
         mode = str(payload.get("mode", "default"))
-        if mode == "custom":
-            file_name = _optional_str(payload.get("file_name"))
-            if file_name:
-                custom_path = self.backgrounds_root / file_name
-                if custom_path.is_file():
-                    return str(custom_path.resolve())
-        return self.get_default_background_path()
+        file_name = _optional_str(payload.get("file_name"))
+        if mode == "custom" and file_name:
+            reference = f"{USER_BACKGROUND_PREFIX}/{file_name}"
+            candidate = self._resolve_background_candidate(reference)
+            try:
+                candidate.relative_to(self.backgrounds_root.resolve())
+            except ValueError:
+                candidate = None
+            if candidate is not None and candidate.is_file():
+                return reference
+        if mode == "default" and file_name:
+            candidate = self.default_background_root / file_name
+            if candidate.is_file() and candidate.suffix.lower() in BACKGROUND_SUFFIXES:
+                return self._project_relative(candidate)
+        defaults = self._default_background_records()
+        return defaults[0].relative_path if defaults else None
+
+    def get_active_background_path(self) -> str | None:
+        reference = self.get_active_background_reference()
+        if not reference:
+            return self.get_default_background_path()
+        resolved = Path(self.resolve_background_path(reference))
+        return str(resolved) if resolved.is_file() else self.get_default_background_path()
 
     def set_custom_background(self, source_path: str | Path) -> str:
+        reference = self.store_user_background(source_path)
+        return self.set_active_background(reference)
+
+    def store_user_background(self, source_path: str | Path, preferred_name: str | None = None) -> str:
         source = Path(source_path)
         if not source.is_file():
-            raise FileNotFoundError(f"Background image not found: {source}")
-        if source.suffix.lower() not in IMAGE_SUFFIXES:
-            raise ValueError("Choose a PNG, JPG, JPEG, BMP, or WEBP image.")
+            raise FileNotFoundError(f"Background file not found: {source}")
+        suffix = source.suffix.lower()
+        if suffix not in BACKGROUND_SUFFIXES:
+            raise ValueError("Choose an image or video background file.")
 
         self.backgrounds_root.mkdir(parents=True, exist_ok=True)
-        for existing in self.backgrounds_root.glob(f"{BACKGROUND_FILE_NAME}.*"):
-            if existing.is_file():
-                existing.unlink()
+        safe_name = _slugify(preferred_name or source.stem) or BACKGROUND_FILE_NAME
+        target = self._unique_background_path(safe_name, suffix)
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+        return self._user_background_reference(target)
 
-        target = self.backgrounds_root / f"{BACKGROUND_FILE_NAME}{source.suffix.lower()}"
-        shutil.copy2(source, target)
+    def set_active_background(self, background_path: str | Path) -> str:
+        resolved = self._resolve_background_candidate(str(background_path))
+        if resolved is None or not resolved.is_file():
+            raise FileNotFoundError(f"Background file not found: {background_path}")
+        if resolved.suffix.lower() not in BACKGROUND_SUFFIXES:
+            raise ValueError("Choose an image or video background file.")
+
         payload = self._read_background_payload()
-        payload.update({"mode": "custom", "file_name": target.name})
+        try:
+            user_relative = resolved.resolve().relative_to(self.backgrounds_root.resolve())
+        except ValueError:
+            user_relative = None
+
+        if user_relative is not None:
+            payload.update({"mode": "custom", "file_name": user_relative.as_posix()})
+        else:
+            try:
+                default_relative = resolved.resolve().relative_to(self.default_background_root.resolve())
+            except ValueError as exc:
+                raise ValueError("Background must be a default asset or a user background.") from exc
+            payload.update({"mode": "default", "file_name": default_relative.as_posix()})
         self._write_background_payload(payload)
-        return str(target.resolve())
+        return str(resolved.resolve())
+
+    def remove_user_background(self, background_path: str | Path) -> bool:
+        background = self._resolve_background_candidate(str(background_path))
+        if background is None:
+            return False
+        try:
+            background.relative_to(self.backgrounds_root.resolve())
+        except ValueError:
+            return False
+
+        if not background.is_file():
+            return False
+        was_active = self.get_active_background_path() == str(background.resolve())
+        background.unlink()
+        if was_active:
+            self.reset_background()
+        return True
 
     def reset_background(self) -> None:
         payload = self._read_background_payload()
         payload.pop("file_name", None)
         payload["mode"] = "default"
         self._write_background_payload(payload)
+
+    def resolve_background_path(self, background_path: str | None) -> str:
+        default_path = self.get_default_background_path()
+        resolved_background = self._resolve_background_candidate(background_path)
+        if resolved_background.is_file():
+            return str(resolved_background)
+        return default_path or str(resolved_background)
+
+    def _resolve_background_candidate(self, background_path: str | None) -> Path:
+        if not background_path:
+            default_path = self.get_default_background_path()
+            return Path(default_path).resolve() if default_path else self.default_background_root.resolve()
+
+        normalized = str(background_path).replace("\\", "/")
+        if normalized.startswith(f"{USER_BACKGROUND_PREFIX}/"):
+            relative = normalized[len(USER_BACKGROUND_PREFIX) + 1 :]
+            return (self.backgrounds_root / relative).resolve()
+
+        candidate = Path(normalized)
+        if candidate.is_absolute():
+            return candidate.resolve()
+        return (self.project_root / candidate).resolve()
 
     def get_close_ui_on_launch(self) -> bool:
         return bool(self._read_background_payload().get("close_ui_on_launch", True))
@@ -1031,11 +1177,22 @@ class LauncherService:
             "rich_presence_enabled": bool(existing_metadata.get("rich_presence_enabled", True)),
             "rich_presence_state": _optional_str(existing_metadata.get("rich_presence_state")),
             "rich_presence_details": _optional_str(existing_metadata.get("rich_presence_details")),
+            "rich_presence_adaptive_details": bool(existing_metadata.get("rich_presence_adaptive_details", True)),
         }
         (stage_dir / "instance.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        if replace_existing and final_dir.exists():
-            shutil.rmtree(final_dir, ignore_errors=True)
-        shutil.move(str(stage_dir), str(final_dir))
+        backup_dir: Path | None = None
+        try:
+            if replace_existing and final_dir.exists():
+                backup_dir = final_dir.with_name(f"{final_dir.name}.backup-{uuid.uuid4().hex[:8]}")
+                final_dir.rename(backup_dir)
+            shutil.move(str(stage_dir), str(final_dir))
+        except Exception:
+            if backup_dir is not None and backup_dir.exists() and not final_dir.exists():
+                backup_dir.rename(final_dir)
+            raise
+        finally:
+            if backup_dir is not None and backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
 
         instance = InstanceRecord.from_metadata(metadata, final_dir)
         instance.icon_path = self.resolve_icon_path(instance.icon_path)
@@ -1148,30 +1305,150 @@ class LauncherService:
             return source.name or "Imported Instance"
         return "Imported Instance"
 
+    def validate_install_request(self, request: InstallRequest) -> None:
+        stage_dir = Path(request.stage_dir)
+        final_dir = Path(request.final_dir)
+        minecraft_dir = Path(request.minecraft_dir)
+        replace_existing = request.operation in {"reinstall", "copy_userdata"}
+
+        if replace_existing:
+            instance = self.get_instance(request.instance_id)
+            if instance is None:
+                raise FileNotFoundError("The target instance no longer exists.")
+            if instance.status.lower() in {"launching", "launched"} or self.runtime_session_pid(instance.instance_id):
+                raise RuntimeError("Stop the instance before changing its files.")
+            if not final_dir.is_dir():
+                raise FileNotFoundError(f"Instance directory not found: {final_dir}")
+            if not (final_dir / "instance.json").is_file():
+                raise FileNotFoundError(f"Instance metadata not found: {final_dir / 'instance.json'}")
+        elif final_dir.exists():
+            raise FileExistsError(f"Instance directory already exists: {final_dir}")
+
+        stage_dir.parent.mkdir(parents=True, exist_ok=True)
+        final_dir.parent.mkdir(parents=True, exist_ok=True)
+        _assert_directory_writable(stage_dir.parent, "staging folder")
+        _assert_directory_writable(final_dir.parent, "instances folder")
+        if replace_existing:
+            _assert_directory_writable(final_dir, "instance folder")
+
+        if request.operation in {"create", "reinstall"} and request.vanilla_version:
+            self.select_java_runtime(request.vanilla_version, minecraft_dir)
+
+    def required_java_major(self, version: str, minecraft_dir: Path) -> int:
+        required = _minimum_java_major_for_minecraft_version(version)
+        try:
+            runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(version, minecraft_dir)
+        except Exception:
+            runtime_info = None
+        if runtime_info:
+            try:
+                required = max(required, int(runtime_info.get("javaMajorVersion") or 0))
+            except (TypeError, ValueError):
+                pass
+        return max(required, 8)
+
+    def select_java_runtime(self, version: str, minecraft_dir: Path) -> JavaRuntimeCandidate:
+        required_major = self.required_java_major(version, minecraft_dir)
+        candidates = self._java_runtime_candidates(version, minecraft_dir)
+        compatible = [candidate for candidate in candidates if candidate.major_version >= required_major]
+        if compatible:
+            compatible.sort(key=lambda candidate: (candidate.major_version, candidate.label.lower()), reverse=True)
+            return compatible[0]
+
+        detected = sorted({candidate.major_version for candidate in candidates}, reverse=True)
+        if detected:
+            found_text = f" Highest detected Java version is {detected[0]}."
+        else:
+            found_text = " Java was not found."
+        raise JavaCompatibilityError(
+            f"Java {required_major} or newer is required for Minecraft {version}.{found_text}"
+        )
+
+    def _java_runtime_candidates(self, version: str, minecraft_dir: Path) -> list[JavaRuntimeCandidate]:
+        candidates: list[JavaRuntimeCandidate] = []
+        seen: set[str] = set()
+
+        def add_candidate(executable: str | os.PathLike | None, label: str) -> None:
+            if not executable:
+                return
+            candidate = _java_candidate_from_executable(executable, label)
+            if candidate is None:
+                return
+            key = str(Path(candidate.executable_path).resolve()).lower()
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(candidate)
+
+        try:
+            runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(version, minecraft_dir)
+        except Exception:
+            runtime_info = None
+        if runtime_info:
+            runtime_name = _optional_str(runtime_info.get("name"))
+            if runtime_name:
+                add_candidate(
+                    minecraft_launcher_lib.runtime.get_executable_path(runtime_name, minecraft_dir),
+                    f"Mojang runtime {runtime_name}",
+                )
+
+        java_home = _optional_str(os.environ.get("JAVA_HOME"))
+        if java_home:
+            add_candidate(Path(java_home) / "bin" / _java_executable_name(), "JAVA_HOME")
+
+        for executable_name in ("java.exe", "javaw.exe", "java"):
+            add_candidate(shutil.which(executable_name), "PATH")
+
+        try:
+            system_roots = minecraft_launcher_lib.java_utils.find_system_java_versions()
+        except Exception:
+            system_roots = []
+        for root in system_roots:
+            add_candidate(Path(root) / "bin" / _java_executable_name(), Path(root).name)
+
+        return candidates
+
     def is_experiment_type(self, version_type: str) -> bool:
         normalized = version_type.lower().replace("-", "_")
         return normalized not in KNOWN_VERSION_TYPES or normalized in EXPERIMENT_TYPES
 
-    def build_launch_options(self, player_name: str, game_directory: Path, memory_mb: int | None = None) -> dict[str, Any]:
+    def build_launch_options(
+        self,
+        player_name: str,
+        game_directory: Path,
+        memory_mb: int | None = None,
+        java_executable: str | None = None,
+    ) -> dict[str, Any]:
         resolved_memory = _coerce_memory_mb(memory_mb)
-        return {
+        options: dict[str, Any] = {
             "username": player_name,
             "uuid": _offline_uuid(player_name),
             "token": "offline-token",
-            "launcherName": APP_NAME,
+            "launcherName": "Minecraft",
             "launcherVersion": "0.1",
             "gameDirectory": str(game_directory),
             "jvmArguments": [f"-Xmx{resolved_memory}M"],
             "enableLoggingConfig": True,
         }
+        if java_executable:
+            options["executablePath"] = java_executable
+            options["defaultExecutablePath"] = java_executable
+        return options
 
     def launch_instance(self, instance: InstanceRecord, player_name: str) -> subprocess.Popen[Any]:
         minecraft_directory = instance.minecraft_dir
+        java_runtime = self.select_java_runtime(instance.installed_version, minecraft_directory)
         command = minecraft_launcher_lib.command.get_minecraft_command(
             instance.installed_version,
             minecraft_directory,
-            self.build_launch_options(player_name, minecraft_directory, instance.memory_mb),
+            self.build_launch_options(
+                player_name,
+                minecraft_directory,
+                instance.memory_mb,
+                java_runtime.executable_path,
+            ),
         )
+        _normalize_minecraft_version_argument(command, instance.vanilla_version)
 
         kwargs: dict[str, Any] = {
             "cwd": str(minecraft_directory),
@@ -1407,6 +1684,61 @@ class LauncherService:
             if not candidate.exists():
                 return candidate
         raise RuntimeError("Could not allocate a unique icon filename.")
+
+    def _default_background_records(self) -> list[BackgroundRecord]:
+        if not self.default_background_root.is_dir():
+            return []
+        records: list[BackgroundRecord] = []
+        for path in sorted(self.default_background_root.iterdir(), key=lambda item: item.name.lower()):
+            if not path.is_file() or path.suffix.lower() not in BACKGROUND_SUFFIXES:
+                continue
+            relative_path = self._project_relative(path)
+            records.append(
+                BackgroundRecord(
+                    background_id=relative_path,
+                    name=_friendly_asset_name(path.stem),
+                    relative_path=relative_path,
+                    absolute_path=str(path.resolve()),
+                    is_default=True,
+                    is_video=path.suffix.lower() in VIDEO_SUFFIXES,
+                )
+            )
+        return records
+
+    def _user_background_records(self) -> list[BackgroundRecord]:
+        if not self.backgrounds_root.is_dir():
+            return []
+        records: list[BackgroundRecord] = []
+        for path in sorted(self.backgrounds_root.iterdir(), key=lambda item: item.name.lower()):
+            if not path.is_file() or path.suffix.lower() not in BACKGROUND_SUFFIXES:
+                continue
+            relative_path = self._user_background_reference(path)
+            records.append(
+                BackgroundRecord(
+                    background_id=relative_path,
+                    name=_friendly_asset_name(path.stem),
+                    relative_path=relative_path,
+                    absolute_path=str(path.resolve()),
+                    is_default=False,
+                    is_video=path.suffix.lower() in VIDEO_SUFFIXES,
+                )
+            )
+        return records
+
+    def _unique_background_path(self, safe_name: str, suffix: str) -> Path:
+        target = self.backgrounds_root / f"{safe_name}{suffix}"
+        if not target.exists():
+            return target
+
+        for index in range(2, 5000):
+            candidate = self.backgrounds_root / f"{safe_name}-{index}{suffix}"
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError("Could not allocate a unique background filename.")
+
+    def _user_background_reference(self, path: Path) -> str:
+        relative = path.resolve().relative_to(self.backgrounds_root.resolve())
+        return f"{USER_BACKGROUND_PREFIX}/{relative.as_posix()}"
 
     def _bootstrap_legacy_storage(self) -> None:
         self._copy_tree_if_target_empty(self.legacy_instances_root, self.instances_root)
@@ -1659,15 +1991,6 @@ def _run_reinstall(
         raise FileNotFoundError("The instance being reinstalled no longer exists.")
 
     vanilla_version = _required_str(request.vanilla_version, "Minecraft version")
-    installed_version = _install_dependency_stack(
-        vanilla_version,
-        request.mod_loader_id,
-        request.mod_loader_version,
-        Path(request.minecraft_dir),
-        callback,
-        event_queue,
-    )
-
     if request.copy_source_instance_id and request.copy_user_data:
         _queue_event(event_queue, "status", text="Restoring instance data")
         _queue_event(event_queue, "log", text=f"Restoring saved data from {existing_instance.name}")
@@ -1677,6 +2000,15 @@ def _run_reinstall(
             request.copy_user_data,
             event_queue,
         )
+
+    installed_version = _install_dependency_stack(
+        vanilla_version,
+        request.mod_loader_id,
+        request.mod_loader_version,
+        Path(request.minecraft_dir),
+        callback,
+        event_queue,
+    )
 
     return InstallResult(
         name=request.name,
@@ -2554,6 +2886,121 @@ def _summarize_install_status(text: str) -> str:
 
 def _queue_event(event_queue: Any, event_type: str, **payload: Any) -> None:
     event_queue.put({"type": event_type, **payload})
+
+
+def _assert_directory_writable(directory: Path, label: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".notg-write-", dir=directory, delete=True):
+            pass
+    except OSError as exc:
+        raise RuntimeError(f"The {label} is not writable: {directory}") from exc
+
+
+def _minimum_java_major_for_minecraft_version(version: str) -> int:
+    normalized = str(version).strip().lower()
+    release_match = re.match(r"^1\.(\d+)", normalized)
+    if release_match:
+        minor = int(release_match.group(1))
+        if minor >= 26:
+            return 25
+        if minor >= 21:
+            return 21
+        if minor >= 18:
+            return 17
+        if minor == 17:
+            return 16
+        return 8
+
+    snapshot_match = re.match(r"^(\d{2})w", normalized)
+    if snapshot_match and int(snapshot_match.group(1)) >= 26:
+        return 25
+    if snapshot_match and int(snapshot_match.group(1)) >= 24:
+        return 21
+    return 8
+
+
+def _java_executable_name() -> str:
+    return "java.exe" if os.name == "nt" else "java"
+
+
+def _java_candidate_from_executable(executable: str | os.PathLike, label: str) -> JavaRuntimeCandidate | None:
+    path = Path(executable)
+    if not path.is_file():
+        return None
+    try:
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
+            startupinfo.wShowWindow = subprocess.SW_HIDE  # type: ignore[attr-defined]
+        completed = subprocess.run(
+            [str(path), "-version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            startupinfo=startupinfo,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    version_text = f"{completed.stdout}\n{completed.stderr}"
+    major = _parse_java_major(version_text)
+    if major <= 0:
+        return None
+    return JavaRuntimeCandidate(str(path.resolve()), major, label)
+
+
+def _parse_java_major(version_text: str) -> int:
+    match = re.search(r'version\s+"([^"]+)"', version_text)
+    if not match:
+        match = re.search(r"\b(?:openjdk|java)\s+version\s+([0-9][^\s]*)", version_text, flags=re.IGNORECASE)
+    if not match:
+        return 0
+
+    version = match.group(1)
+    parts = re.findall(r"\d+", version)
+    if not parts:
+        return 0
+    if parts[0] == "1" and len(parts) > 1:
+        return int(parts[1])
+    return int(parts[0])
+
+
+def _normalize_minecraft_version_argument(command: list[str], vanilla_version: str) -> None:
+    try:
+        version_index = command.index("--version")
+    except ValueError:
+        return
+    value_index = version_index + 1
+    if value_index < len(command):
+        command[value_index] = vanilla_version
+
+
+def _detect_minecraft_activity_from_log(text: str) -> str | None:
+    activity: str | None = None
+    for line in text.splitlines():
+        connect_match = re.search(r"Connecting to\s+(.+?)(?:,\s*\d+|\s*$)", line, flags=re.IGNORECASE)
+        if connect_match:
+            server = connect_match.group(1).strip()
+            if server:
+                activity = f"Playing in {server}"
+                continue
+
+        lowered = line.lower()
+        if (
+            "starting integrated minecraft server" in lowered
+            or "starting integrated server" in lowered
+            or "integrated server" in lowered
+            or "saving and pausing game" in lowered
+        ):
+            activity = "Playing in singleplayer"
+    return activity
+
+
+def _friendly_asset_name(value: str) -> str:
+    cleaned = re.sub(r"[_\-]+", " ", str(value)).strip()
+    return cleaned.title() if cleaned else "Background"
 
 
 def _utc_now() -> str:

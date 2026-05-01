@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, Signal, QVariantAnimation, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, Signal, QVariantAnimation
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
     QCheckBox,
-    QFileDialog,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -19,8 +18,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.launcher import LauncherService
+from core.launcher import LauncherService, VIDEO_SUFFIXES
 from ui.app_icon import application_icon
+from ui.background_selector_dialog import BackgroundSelectorDialog
 from ui.responsive import fitted_window_size, scaled_px
 from ui.theme import apply_theme, theme_palette
 from ui.topbar import ModernButton, blend_colors
@@ -31,10 +31,12 @@ class BackgroundPreview(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._pixmap = QPixmap()
+        self._video_selected = False
         self.setMinimumHeight(260)
 
     def set_image_path(self, image_path: str | None) -> None:
-        self._pixmap = QPixmap(image_path) if image_path else QPixmap()
+        self._video_selected = bool(image_path and Path(image_path).suffix.lower() in VIDEO_SUFFIXES)
+        self._pixmap = QPixmap(image_path) if image_path and not self._video_selected else QPixmap()
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -55,7 +57,7 @@ class BackgroundPreview(QWidget):
 
         if self._pixmap.isNull():
             painter.setPen(palette["text"])
-            painter.drawText(inner, Qt.AlignCenter, "No background image selected")
+            painter.drawText(inner, Qt.AlignCenter, "Video background selected" if self._video_selected else "No background selected")
             return
 
         scaled = self._pixmap.scaled(
@@ -191,7 +193,7 @@ class SettingsDialog(QDialog):
         self.scroll_area.viewport().setAutoFillBackground(False)
         self.scroll_area.viewport().setAttribute(Qt.WA_StyledBackground, False)
 
-        background_title = QLabel("Add Background")
+        background_title = QLabel("Background")
         background_title.setObjectName("editorSectionTitle")
         self.scroll_layout.addWidget(background_title)
 
@@ -199,17 +201,17 @@ class SettingsDialog(QDialog):
         background_actions.setContentsMargins(0, 0, 0, 0)
         background_actions.setSpacing(10)
 
-        self.add_button = ModernButton("Add", role="accent", height=36, icon_size=0, minimum_width=82, horizontal_padding=20, font_point_size=10)
-        self.add_button.clicked.connect(self._add_background)
-        background_actions.addWidget(self.add_button)
-
-        self.reset_button = ModernButton("Revert", role="sidebar", height=36, icon_size=0, minimum_width=86, horizontal_padding=20, font_point_size=10)
-        self.reset_button.clicked.connect(self._reset_background)
-        background_actions.addWidget(self.reset_button)
-
-        self.folder_button = ModernButton("Folder", role="sidebar", height=36, icon_size=0, minimum_width=86, horizontal_padding=20, font_point_size=10)
-        self.folder_button.clicked.connect(self._open_background_folder)
-        background_actions.addWidget(self.folder_button)
+        self.change_background_button = ModernButton(
+            "Change Background",
+            role="accent",
+            height=36,
+            icon_size=0,
+            minimum_width=150,
+            horizontal_padding=22,
+            font_point_size=10,
+        )
+        self.change_background_button.clicked.connect(self._change_background)
+        background_actions.addWidget(self.change_background_button)
         background_actions.addStretch()
         self.scroll_layout.addLayout(background_actions)
 
@@ -288,9 +290,7 @@ class SettingsDialog(QDialog):
         if isinstance(self.scroll_layout, QVBoxLayout):
             self.scroll_layout.setSpacing(scaled_px(self, 18, minimum=12, maximum=20))
 
-        self.add_button.set_metrics(height=scaled_px(self, 36, minimum=32, maximum=38), icon_size=0)
-        self.reset_button.set_metrics(height=scaled_px(self, 36, minimum=32, maximum=38), icon_size=0)
-        self.folder_button.set_metrics(height=scaled_px(self, 36, minimum=32, maximum=38), icon_size=0)
+        self.change_background_button.set_metrics(height=scaled_px(self, 36, minimum=32, maximum=38), icon_size=0)
         self.ok_button.set_metrics(height=scaled_px(self, 38, minimum=34, maximum=40), icon_size=0)
         self.preview.setMinimumHeight(scaled_px(self, 300, minimum=220, maximum=340))
 
@@ -299,31 +299,17 @@ class SettingsDialog(QDialog):
         self.preview.set_image_path(background_path)
         self.caption.setText(Path(background_path).name if background_path else "Default background")
 
-    def _add_background(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose Background",
-            str(Path.home()),
-            "Images (*.png *.jpg *.jpeg *.bmp *.webp)",
-        )
-        if not file_path:
+    def _change_background(self) -> None:
+        dialog = BackgroundSelectorDialog(self.service, self.service.get_active_background_reference(), self)
+        if dialog.exec() != QDialog.Accepted:
             return
         try:
-            resolved = self.service.set_custom_background(file_path)
+            resolved = self.service.set_active_background(dialog.selected_background_path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Background", str(exc))
             return
         self._refresh_preview()
         self.background_changed.emit(resolved)
-
-    def _reset_background(self) -> None:
-        self.service.reset_background()
-        self._refresh_preview()
-        self.background_changed.emit(self.service.get_active_background_path() or "")
-
-    def _open_background_folder(self) -> None:
-        self.service.backgrounds_root.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.service.backgrounds_root)))
 
     def _set_close_on_launch(self, checked: bool) -> None:
         try:

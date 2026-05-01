@@ -7,8 +7,17 @@ from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
-from core.launcher import InstanceRecord, LauncherService
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    from PySide6.QtMultimediaWidgets import QVideoWidget
+except ImportError:  # pragma: no cover - depends on the local Qt build
+    QAudioOutput = None
+    QMediaPlayer = None
+    QVideoWidget = None
+
+from core.launcher import InstanceRecord, JavaCompatibilityError, LauncherService, VIDEO_SUFFIXES
 from ui.instance_card import InstanceCard
+from ui.message_utils import show_java_error
 from ui.responsive import fitted_window_size, scaled_px
 from ui.sidebar import SideBar
 from ui.app_icon import application_icon
@@ -77,8 +86,12 @@ class MainWindow(QWidget):
         self._instance_popup_target_id: str | None = None
         self._background_pixmap = QPixmap()
         self._background_path: str | None = None
+        self._background_is_video = False
         self._background_cache = QPixmap()
         self._background_cache_size = QSize()
+        self._background_video_widget = None
+        self._background_video_player = None
+        self._background_audio_output = None
         self._screen_connected = False
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._runtime_session_snapshot: tuple[tuple[str, str, int | None, int | None, bool], ...] = ()
@@ -110,6 +123,7 @@ class MainWindow(QWidget):
     def resizeEvent(self, event) -> None:
         self._apply_responsive_layout()
         self._invalidate_background_cache()
+        self._sync_background_video_geometry()
         super().resizeEvent(event)
 
     def paintEvent(self, event) -> None:
@@ -377,7 +391,16 @@ class MainWindow(QWidget):
         if dialog.exec() != QDialog.Accepted or dialog.selection is None:
             return
 
-        request = self.service.prepare_install_request(**dialog.selection)
+        try:
+            request = self.service.prepare_install_request(**dialog.selection)
+            self.service.validate_install_request(request)
+        except JavaCompatibilityError as exc:
+            show_java_error(self, "Java Required", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Install Instance", str(exc))
+            return
+
         progress_dialog = InstallProgressDialog(self.service, request, self)
         progress_dialog.installation_succeeded.connect(self._handle_install_success)
         progress_dialog.installation_failed.connect(self._handle_install_failure)
@@ -453,6 +476,15 @@ class MainWindow(QWidget):
         if self._instance_is_active(instance.instance_id) or instance.instance_id in self._launch_threads:
             return
 
+        try:
+            self.service.select_java_runtime(instance.installed_version, instance.minecraft_dir)
+        except JavaCompatibilityError as exc:
+            show_java_error(self, "Java Required", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Launch Failed", str(exc))
+            return
+
         self._set_instance_status(instance.instance_id, "Launching")
         worker = LaunchWorker(self.service, instance, self.service.get_player_name())
         worker.launched.connect(self._handle_launch_success)
@@ -476,6 +508,10 @@ class MainWindow(QWidget):
 
         try:
             request = self.service.prepare_duplicate_request(instance)
+            self.service.validate_install_request(request)
+        except JavaCompatibilityError as exc:
+            show_java_error(self, "Java Required", str(exc))
+            return
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Copy Instance", str(exc))
             return
@@ -525,6 +561,9 @@ class MainWindow(QWidget):
 
     def _handle_launch_failure(self, instance_id: str, message: str) -> None:
         self._set_instance_status(instance_id, "Crashed")
+        if "Java" in message and "required" in message:
+            show_java_error(self, "Java Required", message)
+            return
         QMessageBox.critical(self, "Launch Failed", message)
 
     def _replace_instance(self, updated: InstanceRecord) -> None:
@@ -587,9 +626,62 @@ class MainWindow(QWidget):
 
     def _refresh_background(self) -> None:
         self._background_path = self.service.get_active_background_path()
-        self._background_pixmap = QPixmap(self._background_path) if self._background_path else QPixmap()
+        self._background_is_video = bool(self._background_path and self._background_path.lower().endswith(tuple(VIDEO_SUFFIXES)))
+        if self._background_is_video and self._background_path:
+            self._background_pixmap = QPixmap()
+            self._set_video_background(self._background_path)
+        else:
+            self._clear_video_background()
+            self._background_pixmap = QPixmap(self._background_path) if self._background_path else QPixmap()
         self._invalidate_background_cache()
         self.update()
+
+    def _set_video_background(self, video_path: str) -> None:
+        if QMediaPlayer is None or QVideoWidget is None:
+            return
+        if self._background_video_widget is None:
+            self._background_video_widget = QVideoWidget(self)
+            self._background_video_widget.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._background_video_widget.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
+        if self._background_video_player is None:
+            self._background_video_player = QMediaPlayer(self)
+            if QAudioOutput is not None:
+                self._background_audio_output = QAudioOutput(self)
+                self._background_audio_output.setMuted(True)
+                self._background_audio_output.setVolume(0)
+                self._background_video_player.setAudioOutput(self._background_audio_output)
+            self._background_video_player.setVideoOutput(self._background_video_widget)
+            self._background_video_player.mediaStatusChanged.connect(self._handle_background_media_status)
+            try:
+                self._background_video_player.setLoops(QMediaPlayer.Loops.Infinite)
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._sync_background_video_geometry()
+        self._background_video_widget.show()
+        self._background_video_widget.lower()
+        self._background_video_player.setSource(QUrl.fromLocalFile(video_path))
+        self._background_video_player.play()
+
+    def _clear_video_background(self) -> None:
+        if self._background_video_player is not None:
+            self._background_video_player.stop()
+            self._background_video_player.setSource(QUrl())
+        if self._background_video_widget is not None:
+            self._background_video_widget.hide()
+
+    def _sync_background_video_geometry(self) -> None:
+        if self._background_video_widget is None:
+            return
+        self._background_video_widget.setGeometry(self.rect())
+        self._background_video_widget.lower()
+
+    def _handle_background_media_status(self, status) -> None:
+        if QMediaPlayer is None or self._background_video_player is None:
+            return
+        if status == QMediaPlayer.MediaStatus.EndOfMedia and self._background_is_video:
+            self._background_video_player.setPosition(0)
+            self._background_video_player.play()
 
     def _open_edit_dialog(self, instance: InstanceRecord, *, page: str = "Minecraft Log") -> None:
         from ui.edit_instance_dialog import EditInstanceDialog

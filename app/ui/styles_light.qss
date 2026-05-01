@@ -99,10 +99,18 @@ QFrame#iconPresentationSurface {
     border-radius: 14px;
 }
 
+QScrollArea#iconPresentationScroll,
+QScrollArea#iconPresentationScroll > QWidget > QWidget,
+QWidget#iconGridHolder {
+    background: transparent;
+    border: none;
+}
+
 QDialog#instanceEditor,
 QDialog#editInstanceDialog,
 QDialog#installProgressDialog,
 QDialog#iconSelectorDialog,
+QDialog#backgroundSelectorDialog,
 QDialog#accountsDialog,
 QDialog#settingsDialog {
     background-color: qradialgradient(

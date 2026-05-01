@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QDesktopServices
 
-from core.launcher import InstanceRecord, LauncherService
+from core.launcher import InstanceRecord, JavaCompatibilityError, LauncherService
 from ui.add_instance_dialog import (
     AccentLineEdit,
     CatalogTableModel,
@@ -49,6 +49,7 @@ from ui.add_instance_dialog import (
 from ui.icon_selector_dialog import IconSelectorDialog
 from ui.icon_utils import load_scaled_icon
 from ui.install_progress_dialog import InstallProgressDialog
+from ui.message_utils import show_java_error
 from ui.responsive import fitted_window_size, scaled_px
 from ui.topbar import ModernButton
 
@@ -161,11 +162,6 @@ class EditInstanceDialog(QDialog):
         "Rich Presence",
         "Advanced",
     ]
-    PAGE_LABELS = {
-        "Minecraft Log": "Minecraft\nLog",
-        "Rich Presence": "Rich\nPresence",
-    }
-
     def __init__(
         self,
         service: LauncherService,
@@ -303,8 +299,9 @@ class EditInstanceDialog(QDialog):
         self.nav_list.setTextElideMode(Qt.ElideNone)
         self.nav_list.currentRowChanged.connect(self._update_page_state)
         for title in self.PAGE_NAMES:
-            item = QListWidgetItem(self.PAGE_LABELS.get(title, title))
+            item = QListWidgetItem(title)
             item.setTextAlignment(Qt.AlignCenter)
+            item.setSizeHint(QSize(0, 58))
             self.nav_list.addItem(item)
         nav_layout.addWidget(self.nav_list, 1)
         shell_layout.addWidget(self.nav_frame)
@@ -634,12 +631,22 @@ class EditInstanceDialog(QDialog):
         details_label.setObjectName("editorFilterTitle")
         content_layout.addWidget(details_label)
 
+        details_row = QHBoxLayout()
+        details_row.setContentsMargins(0, 0, 0, 0)
+        details_row.setSpacing(12)
+
         self.rich_presence_details_input = AccentLineEdit("")
         self.rich_presence_details_input.setMinimumHeight(46)
         self.rich_presence_details_input.editingFinished.connect(self._save_presence_settings)
-        content_layout.addWidget(self.rich_presence_details_input)
+        details_row.addWidget(self.rich_presence_details_input, 1)
 
-        details_hint = QLabel("Leave this empty to show the instance version and loader automatically.")
+        self.rich_presence_adaptive_details_checkbox = QCheckBox("Adaptive Details")
+        self.rich_presence_adaptive_details_checkbox.setObjectName("editorFilterCheck")
+        self.rich_presence_adaptive_details_checkbox.toggled.connect(self._save_presence_settings)
+        details_row.addWidget(self.rich_presence_adaptive_details_checkbox, 0, Qt.AlignVCenter)
+        content_layout.addLayout(details_row)
+
+        details_hint = QLabel("Leave this empty to update details from the current game activity.")
         details_hint.setObjectName("editorStatusText")
         details_hint.setWordWrap(True)
         content_layout.addWidget(details_hint)
@@ -984,7 +991,7 @@ class EditInstanceDialog(QDialog):
         compact_layout = self.width() < 1220
         self.icon_button.set_side_length(scaled_px(self, 82, minimum=66, maximum=88))
         self.name_edit.setMinimumHeight(scaled_px(self, 48, minimum=42, maximum=50))
-        self.nav_frame.setFixedWidth(scaled_px(self, 162 if compact_layout else 172, minimum=152, maximum=178))
+        self.nav_frame.setFixedWidth(scaled_px(self, 204 if compact_layout else 214, minimum=194, maximum=224))
         self.version_side_panel.setFixedWidth(scaled_px(self, 144 if compact_layout else 156, minimum=132, maximum=160))
         self.loader_side_panel.setFixedWidth(scaled_px(self, 156 if compact_layout else 170, minimum=144, maximum=176))
         for row in range(self.nav_list.count()):
@@ -1072,7 +1079,7 @@ class EditInstanceDialog(QDialog):
 
     def _resolved_rich_presence_details(self) -> str:
         text = self.rich_presence_details_input.text().strip()
-        return text or self.service.build_instance_rich_presence_details(self.instance)
+        return text or self.service.resolve_instance_rich_presence_details(self.instance)
 
     def _apply_rich_presence_fields(self) -> None:
         if not hasattr(self, "rich_presence_enabled_checkbox"):
@@ -1091,17 +1098,23 @@ class EditInstanceDialog(QDialog):
         self.rich_presence_details_input.setText(self.instance.rich_presence_details or "")
         self.rich_presence_details_input.blockSignals(False)
 
+        self.rich_presence_adaptive_details_checkbox.blockSignals(True)
+        self.rich_presence_adaptive_details_checkbox.setChecked(self.instance.rich_presence_adaptive_details)
+        self.rich_presence_adaptive_details_checkbox.blockSignals(False)
+
         self._sync_rich_presence_inputs()
 
     def _sync_rich_presence_inputs(self) -> None:
         enabled = bool(self.rich_presence_enabled_checkbox.isChecked())
         self.rich_presence_state_input.setEnabled(enabled)
         self.rich_presence_details_input.setEnabled(enabled)
+        self.rich_presence_adaptive_details_checkbox.setEnabled(enabled)
 
     def _save_presence_settings(self) -> None:
         enabled = bool(self.rich_presence_enabled_checkbox.isChecked())
         state = self.rich_presence_state_input.text().strip() or None
         details = self.rich_presence_details_input.text().strip() or None
+        adaptive_details = bool(self.rich_presence_adaptive_details_checkbox.isChecked())
         self._sync_rich_presence_inputs()
         try:
             updated = self.service.set_instance_rich_presence(
@@ -1109,6 +1122,7 @@ class EditInstanceDialog(QDialog):
                 enabled=enabled,
                 state=state,
                 details=details,
+                adaptive_details=adaptive_details,
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Rich Presence", str(exc))
@@ -1621,12 +1635,21 @@ class EditInstanceDialog(QDialog):
         if answer != QMessageBox.Yes:
             return
 
-        request = self.service.prepare_reinstall_request(
-            self.instance,
-            vanilla_version=selected_version,
-            mod_loader_id=self._current_loader_id,
-            mod_loader_version=loader_version,
-        )
+        try:
+            request = self.service.prepare_reinstall_request(
+                self.instance,
+                vanilla_version=selected_version,
+                mod_loader_id=self._current_loader_id,
+                mod_loader_version=loader_version,
+            )
+            self.service.validate_install_request(request)
+        except JavaCompatibilityError as exc:
+            show_java_error(self, "Java Required", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Reinstall Version", str(exc))
+            return
+
         progress_dialog = InstallProgressDialog(self.service, request, self)
         progress_dialog.installation_succeeded.connect(self._handle_install_success)
         progress_dialog.installation_failed.connect(lambda *_: None)
@@ -1968,11 +1991,20 @@ class EditInstanceDialog(QDialog):
         if answer != QMessageBox.Yes:
             return
 
-        request = self.service.prepare_copy_userdata_request(
-            self.instance,
-            source_instance_id=source_instance_id,
-            copy_user_data=selected_entries,
-        )
+        try:
+            request = self.service.prepare_copy_userdata_request(
+                self.instance,
+                source_instance_id=source_instance_id,
+                copy_user_data=selected_entries,
+            )
+            self.service.validate_install_request(request)
+        except JavaCompatibilityError as exc:
+            show_java_error(self, "Java Required", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Advanced Copy", str(exc))
+            return
+
         progress_dialog = InstallProgressDialog(self.service, request, self)
         progress_dialog.installation_succeeded.connect(self._handle_install_success)
         progress_dialog.installation_failed.connect(lambda *_: None)

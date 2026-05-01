@@ -30,7 +30,7 @@ def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
         if presence.connect():
             presence.update(
                 state=service.build_instance_rich_presence_state(instance),
-                details=instance.rich_presence_details or service.build_instance_rich_presence_details(instance),
+                details=service.resolve_instance_rich_presence_details(instance),
                 started_at=started_at,
                 large_text="NOTG Launcher",
                 small_text=instance.name or player_name,
@@ -39,7 +39,23 @@ def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
     return_code: int | None = None
     try:
         process = psutil.Process(pid)
-        return_code = process.wait()
+        while True:
+            try:
+                return_code = process.wait(timeout=8)
+                break
+            except psutil.TimeoutExpired:
+                if presence is None:
+                    continue
+                refreshed = service.get_instance(instance_id)
+                if refreshed is None:
+                    continue
+                presence.update(
+                    state=service.build_instance_rich_presence_state(refreshed),
+                    details=service.resolve_instance_rich_presence_details(refreshed),
+                    started_at=started_at,
+                    large_text="NOTG Launcher",
+                    small_text=refreshed.name or player_name,
+                )
     except (psutil.Error, ValueError):
         return_code = None
 
