@@ -501,6 +501,8 @@ class MainWindow(QWidget):
 
         instance = self._selected_item.data(Qt.UserRole)
         self.service.terminate_runtime_session(instance.instance_id)
+        self._set_instance_status(instance.instance_id, "Quit")
+        self._sync_runtime_sessions(force_refresh=True)
 
     def _copy_selected_instance(self) -> None:
         if self._selected_item is None:

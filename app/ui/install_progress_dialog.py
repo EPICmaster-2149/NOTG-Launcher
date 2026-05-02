@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import multiprocessing
-import time
 from queue import Empty
 from typing import Any
 
@@ -41,7 +40,6 @@ class InstallProgressDialog(QDialog):
         self._completed = False
         self._aborting = False
         self._last_status = ""
-        self._started_at = time.monotonic()
         self._display_percent = 0
 
         self.setObjectName("installProgressDialog")
@@ -80,7 +78,7 @@ class InstallProgressDialog(QDialog):
         text_column.addWidget(self.status_label)
         header_layout.addLayout(text_column, 1)
 
-        self.progress_summary_label = QLabel("0% | approx. calculating")
+        self.progress_summary_label = QLabel("approx. 3 min")
         self.progress_summary_label.setObjectName("installProgressSummary")
         self.progress_summary_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.progress_summary_label.setMinimumWidth(180)
@@ -245,16 +243,8 @@ class InstallProgressDialog(QDialog):
         else:
             self._display_percent = max(0, min(100, int(force_percent)))
 
-        if self._display_percent <= 0:
-            remaining_text = "calculating"
-        elif self._display_percent >= 100:
-            remaining_text = "0 min"
-        else:
-            elapsed = max(0.1, time.monotonic() - self._started_at)
-            remaining_seconds = elapsed * ((100 - self._display_percent) / self._display_percent)
-            remaining_text = f"{max(1, math.ceil(remaining_seconds / 60))} min"
-
-        self.progress_summary_label.setText(f"{self._display_percent}% | approx. {remaining_text}")
+        remaining_seconds = round(180 * max(0, 100 - self._display_percent) / 100)
+        self.progress_summary_label.setText(f"approx. {_format_duration(remaining_seconds)}")
 
     def _terminate_process(self) -> None:
         if self._process is None:
@@ -294,6 +284,16 @@ def _operation_window_title(operation: str) -> str:
         "duplicate_instance": "Copying Instance",
         "copy_userdata": "Copying Instance Data",
     }.get(operation, "Running Instance Task")
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(math.ceil(seconds)))
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    if minutes <= 0:
+        return f"{remaining_seconds} sec"
+    if remaining_seconds == 0:
+        return f"{minutes} min"
+    return f"{minutes} min {remaining_seconds} sec"
 
 
 def _operation_title_prefix(operation: str) -> str:

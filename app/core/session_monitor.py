@@ -41,7 +41,7 @@ def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
         process = psutil.Process(pid)
         while True:
             try:
-                return_code = process.wait(timeout=8)
+                return_code = process.wait(timeout=2)
                 break
             except psutil.TimeoutExpired:
                 if presence is None:

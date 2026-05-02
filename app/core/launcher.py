@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -1461,10 +1462,14 @@ class LauncherService:
             "username": player_name,
             "uuid": _offline_uuid(player_name),
             "token": "offline-token",
-            "launcherName": APP_NAME,
-            "launcherVersion": APP_VERSION,
+            "launcherName": "vanilla",
+            "launcherVersion": "vanilla",
             "gameDirectory": str(game_directory),
-            "jvmArguments": [f"-Xmx{resolved_memory}M"],
+            "jvmArguments": [
+                f"-Xmx{resolved_memory}M",
+                "-Dminecraft.launcher.brand=vanilla",
+                "-Dminecraft.launcher.version=vanilla",
+            ],
             "enableLoggingConfig": True,
         }
         if java_executable:
@@ -1666,11 +1671,23 @@ class LauncherService:
         return _optional_str(session.get("started_at")) if session else None
 
     def terminate_runtime_session(self, instance_id: str) -> bool:
-        pid = self.runtime_session_pid(instance_id)
-        if pid is None:
+        session = self.get_runtime_session(instance_id)
+        if session is None:
             return False
+        pid = self.runtime_session_pid(instance_id)
         self.mark_runtime_session_stop_requested(instance_id)
-        self.terminate_process_tree(pid)
+        if pid is not None:
+            self.terminate_process_tree(pid)
+        self.update_runtime_session(
+            instance_id,
+            pid=None,
+            monitor_pid=None,
+            status="stopped",
+            outcome="stopped",
+            ended_at=_utc_now(),
+            attention_needed=False,
+            attention_page=None,
+        )
         return True
 
     def open_instance_dir(self, instance: InstanceRecord) -> Path:
@@ -1726,7 +1743,7 @@ class LauncherService:
         if not self.default_background_root.is_dir():
             return []
         records: list[BackgroundRecord] = []
-        for path in sorted(self.default_background_root.iterdir(), key=lambda item: item.name.lower()):
+        for path in sorted(self.default_background_root.iterdir(), key=_default_background_sort_key):
             if not path.is_file() or path.suffix.lower() not in BACKGROUND_SUFFIXES:
                 continue
             relative_path = self._project_relative(path)
@@ -1802,8 +1819,10 @@ class LauncherService:
             return payload
         if not isinstance(loaded, dict):
             return payload
-        if _optional_str(loaded.get("mode")) == "custom" and _optional_str(loaded.get("file_name")):
-            payload = {"mode": "custom", "file_name": str(loaded["file_name"])}
+        mode = _optional_str(loaded.get("mode"))
+        file_name = _optional_str(loaded.get("file_name"))
+        if mode in {"custom", "default"} and file_name:
+            payload = {"mode": mode, "file_name": file_name}
         payload["close_ui_on_launch"] = bool(loaded.get("close_ui_on_launch", True))
         payload["theme"] = "light" if str(loaded.get("theme", "dark")).strip().lower() == "light" else "dark"
         return payload
@@ -1918,13 +1937,16 @@ def run_install_task(task: dict[str, Any], event_queue: Any) -> None:
         stage_dir.mkdir(parents=True, exist_ok=True)
         minecraft_dir.mkdir(parents=True, exist_ok=True)
 
+        progress = _InstallProgressReporter(event_queue)
+        progress.begin_phase(0.03)
         _queue_event(event_queue, "status", text="Preparing instance directory")
         _queue_event(event_queue, "log", text=f"Staging install in {stage_dir.name}")
 
         callback = {
-            "setStatus": lambda text: _install_status(event_queue, text),
-            "setProgress": lambda value: _queue_event(event_queue, "progress", value=int(value)),
-            "setMax": lambda maximum: _queue_event(event_queue, "max", value=max(1, int(maximum))),
+            "setStatus": lambda text: _install_status(event_queue, text, progress),
+            "setProgress": lambda value: progress.set_phase_progress(value),
+            "setMax": lambda maximum: progress.set_phase_max(maximum),
+            "_progress": progress,
         }
 
         if request.operation == "create":
@@ -1942,6 +1964,7 @@ def run_install_task(task: dict[str, Any], event_queue: Any) -> None:
         else:
             raise ValueError(f"Unsupported install operation: {request.operation}")
 
+        progress.complete()
         _queue_event(event_queue, "complete", result=result.to_payload())
     except BaseException as exc:  # noqa: BLE001
         _queue_event(
@@ -1950,6 +1973,102 @@ def run_install_task(task: dict[str, Any], event_queue: Any) -> None:
             message=str(exc),
             traceback=traceback.format_exc(),
         )
+
+
+class _InstallProgressReporter:
+    def __init__(self, event_queue: Any):
+        self.event_queue = event_queue
+        self.completed_weight = 0.0
+        self.phase_weight = 0.0
+        self.phase_max = 1
+        self.phase_value = 0
+        self.segment_start = 0.0
+        self.segment_weight = 1.0
+        self.install_profile = "vanilla"
+        self.loader_installer_seen = False
+        self.last_percent = 0
+        _queue_event(self.event_queue, "max", value=100)
+        _queue_event(self.event_queue, "progress", value=0)
+
+    def begin_phase(self, weight: float) -> None:
+        self.completed_weight = min(0.97, self.completed_weight + self.phase_weight)
+        self.phase_weight = max(0.0, min(1.0, float(weight)))
+        self.phase_max = 1
+        self.phase_value = 0
+        self.segment_start = 0.0
+        self.segment_weight = 1.0
+        self._emit()
+
+    def set_install_profile(self, profile: str) -> None:
+        self.install_profile = "mod_loader" if profile == "mod_loader" else "vanilla"
+        self.loader_installer_seen = False
+
+    def note_status(self, text: str) -> None:
+        segment = self._install_progress_segment(text)
+        if segment is None:
+            return
+        self.segment_start, self.segment_weight = segment
+        self.phase_max = 1
+        self.phase_value = 0
+        self._emit()
+
+    def set_phase_max(self, maximum: Any) -> None:
+        try:
+            self.phase_max = max(1, int(maximum))
+        except (TypeError, ValueError):
+            self.phase_max = 1
+        self.phase_value = min(self.phase_value, self.phase_max)
+        self._emit()
+
+    def set_phase_progress(self, value: Any) -> None:
+        try:
+            self.phase_value = max(0, int(value))
+        except (TypeError, ValueError):
+            self.phase_value = 0
+        self.phase_value = min(self.phase_value, self.phase_max)
+        self._emit()
+
+    def complete(self) -> None:
+        self.completed_weight = 1.0
+        self.phase_weight = 0.0
+        self.phase_value = 0
+        self.phase_max = 1
+        self.segment_start = 0.0
+        self.segment_weight = 1.0
+        self._emit(force=100)
+
+    def _emit(self, *, force: int | None = None) -> None:
+        if force is None:
+            fraction = 0.0 if self.phase_max <= 0 else self.phase_value / self.phase_max
+            phase_fraction = self.segment_start + self.segment_weight * fraction
+            percent = int(math.floor((self.completed_weight + self.phase_weight * phase_fraction) * 100))
+            percent = min(99, max(self.last_percent, percent))
+        else:
+            percent = max(0, min(100, int(force)))
+        self.last_percent = percent
+        _queue_event(self.event_queue, "progress", value=percent)
+
+    def _install_progress_segment(self, text: str) -> tuple[float, float] | None:
+        normalized = str(text).strip().lower()
+        if self.install_profile != "mod_loader":
+            return _vanilla_install_progress_segment(normalized)
+
+        if normalized == "running installer" or normalized.startswith("running processor"):
+            self.loader_installer_seen = True
+            return (0.56, 0.08)
+
+        if normalized.startswith("download ") and "installer" in normalized:
+            return (0.52, 0.04)
+
+        if normalized == "download libraries":
+            return (0.64, 0.12) if self.loader_installer_seen else (0.04, 0.17)
+        if normalized == "download assets":
+            return (0.76, 0.12) if self.loader_installer_seen else (0.21, 0.24)
+        if normalized == "install java runtime":
+            return (0.88, 0.04) if self.loader_installer_seen else (0.45, 0.06)
+        if normalized == "installation complete":
+            return (0.94, 0.0) if self.loader_installer_seen else (0.52, 0.0)
+        return None
 
 
 def terminate_process_tree(pid: int) -> None:
@@ -1983,12 +2102,15 @@ def _run_standard_install(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
+    progress = _progress_reporter_from_callback(callback)
     if request.copy_source_instance_id and request.copy_user_data:
         service = LauncherService(Path(__file__).resolve().parents[2])
         source_instance = service.get_instance(request.copy_source_instance_id)
         if source_instance is None:
             raise FileNotFoundError("The selected source instance no longer exists.")
 
+        if progress is not None:
+            progress.begin_phase(0.17)
         _queue_event(event_queue, "status", text="Copying selected instance data")
         _queue_event(event_queue, "log", text=f"Copying user data from {source_instance.name}")
         _copy_selected_user_data(
@@ -1996,9 +2118,12 @@ def _run_standard_install(
             Path(request.minecraft_dir),
             request.copy_user_data,
             event_queue,
+            progress,
         )
 
     vanilla_version = _required_str(request.vanilla_version, "Minecraft version")
+    if progress is not None:
+        progress.begin_phase(0.77 if request.copy_user_data else 0.94)
     installed_version = _install_dependency_stack(
         vanilla_version,
         request.mod_loader_id,
@@ -2022,6 +2147,7 @@ def _run_reinstall(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
+    progress = _progress_reporter_from_callback(callback)
     service = LauncherService(Path(__file__).resolve().parents[2])
     existing_instance = service.get_instance(request.instance_id)
     if existing_instance is None:
@@ -2029,6 +2155,8 @@ def _run_reinstall(
 
     vanilla_version = _required_str(request.vanilla_version, "Minecraft version")
     if request.copy_source_instance_id and request.copy_user_data:
+        if progress is not None:
+            progress.begin_phase(0.20)
         _queue_event(event_queue, "status", text="Restoring instance data")
         _queue_event(event_queue, "log", text=f"Restoring saved data from {existing_instance.name}")
         _copy_selected_user_data(
@@ -2036,8 +2164,11 @@ def _run_reinstall(
             Path(request.minecraft_dir),
             request.copy_user_data,
             event_queue,
+            progress,
         )
 
+    if progress is not None:
+        progress.begin_phase(0.74 if request.copy_user_data else 0.94)
     installed_version = _install_dependency_stack(
         vanilla_version,
         request.mod_loader_id,
@@ -2062,7 +2193,7 @@ def _run_copy_userdata(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
-    del callback
+    progress = _progress_reporter_from_callback(callback)
     service = LauncherService(Path(__file__).resolve().parents[2])
     source_instance = service.get_instance(_required_str(request.copy_source_instance_id, "Copy source instance"))
     target_instance = service.get_instance(request.instance_id)
@@ -2076,9 +2207,13 @@ def _run_copy_userdata(
 
     _queue_event(event_queue, "status", text="Staging current instance")
     _queue_event(event_queue, "log", text=f"Creating a staged copy of {target_instance.name}")
-    _copy_tree_with_progress(target_instance.root_dir, stage_dir, event_queue, "Staging current instance")
+    if progress is not None:
+        progress.begin_phase(0.46)
+    _copy_tree_with_progress(target_instance.root_dir, stage_dir, event_queue, "Staging current instance", progress)
 
     if request.copy_user_data:
+        if progress is not None:
+            progress.begin_phase(0.48)
         _queue_event(event_queue, "status", text="Replacing selected files")
         _queue_event(event_queue, "log", text=f"Replacing data from {source_instance.name}")
         _remove_selected_user_data(minecraft_dir, request.copy_user_data)
@@ -2087,6 +2222,7 @@ def _run_copy_userdata(
             minecraft_dir,
             request.copy_user_data,
             event_queue,
+            progress,
         )
 
     return InstallResult(
@@ -2104,7 +2240,7 @@ def _run_duplicate_instance(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
-    del callback
+    progress = _progress_reporter_from_callback(callback)
     service = LauncherService(Path(__file__).resolve().parents[2])
     source_instance = service.get_instance(_required_str(request.copy_source_instance_id, "Source instance"))
     if source_instance is None:
@@ -2113,7 +2249,9 @@ def _run_duplicate_instance(
     stage_dir = Path(request.stage_dir)
     _queue_event(event_queue, "status", text="Copying instance files")
     _queue_event(event_queue, "log", text=f"Copying all files from {source_instance.name}")
-    _copy_tree_with_progress(source_instance.root_dir, stage_dir, event_queue, "Copying instance files")
+    if progress is not None:
+        progress.begin_phase(0.94)
+    _copy_tree_with_progress(source_instance.root_dir, stage_dir, event_queue, "Copying instance files", progress)
 
     return InstallResult(
         name=request.name,
@@ -2152,6 +2290,7 @@ def _run_minecraft_directory_import(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
+    progress = _progress_reporter_from_callback(callback)
     raw_source_dir = Path(_required_str(request.minecraft_import_dir, ".minecraft folder"))
     service = LauncherService(Path(__file__).resolve().parents[2])
     source_dir = service.resolve_minecraft_import_source(raw_source_dir)
@@ -2164,7 +2303,9 @@ def _run_minecraft_directory_import(
     minecraft_dir = Path(request.minecraft_dir)
     _queue_event(event_queue, "status", text="Copying imported files")
     _queue_event(event_queue, "log", text=f"Copying {source_dir} into the new instance")
-    _copy_tree_with_progress(source_dir, minecraft_dir, event_queue, "Copying imported files")
+    if progress is not None:
+        progress.begin_phase(0.45)
+    _copy_tree_with_progress(source_dir, minecraft_dir, event_queue, "Copying imported files", progress)
 
     metadata = _infer_minecraft_metadata(minecraft_dir)
     if metadata is None:
@@ -2174,6 +2315,8 @@ def _run_minecraft_directory_import(
         )
 
     vanilla_version, installed_version, mod_loader_id, mod_loader_version = metadata
+    if progress is not None:
+        progress.begin_phase(0.49)
     installed_version = _ensure_dependency_stack(
         minecraft_dir,
         vanilla_version,
@@ -2211,6 +2354,7 @@ def _install_dependency_stack(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> str:
+    progress = _progress_reporter_from_callback(callback)
     if mod_loader_id:
         loader = minecraft_launcher_lib.mod_loader.get_mod_loader(mod_loader_id)
         loader_name = loader.get_name()
@@ -2220,12 +2364,18 @@ def _install_dependency_stack(
             "log",
             text=f"Installing {loader_name} for Minecraft {vanilla_version}",
         )
-        return loader.install(
-            vanilla_version,
-            minecraft_dir,
-            loader_version=mod_loader_version,
-            callback=callback,
-        )
+        if progress is not None:
+            progress.set_install_profile("mod_loader")
+        try:
+            return loader.install(
+                vanilla_version,
+                minecraft_dir,
+                loader_version=mod_loader_version,
+                callback=callback,
+            )
+        finally:
+            if progress is not None:
+                progress.set_install_profile("vanilla")
 
     _queue_event(event_queue, "status", text="Installing Minecraft")
     _queue_event(
@@ -2275,6 +2425,7 @@ def _import_mrpack_archive(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
+    progress = _progress_reporter_from_callback(callback)
     with zipfile.ZipFile(archive, "r") as zf:
         prefix, stripped_files = _archive_file_index(zf)
         manifest_name = prefix + "modrinth.index.json"
@@ -2289,6 +2440,8 @@ def _import_mrpack_archive(
 
     _queue_event(event_queue, "status", text="Importing modpack")
     _queue_event(event_queue, "log", text=f"Installing Modrinth pack {archive.name}")
+    if progress is not None:
+        progress.begin_phase(0.94)
     minecraft_launcher_lib.mrpack.install_mrpack(
         archive,
         Path(request.minecraft_dir),
@@ -2316,6 +2469,7 @@ def _import_prism_archive(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
+    progress = _progress_reporter_from_callback(callback)
     minecraft_dir = Path(request.minecraft_dir)
     stage_dir = Path(request.stage_dir)
 
@@ -2331,6 +2485,8 @@ def _import_prism_archive(
             )
 
         vanilla_version, mod_loader_id, mod_loader_version = _metadata_from_mmc_manifest(mmc_manifest)
+        if progress is not None:
+            progress.begin_phase(0.55)
         installed_version = _install_dependency_stack(
             vanilla_version,
             mod_loader_id,
@@ -2347,7 +2503,9 @@ def _import_prism_archive(
                 mappings.append((original_name, stripped_name[len(".minecraft/"):]))
         if not mappings:
             raise RuntimeError("This Prism/MultiMC export does not contain a .minecraft folder.")
-        _extract_archive_mappings(zf, mappings, minecraft_dir, event_queue, "Extracting imported files")
+        if progress is not None:
+            progress.begin_phase(0.39)
+        _extract_archive_mappings(zf, mappings, minecraft_dir, event_queue, "Extracting imported files", progress)
 
     config_name = _name_from_instance_cfg(instance_cfg_text)
     resolved_name = request.name.strip() or config_name or archive.stem
@@ -2368,6 +2526,7 @@ def _import_curseforge_archive(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
+    progress = _progress_reporter_from_callback(callback)
     minecraft_dir = Path(request.minecraft_dir)
     stage_dir = Path(request.stage_dir)
 
@@ -2387,6 +2546,8 @@ def _import_curseforge_archive(
         minecraft_block = manifest.get("minecraft") or {}
         vanilla_version = _required_str(minecraft_block.get("version"), "CurseForge Minecraft version")
         mod_loader_id, mod_loader_version = _loader_from_curseforge_manifest(minecraft_block)
+        if progress is not None:
+            progress.begin_phase(0.55)
         installed_version = _install_dependency_stack(
             vanilla_version,
             mod_loader_id,
@@ -2401,7 +2562,9 @@ def _import_curseforge_archive(
             if stripped_name.startswith("overrides/"):
                 mappings.append((original_name, stripped_name[len("overrides/"):]))
         _queue_event(event_queue, "status", text="Extracting imported files")
-        _extract_archive_mappings(zf, mappings, minecraft_dir, event_queue, "Extracting imported files")
+        if progress is not None:
+            progress.begin_phase(0.39)
+        _extract_archive_mappings(zf, mappings, minecraft_dir, event_queue, "Extracting imported files", progress)
 
     resolved_name = request.name.strip() or str(manifest.get("name") or archive.stem)
     return InstallResult(
@@ -2421,6 +2584,7 @@ def _import_generic_archive(
     callback: dict[str, Any],
     event_queue: Any,
 ) -> InstallResult:
+    progress = _progress_reporter_from_callback(callback)
     minecraft_dir = Path(request.minecraft_dir)
     stage_dir = Path(request.stage_dir)
 
@@ -2445,7 +2609,9 @@ def _import_generic_archive(
 
         _queue_event(event_queue, "status", text="Extracting imported files")
         _queue_event(event_queue, "log", text=f"Extracting archive in {root_mode} mode")
-        _extract_archive_mappings(zf, mappings, minecraft_dir, event_queue, "Extracting imported files")
+        if progress is not None:
+            progress.begin_phase(0.45)
+        _extract_archive_mappings(zf, mappings, minecraft_dir, event_queue, "Extracting imported files", progress)
 
     metadata = _infer_minecraft_metadata(minecraft_dir)
     if metadata is None:
@@ -2454,6 +2620,8 @@ def _import_generic_archive(
         )
 
     vanilla_version, installed_version, mod_loader_id, mod_loader_version = metadata
+    if progress is not None:
+        progress.begin_phase(0.49)
     installed_version = _ensure_dependency_stack(
         minecraft_dir,
         vanilla_version,
@@ -2785,11 +2953,17 @@ def _write_staged_icon(content: bytes, stage_dir: Path, file_name: str) -> Path:
     return target
 
 
-def _copy_selected_user_data(source_root: Path, destination_root: Path, selected_entries: list[str], event_queue: Any) -> None:
+def _copy_selected_user_data(
+    source_root: Path,
+    destination_root: Path,
+    selected_entries: list[str],
+    event_queue: Any,
+    progress: "_InstallProgressReporter | None" = None,
+) -> None:
     entries = _sanitize_copy_user_data(selected_entries)
     if not entries:
-        _queue_event(event_queue, "max", value=1)
-        _queue_event(event_queue, "progress", value=1)
+        _set_progress_max(event_queue, progress, 1)
+        _set_progress_value(event_queue, progress, 1)
         return
 
     files_to_copy: list[tuple[Path, Path]] = []
@@ -2812,15 +2986,15 @@ def _copy_selected_user_data(source_root: Path, destination_root: Path, selected
     for directory in empty_dirs:
         directory.mkdir(parents=True, exist_ok=True)
 
-    _queue_event(event_queue, "max", value=max(1, len(files_to_copy)))
+    _set_progress_max(event_queue, progress, max(1, len(files_to_copy)))
     if not files_to_copy:
-        _queue_event(event_queue, "progress", value=1)
+        _set_progress_value(event_queue, progress, 1)
         return
 
     for index, (source_path, target_path) in enumerate(files_to_copy, start=1):
         target_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, target_path)
-        _queue_event(event_queue, "progress", value=index)
+        _set_progress_value(event_queue, progress, index)
 
     _queue_event(event_queue, "status", text="Copying selected instance data")
 
@@ -2836,11 +3010,17 @@ def _remove_selected_user_data(destination_root: Path, selected_entries: list[st
             target_path.unlink(missing_ok=True)
 
 
-def _copy_tree_with_progress(source: Path, destination: Path, event_queue: Any, status_text: str) -> None:
+def _copy_tree_with_progress(
+    source: Path,
+    destination: Path,
+    event_queue: Any,
+    status_text: str,
+    progress: "_InstallProgressReporter | None" = None,
+) -> None:
     files = [path for path in source.rglob("*") if path.is_file()]
-    _queue_event(event_queue, "max", value=max(1, len(files)))
+    _set_progress_max(event_queue, progress, max(1, len(files)))
     if not files:
-        _queue_event(event_queue, "progress", value=1)
+        _set_progress_value(event_queue, progress, 1)
         return
 
     for index, file_path in enumerate(files, start=1):
@@ -2848,7 +3028,7 @@ def _copy_tree_with_progress(source: Path, destination: Path, event_queue: Any, 
         target = destination / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(file_path, target)
-        _queue_event(event_queue, "progress", value=index)
+        _set_progress_value(event_queue, progress, index)
 
     _queue_event(event_queue, "status", text=status_text)
 
@@ -2859,13 +3039,14 @@ def _extract_archive_mappings(
     destination_root: Path,
     event_queue: Any,
     status_text: str,
+    progress: "_InstallProgressReporter | None" = None,
 ) -> None:
     if not mappings:
-        _queue_event(event_queue, "max", value=1)
-        _queue_event(event_queue, "progress", value=1)
+        _set_progress_max(event_queue, progress, 1)
+        _set_progress_value(event_queue, progress, 1)
         return
 
-    _queue_event(event_queue, "max", value=len(mappings))
+    _set_progress_max(event_queue, progress, len(mappings))
     for index, (archive_name, destination_name) in enumerate(mappings, start=1):
         if not destination_name:
             continue
@@ -2874,7 +3055,7 @@ def _extract_archive_mappings(
         with zf.open(archive_name, "r") as source_handle:
             with target_path.open("wb") as target_handle:
                 shutil.copyfileobj(source_handle, target_handle)
-        _queue_event(event_queue, "progress", value=index)
+        _set_progress_value(event_queue, progress, index)
     _queue_event(event_queue, "status", text=status_text)
 
 
@@ -2901,9 +3082,44 @@ def _safe_local_path_join(root: Path, relative_name: str) -> Path:
     return candidate
 
 
-def _install_status(event_queue: Any, text: str) -> None:
+def _progress_reporter_from_callback(callback: dict[str, Any]) -> "_InstallProgressReporter | None":
+    progress = callback.get("_progress")
+    return progress if isinstance(progress, _InstallProgressReporter) else None
+
+
+def _set_progress_max(event_queue: Any, progress: "_InstallProgressReporter | None", maximum: int) -> None:
+    if progress is not None:
+        progress.set_phase_max(maximum)
+    else:
+        _queue_event(event_queue, "max", value=max(1, int(maximum)))
+
+
+def _set_progress_value(event_queue: Any, progress: "_InstallProgressReporter | None", value: int) -> None:
+    if progress is not None:
+        progress.set_phase_progress(value)
+    else:
+        _queue_event(event_queue, "progress", value=int(value))
+
+
+def _install_status(event_queue: Any, text: str, progress: "_InstallProgressReporter | None" = None) -> None:
+    if progress is not None:
+        progress.note_status(text)
     _queue_event(event_queue, "status", text=_summarize_install_status(text))
     _queue_event(event_queue, "log", text=text)
+
+
+def _vanilla_install_progress_segment(normalized: str) -> tuple[float, float] | None:
+    if normalized == "download libraries":
+        return (0.08, 0.27)
+    if normalized == "download assets":
+        return (0.35, 0.38)
+    if normalized == "install java runtime":
+        return (0.73, 0.17)
+    if normalized == "running installer":
+        return (0.90, 0.06)
+    if normalized == "installation complete":
+        return (0.96, 0.0)
+    return None
 
 
 def _summarize_install_status(text: str) -> str:
@@ -3131,6 +3347,11 @@ def _detect_minecraft_activity_from_log(
     activity: str | None = None
     configured_addresses = list(server_addresses or [])
     for line in text.splitlines():
+        lowered = line.lower()
+        if _is_minecraft_disconnect_log_line(lowered):
+            activity = None
+            continue
+
         connect_match = re.search(r"Connecting to\s+(.+?)(?:,\s*(\d+)|\s*$)", line, flags=re.IGNORECASE)
         if connect_match:
             server = connect_match.group(1).strip()
@@ -3145,7 +3366,6 @@ def _detect_minecraft_activity_from_log(
                 activity = _format_server_activity(display_address)
                 continue
 
-        lowered = line.lower()
         if (
             "starting integrated minecraft server" in lowered
             or "starting integrated server" in lowered
@@ -3165,11 +3385,32 @@ def _optional_int(value: Any) -> int | None:
 
 def _format_server_activity(address: str) -> str:
     normalized = address.lower()
-    if "mineberry" in normalized:
+    if "mineberry" in normalized or "bw-lobby" in normalized or "65.20.73.213" in normalized:
         return "Playing in Mineberry"
     if "amplifiedsmp" in normalized:
         return "Playing in Amplified SMP"
     return f"Playing in {address}"
+
+
+def _is_minecraft_disconnect_log_line(lowered_line: str) -> bool:
+    disconnect_markers = (
+        "disconnecting from server",
+        "disconnected from server",
+        "disconnecting packet listener",
+        "lost connection",
+        "connection lost",
+        "timed out",
+        "timeout",
+        "server closed",
+        "connection reset",
+        "connection refused",
+        "end of stream",
+        "internal exception",
+        "aborting connection",
+        "closed connection",
+        "stopping client connection",
+    )
+    return any(marker in lowered_line for marker in disconnect_markers)
 
 
 def _resolve_display_server_address(
@@ -3208,7 +3449,7 @@ def _resolve_display_server_address(
             return configured_address
 
     if resolver is None:
-        return logged_address
+        return _single_configured_address_for_port(configured_addresses, logged_port) or logged_address
 
     for configured_address in configured_addresses:
         configured_host, configured_port = _split_server_address(configured_address)
@@ -3218,7 +3459,16 @@ def _resolve_display_server_address(
         if any(_parse_ip_address(host) == logged_ip for host in resolved_hosts):
             return configured_address
 
-    return logged_address
+    return _single_configured_address_for_port(configured_addresses, logged_port) or logged_address
+
+
+def _single_configured_address_for_port(configured_addresses: list[str], logged_port: int | None) -> str | None:
+    candidates = []
+    for configured_address in configured_addresses:
+        _, configured_port = _split_server_address(configured_address)
+        if _ports_match(logged_port, configured_port):
+            candidates.append(configured_address)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _split_server_address(address: str) -> tuple[str, int | None]:
@@ -3263,6 +3513,10 @@ def _parse_ip_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
 def _friendly_asset_name(value: str) -> str:
     cleaned = re.sub(r"[_\-]+", " ", str(value)).strip()
     return cleaned.title() if cleaned else "Background"
+
+
+def _default_background_sort_key(path: Path) -> tuple[int, str]:
+    return (0 if path.name.lower() == "default.mp4" else 1, path.name.lower())
 
 
 def _utc_now() -> str:

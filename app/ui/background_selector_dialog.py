@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, QTimer, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImageReader, QPainter, QPen, QPixmap, QTextOption
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QFileDialog,
     QFrame,
@@ -222,6 +223,8 @@ class BackgroundTile(QWidget):
 
 
 class BackgroundSelectorDialog(QDialog):
+    active_background_changed = Signal(str)
+
     _GRID_COLUMNS = 4
 
     def __init__(
@@ -421,8 +424,18 @@ class BackgroundSelectorDialog(QDialog):
             self.remove_background_button.flash_invalid()
             return
 
+        self._stop_thumbnail_player()
+        selected_background = self.selected_background_path
+        if self.service.get_active_background_reference() == selected_background:
+            self.service.reset_background()
+            active_background = self.service.get_active_background_path() or ""
+            self.active_background_changed.emit(active_background)
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+
         try:
-            removed = self.service.remove_user_background(self.selected_background_path)
+            removed = self.service.remove_user_background(selected_background)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Background Error", str(exc))
             return

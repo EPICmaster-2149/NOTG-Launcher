@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 APPLICATION_ID = "1496879744858325066"
-LARGE_IMAGE_KEY = "graphicslogo"
-SMALL_IMAGE_KEY = "notg_launcher_logo"
+LARGE_IMAGE_KEY = "notg_launcher_logo"
+SMALL_IMAGE_KEY = "graphicslogo"
 
 _PLACEHOLDER_VALUES = {
     "",

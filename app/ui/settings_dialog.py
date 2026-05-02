@@ -301,6 +301,7 @@ class SettingsDialog(QDialog):
 
     def _change_background(self) -> None:
         dialog = BackgroundSelectorDialog(self.service, self.service.get_active_background_reference(), self)
+        dialog.active_background_changed.connect(self._handle_background_dialog_active_changed)
         if dialog.exec() != QDialog.Accepted:
             return
         try:
@@ -310,6 +311,10 @@ class SettingsDialog(QDialog):
             return
         self._refresh_preview()
         self.background_changed.emit(resolved)
+
+    def _handle_background_dialog_active_changed(self, resolved_path: str) -> None:
+        self._refresh_preview()
+        self.background_changed.emit(resolved_path)
 
     def _set_close_on_launch(self, checked: bool) -> None:
         try:
