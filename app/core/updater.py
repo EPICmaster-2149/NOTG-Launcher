@@ -164,7 +164,6 @@ class UpdateInstaller:
             self.cleanup_cache()
             new_zip = self._download_zip_path
             
-            # Remove old download if exists
             if new_zip.exists():
                 new_zip.unlink()
             
@@ -183,7 +182,6 @@ class UpdateInstaller:
                             percentage = int((downloaded / total_size) * 100)
                             progress_callback(percentage)
             
-            # Final callback
             if progress_callback:
                 progress_callback(100)
             
@@ -198,9 +196,8 @@ class UpdateInstaller:
         if not zip_path.exists():
             return False
         
-        # Basic size check - ZIP should be > 1MB
         size = zip_path.stat().st_size
-        if size < 1000000:  # Less than 1MB
+        if size < 1000000:
             return False
         
         return self._inspect_release_zip(zip_path) is not None
@@ -373,7 +370,6 @@ exit /b 0
                 print(f"Update file not found: {zip_path}")
                 return False
             
-            # Verify ZIP before attempting update
             if not self.verify_download(zip_path):
                 print(f"Invalid or corrupted update file: {zip_path}")
                 return False
@@ -411,6 +407,7 @@ exit /b 0
                 if path.exists():
                     shutil.rmtree(path, ignore_errors=True)
             except Exception:
+                # Leftovers may still be locked by Windows during startup.
                 pass
 
         backup_pattern = f"{self.expected_install_dir_name}.old*"
@@ -421,6 +418,7 @@ exit /b 0
                 elif path.exists():
                     path.unlink(missing_ok=True)
             except Exception:
+                # Backup cleanup is best-effort; update retry files are preserved.
                 pass
     
     def cleanup_cache(self):
@@ -434,7 +432,6 @@ exit /b 0
                 file.unlink()
             for file in self.cache_dir.glob("updater*.log"):
                 file.unlink()
-            # Clean extracted folder
             extracted = self.cache_dir / "extracted"
             if extracted.exists():
                 shutil.rmtree(extracted, ignore_errors=True)

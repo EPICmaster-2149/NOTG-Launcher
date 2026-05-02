@@ -260,11 +260,10 @@ class SettingsDialog(QDialog):
         divider2.setObjectName("editorSectionDivider")
         self.scroll_layout.addWidget(divider2)
 
-        # Add Update section
         self.update_settings = UpdateSettingsPanel(
             parent=self,
-            github_owner="EPICmaster-2149",  # Your GitHub username
-            github_repo="NOTG-Launcher"      # Your repository name
+            github_owner="EPICmaster-2149",
+            github_repo="NOTG-Launcher",
         )
         self.scroll_layout.addWidget(self.update_settings, 0)
 

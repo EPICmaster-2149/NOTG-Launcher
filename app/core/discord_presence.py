@@ -18,17 +18,6 @@ APPLICATION_ID = "1496879744858325066"
 LARGE_IMAGE_KEY = "notg_launcher_logo"
 SMALL_IMAGE_KEY = "graphicslogo"
 
-_PLACEHOLDER_VALUES = {
-    "",
-    "YOUR_APP_ID_HERE",
-    "YOUR_LARGE_IMAGE_KEY_HERE",
-    "YOUR_SMALL_IMAGE_KEY_HERE",
-}
-
-
-def _is_placeholder(value: str) -> bool:
-    return str(value).strip() in _PLACEHOLDER_VALUES
-
 
 class DiscordRichPresence:
     """Maintain a single Discord RPC connection for one runtime session."""
@@ -40,7 +29,7 @@ class DiscordRichPresence:
         self._last_payload: tuple[tuple[str, Any], ...] | None = None
 
     def is_configured(self) -> bool:
-        return self.application_id.isdigit() and not _is_placeholder(self.application_id)
+        return bool(self.application_id) and self.application_id.isdigit()
 
     def connect(self, max_retries: int = 2, retry_delay: float = 1.0) -> bool:
         if self._connected:
@@ -85,12 +74,10 @@ class DiscordRichPresence:
         }
         if started_at is not None:
             payload["start"] = int(started_at)
-        if not _is_placeholder(LARGE_IMAGE_KEY):
-            payload["large_image"] = LARGE_IMAGE_KEY.lower()
+        payload["large_image"] = LARGE_IMAGE_KEY.lower()
         if large_text:
             payload["large_text"] = large_text
-        if not _is_placeholder(SMALL_IMAGE_KEY):
-            payload["small_image"] = SMALL_IMAGE_KEY.lower()
+        payload["small_image"] = SMALL_IMAGE_KEY.lower()
         if small_text:
             payload["small_text"] = small_text
 

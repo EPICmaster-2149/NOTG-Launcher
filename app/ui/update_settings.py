@@ -45,9 +45,9 @@ def _resolve_dev_executable() -> str:
 
 
 class CheckUpdateWorker(QThread):
-    """Worker thread for checking updates - prevents UI freezing."""
+    """Check for updates without blocking the UI."""
     
-    check_complete = Signal(bool, str, str, str)  # has_update, version, notes, download_url
+    check_complete = Signal(bool, str, str, str)
     error = Signal(str)
     
     def __init__(self, github_owner: str, github_repo: str):
@@ -77,7 +77,7 @@ class DownloadUpdateWorker(QThread):
     """Worker thread for downloading updates."""
     
     progress = Signal(int)
-    download_complete = Signal(str)  # path to downloaded file
+    download_complete = Signal(str)
     error = Signal(str)
     
     def __init__(self, download_url: str, cache_dir: str, current_exe: str):
@@ -264,19 +264,15 @@ class ReleaseNotesPreview(QFrame):
 class UpdateSettingsPanel(QWidget):
     """Update settings panel for settings dialog."""
     
-    install_requested = Signal(str, str)  # (new_exe_path, version)
-    
     def __init__(self, parent=None, github_owner: str = "YourUsername", github_repo: str = "NOTG-Launcher"):
         super().__init__(parent)
         self.github_owner = github_owner
-        self.github_repo = github_repo  # GitHub repo (uses hyphen)
+        self.github_repo = github_repo
         self.check_worker = None
         self.download_worker = None
         self.downloaded_exe = None
-        self.latest_version = None
         self.download_url = None
         
-        # Get cache and exe paths
         from core.launcher import LauncherService
         service = LauncherService()
         self.cache_dir = str(service.cache_root)
@@ -297,12 +293,10 @@ class UpdateSettingsPanel(QWidget):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(12)
         
-        # Title
         title = QLabel("Update")
         title.setObjectName("editorSectionTitle")
         root_layout.addWidget(title)
         
-        # Check button row
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(10)
@@ -320,7 +314,6 @@ class UpdateSettingsPanel(QWidget):
         self.check_button.clicked.connect(self._on_check_updates)
         button_row.addWidget(self.check_button)
         
-        # Version display
         self.version_label = QLabel(f"Current: v{APP_VERSION}")
         self.version_label.setObjectName("settingsCaption")
         button_row.addWidget(self.version_label, 1, alignment=Qt.AlignLeft | Qt.AlignVCenter)
@@ -328,12 +321,10 @@ class UpdateSettingsPanel(QWidget):
         
         root_layout.addLayout(button_row)
         
-        # Release notes preview
         self.preview = ReleaseNotesPreview(self.cache_dir, self.github_owner, self.github_repo)
         self.preview.set_content("Up to date")
         root_layout.addWidget(self.preview, 1)
         
-        # Install button row
         install_row = QHBoxLayout()
         install_row.setContentsMargins(0, 0, 0, 0)
         install_row.setSpacing(10)
@@ -352,7 +343,6 @@ class UpdateSettingsPanel(QWidget):
         self.install_button.setEnabled(False)
         install_row.addWidget(self.install_button)
         
-        # Status label
         self.status_label = QLabel("")
         self.status_label.setObjectName("settingsCaption")
         install_row.addWidget(self.status_label, 1, alignment=Qt.AlignLeft | Qt.AlignVCenter)
@@ -379,14 +369,12 @@ class UpdateSettingsPanel(QWidget):
     def _on_check_complete(self, has_update: bool, version: str, notes: str, download_url: str):
         """Called when check completes."""
         self.check_button.setEnabled(True)
-        self.latest_version = version
         self.download_url = download_url
         
         if has_update:
             self.status_label.setText(f"Update available: {version}")
             self.install_button.setEnabled(True)
             
-            # Save state
             state = self.update_state.get_state()
             state["available_version"] = version
             state["release_notes"] = notes
@@ -436,7 +424,7 @@ class UpdateSettingsPanel(QWidget):
         self.status_label.setText("Update ready. Restarting application...")
         self.preview.set_content("Update downloaded successfully!\nThe application will now restart to apply the update.")
         
-        # Give UI time to update before restarting
+        # Let the restart message paint before the application exits.
         QTimer.singleShot(2000, self._apply_update)
     
     def _on_download_error(self, error: str):
@@ -457,8 +445,6 @@ class UpdateSettingsPanel(QWidget):
         try:
             installer = UpdateInstaller(self.current_exe, self.cache_dir)
             if installer.apply_update(Path(self.downloaded_exe)):
-                # Update will be applied after app closes
-                # Close settings dialog and main app
                 self.window().close()
                 from PySide6.QtWidgets import QApplication
                 QApplication.instance().quit()
