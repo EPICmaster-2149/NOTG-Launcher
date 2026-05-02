@@ -384,6 +384,7 @@ class TopBar(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("topBar")
+        self._right_widgets: list[QWidget] = []
 
         if hasattr(sys, '_MEIPASS'):
             asset_root = Path(sys._MEIPASS) / "assets"
@@ -441,6 +442,12 @@ class TopBar(QWidget):
         self._account_layout = account_layout
         self._apply_responsive_metrics()
 
+    def add_right_widget(self, widget: QWidget) -> None:
+        insert_at = max(0, self._layout.count() - 1)
+        self._layout.insertWidget(insert_at, widget)
+        self._right_widgets.append(widget)
+        self._apply_responsive_metrics()
+
     def showEvent(self, event) -> None:
         self._apply_responsive_metrics()
         super().showEvent(event)
@@ -470,6 +477,15 @@ class TopBar(QWidget):
                 height=scaled_px(self, 46, minimum=40, maximum=48),
                 icon_size=scaled_px(self, 24, minimum=18, maximum=24),
             )
+
+        for widget in self._right_widgets:
+            set_metrics = getattr(widget, "set_metrics", None)
+            if callable(set_metrics):
+                set_metrics(
+                    height=scaled_px(self, 44, minimum=38, maximum=46),
+                    slider_width=scaled_px(self, 96, minimum=72, maximum=104),
+                    icon_size=scaled_px(self, 30, minimum=28, maximum=32),
+                )
 
     def set_accounts(self, accounts: list[str], active_account: str) -> None:
         self.account_name.setText(active_account)

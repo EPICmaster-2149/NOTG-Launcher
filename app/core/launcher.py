@@ -110,10 +110,13 @@ MMCPACK_LOADER_UIDS = {
 APP_NAME = "NOTG Launcher"
 USER_ICON_PREFIX = "user-icons"
 USER_BACKGROUND_PREFIX = "user-backgrounds"
+USER_MUSIC_PREFIX = "user-music"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".avi", ".mkv", ".webm", ".wmv"}
 BACKGROUND_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES
+MUSIC_SUFFIXES = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".wma"}
 BACKGROUND_FILE_NAME = "active-background"
+MUSIC_FILE_NAME = "music"
 JAVA_DOWNLOAD_URL = "https://www.oracle.com/in/java/technologies/downloads/#java25"
 UNSET = object()
 SESSION_STATUS_TO_INSTANCE_STATUS = {
@@ -159,6 +162,16 @@ class BackgroundRecord:
     absolute_path: str
     is_default: bool
     is_video: bool
+
+
+@dataclass(slots=True)
+class MusicRecord:
+    music_id: str
+    name: str
+    relative_path: str
+    absolute_path: str
+    is_default: bool
+    enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -361,7 +374,9 @@ class LauncherService:
         self.cache_root = Path(dirs.user_cache_dir).resolve()
         self.accounts_file = self.config_root / "accounts.json"
         self.background_settings_file = self.config_root / "background.json"
+        self.music_settings_file = self.config_root / "music.json"
         self.user_icons_root = self.data_root / "icons"
+        self.user_music_root = self.data_root / "MUSIC"
         self.instances_root = self.data_root / "instances"
         self.runtime_root = self.data_root / "runtime"
         self.staging_root = self.runtime_root / "staging"
@@ -370,6 +385,8 @@ class LauncherService:
         self.logs_root = Path(dirs.user_log_dir).resolve()
         self.backgrounds_root = self.data_root / "backgrounds"
         self.default_background_root = self.assets_root / "default-background"
+        self.default_music_root = self.assets_root / "default-musics"
+        self.legacy_default_music_root = self.assets_root / "deafult-musics"
         self.generated_icons_root = self.cache_root / "generated-icons"
         self.default_icon = "assets/default-instance-icons/Grass Block.png"
         self._server_resolution_cache: dict[tuple[str, int | None], set[str]] = {}
@@ -379,6 +396,7 @@ class LauncherService:
             self.config_root,
             self.cache_root,
             self.user_icons_root,
+            self.user_music_root,
             self.instances_root,
             self.runtime_root,
             self.staging_root,
@@ -1026,6 +1044,161 @@ class LauncherService:
         payload["theme"] = "light" if str(mode).strip().lower() == "light" else "dark"
         self._write_background_payload(payload)
         return str(payload["theme"])
+
+    def music_folder(self) -> Path:
+        return self.user_music_root
+
+    def list_music_tracks(self) -> list[MusicRecord]:
+        return self._ordered_music_records(self._read_music_payload())
+
+    def get_music_volume(self) -> int:
+        return _coerce_volume_percent(self._read_music_payload().get("volume"), 75)
+
+    def set_music_volume(self, volume: int) -> int:
+        payload = self._read_music_payload()
+        payload["volume"] = _coerce_volume_percent(volume, payload.get("volume", 55))
+        if payload["volume"] > 0:
+            payload["last_nonzero_volume"] = payload["volume"]
+        self._write_music_payload(payload)
+        return int(payload["volume"])
+
+    def get_music_last_nonzero_volume(self) -> int:
+        return _coerce_volume_percent(self._read_music_payload().get("last_nonzero_volume"), 75) or 75
+
+    def get_music_muted(self) -> bool:
+        return bool(self._read_music_payload().get("muted", False))
+
+    def set_music_muted(self, muted: bool) -> bool:
+        payload = self._read_music_payload()
+        payload["muted"] = bool(muted)
+        self._write_music_payload(payload)
+        return bool(payload["muted"])
+
+    def get_music_loop(self) -> bool:
+        return bool(self._read_music_payload().get("loop", True))
+
+    def set_music_loop(self, enabled: bool) -> bool:
+        payload = self._read_music_payload()
+        payload["loop"] = bool(enabled)
+        self._write_music_payload(payload)
+        return bool(payload["loop"])
+
+    def get_music_run_while_closed(self) -> bool:
+        return bool(self._read_music_payload().get("run_while_launcher_closed", False))
+
+    def set_music_run_while_closed(self, enabled: bool) -> bool:
+        payload = self._read_music_payload()
+        payload["run_while_launcher_closed"] = bool(enabled)
+        self._write_music_payload(payload)
+        return bool(payload["run_while_launcher_closed"])
+
+    def get_music_resume_checkpoint_enabled(self) -> bool:
+        return bool(self._read_music_payload().get("resume_checkpoint", True))
+
+    def set_music_resume_checkpoint_enabled(self, enabled: bool) -> bool:
+        payload = self._read_music_payload()
+        payload["resume_checkpoint"] = bool(enabled)
+        self._write_music_payload(payload)
+        return bool(payload["resume_checkpoint"])
+
+    def get_music_checkpoint(self) -> tuple[str | None, int]:
+        payload = self._read_music_payload()
+        return _optional_str(payload.get("checkpoint_music_id")), _coerce_non_negative_int(payload.get("checkpoint_position_ms"))
+
+    def set_music_checkpoint(self, music_id: str | None, position_ms: int) -> None:
+        payload = self._read_music_payload()
+        payload["checkpoint_music_id"] = _optional_str(music_id)
+        payload["checkpoint_position_ms"] = _coerce_non_negative_int(position_ms)
+        self._write_music_payload(payload)
+
+    def get_active_music_id(self) -> str | None:
+        return _optional_str(self._read_music_payload().get("current_music_id"))
+
+    def set_active_music_id(self, music_id: str | None) -> str | None:
+        payload = self._read_music_payload()
+        normalized = _optional_str(music_id)
+        available = {record.music_id for record in self._music_records_from_disk(payload)}
+        payload["current_music_id"] = normalized if normalized in available else None
+        self._write_music_payload(payload)
+        return _optional_str(payload.get("current_music_id"))
+
+    def set_music_order(self, music_ids: list[str]) -> list[MusicRecord]:
+        payload = self._read_music_payload()
+        records = self._ordered_music_records(payload, preferred_order=music_ids)
+        payload["order"] = [record.music_id for record in records]
+        payload["disabled"] = [record.music_id for record in records if not record.enabled]
+        self._write_music_payload(payload)
+        return records
+
+    def set_music_enabled(self, music_id: str, enabled: bool) -> list[MusicRecord]:
+        payload = self._read_music_payload()
+        available = {record.music_id for record in self._music_records_from_disk(payload)}
+        if music_id not in available:
+            raise FileNotFoundError(f"Music file not found: {music_id}")
+
+        disabled = set(_coerce_str_list(payload.get("disabled")))
+        if enabled:
+            disabled.discard(music_id)
+        else:
+            disabled.add(music_id)
+        payload["disabled"] = list(disabled)
+
+        records = self._ordered_music_records(payload)
+        payload["order"] = [record.music_id for record in records]
+        payload["disabled"] = [record.music_id for record in records if not record.enabled]
+        self._write_music_payload(payload)
+        return records
+
+    def store_user_music(self, source_path: str | Path, preferred_name: str | None = None) -> str:
+        source = Path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Music file not found: {source}")
+        suffix = source.suffix.lower()
+        if suffix not in MUSIC_SUFFIXES:
+            raise ValueError("Choose a supported audio file.")
+
+        self.user_music_root.mkdir(parents=True, exist_ok=True)
+        safe_name = _slugify_filename(preferred_name or source.stem) or MUSIC_FILE_NAME
+        target = self._unique_music_path(safe_name, suffix)
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+
+        reference = self._user_music_reference(target)
+        payload = self._read_music_payload()
+        order = _coerce_str_list(payload.get("order"))
+        if reference not in order:
+            order.append(reference)
+        payload["order"] = order
+        self._write_music_payload(payload)
+        return reference
+
+    def remove_user_music(self, music_path: str | Path) -> bool:
+        music = self._resolve_music_candidate(str(music_path))
+        if music is None:
+            return False
+        try:
+            music.relative_to(self.user_music_root.resolve())
+        except ValueError:
+            return False
+
+        if not music.is_file():
+            return False
+        reference = self._user_music_reference(music)
+        music.unlink()
+
+        payload = self._read_music_payload()
+        payload["order"] = [item for item in _coerce_str_list(payload.get("order")) if item != reference]
+        payload["disabled"] = [item for item in _coerce_str_list(payload.get("disabled")) if item != reference]
+        if _optional_str(payload.get("current_music_id")) == reference:
+            payload["current_music_id"] = None
+        self._write_music_payload(payload)
+        return True
+
+    def resolve_music_path(self, music_path: str | None) -> str | None:
+        resolved_music = self._resolve_music_candidate(music_path)
+        if resolved_music is not None and resolved_music.is_file() and resolved_music.suffix.lower() in MUSIC_SUFFIXES:
+            return str(resolved_music)
+        return None
 
     def list_mods(self, instance: InstanceRecord) -> list[dict[str, Any]]:
         mods_dir = self.get_instance_mods_dir(instance)
@@ -1794,6 +1967,118 @@ class LauncherService:
         relative = path.resolve().relative_to(self.backgrounds_root.resolve())
         return f"{USER_BACKGROUND_PREFIX}/{relative.as_posix()}"
 
+    def _default_music_records(self) -> list[MusicRecord]:
+        roots: list[Path] = []
+        if self.default_music_root.is_dir():
+            roots.append(self.default_music_root)
+        if self.legacy_default_music_root.is_dir() and self.legacy_default_music_root.resolve() != self.default_music_root.resolve():
+            roots.append(self.legacy_default_music_root)
+
+        records: list[MusicRecord] = []
+        seen: set[str] = set()
+        for root in roots:
+            for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+                if not path.is_file() or path.suffix.lower() not in MUSIC_SUFFIXES:
+                    continue
+                relative_path = self._project_relative(path)
+                if relative_path in seen:
+                    continue
+                seen.add(relative_path)
+                records.append(
+                    MusicRecord(
+                        music_id=relative_path,
+                        name=_friendly_asset_name(path.stem),
+                        relative_path=relative_path,
+                        absolute_path=str(path.resolve()),
+                        is_default=True,
+                        enabled=True,
+                    )
+                )
+        return records
+
+    def _user_music_records(self) -> list[MusicRecord]:
+        if not self.user_music_root.is_dir():
+            return []
+        records: list[MusicRecord] = []
+        for path in sorted(self.user_music_root.iterdir(), key=lambda item: item.name.lower()):
+            if not path.is_file() or path.suffix.lower() not in MUSIC_SUFFIXES:
+                continue
+            relative_path = self._user_music_reference(path)
+            records.append(
+                MusicRecord(
+                    music_id=relative_path,
+                    name=_friendly_asset_name(path.stem),
+                    relative_path=relative_path,
+                    absolute_path=str(path.resolve()),
+                    is_default=False,
+                    enabled=True,
+                )
+            )
+        return records
+
+    def _music_records_from_disk(self, payload: dict[str, Any]) -> list[MusicRecord]:
+        disabled = set(_coerce_str_list(payload.get("disabled")))
+        records = [*self._default_music_records(), *self._user_music_records()]
+        for record in records:
+            record.enabled = record.music_id not in disabled
+        return records
+
+    def _ordered_music_records(
+        self,
+        payload: dict[str, Any],
+        *,
+        preferred_order: list[str] | None = None,
+    ) -> list[MusicRecord]:
+        records = self._music_records_from_disk(payload)
+        records_by_id = {record.music_id: record for record in records}
+        order = _coerce_str_list(preferred_order if preferred_order is not None else payload.get("order"))
+
+        ordered: list[MusicRecord] = []
+        seen: set[str] = set()
+        for music_id in order:
+            record = records_by_id.get(music_id)
+            if record is None or music_id in seen:
+                continue
+            ordered.append(record)
+            seen.add(music_id)
+
+        for record in records:
+            if record.music_id not in seen:
+                ordered.append(record)
+                seen.add(record.music_id)
+
+        return [record for record in ordered if record.enabled] + [record for record in ordered if not record.enabled]
+
+    def _unique_music_path(self, safe_name: str, suffix: str) -> Path:
+        target = self.user_music_root / f"{safe_name}{suffix}"
+        if not target.exists():
+            return target
+
+        for index in range(2, 5000):
+            candidate = self.user_music_root / f"{safe_name}-{index}{suffix}"
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError("Could not allocate a unique music filename.")
+
+    def _user_music_reference(self, path: Path) -> str:
+        relative = path.resolve().relative_to(self.user_music_root.resolve())
+        return f"{USER_MUSIC_PREFIX}/{relative.as_posix()}"
+
+    def _resolve_music_candidate(self, music_path: str | None) -> Path | None:
+        text = _optional_str(music_path)
+        if not text:
+            return None
+
+        normalized = text.replace("\\", "/")
+        if normalized.startswith(f"{USER_MUSIC_PREFIX}/"):
+            relative = normalized[len(USER_MUSIC_PREFIX) + 1 :]
+            return (self.user_music_root / relative).resolve()
+
+        candidate = Path(normalized)
+        if candidate.is_absolute():
+            return candidate.resolve()
+        return (self.project_root / candidate).resolve()
+
     def _bootstrap_legacy_storage(self) -> None:
         self._copy_tree_if_target_empty(self.legacy_instances_root, self.instances_root)
         self._copy_tree_if_target_empty(self.legacy_user_icons_root, self.user_icons_root)
@@ -1832,6 +2117,64 @@ class LauncherService:
         payload["close_ui_on_launch"] = bool(payload.get("close_ui_on_launch", True))
         payload["theme"] = "light" if str(payload.get("theme", "dark")).strip().lower() == "light" else "dark"
         self.background_settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _read_music_payload(self) -> dict[str, Any]:
+        default_payload: dict[str, Any] = {
+            "order": [],
+            "disabled": [],
+            "volume": 75,
+            "last_nonzero_volume": 75,
+            "muted": False,
+            "loop": True,
+            "run_while_launcher_closed": False,
+            "resume_checkpoint": True,
+            "checkpoint_music_id": None,
+            "checkpoint_position_ms": 0,
+            "current_music_id": None,
+        }
+        if not self.music_settings_file.is_file():
+            return default_payload
+        try:
+            loaded = json.loads(self.music_settings_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return default_payload
+        if not isinstance(loaded, dict):
+            return default_payload
+
+        payload = dict(default_payload)
+        payload["order"] = _coerce_str_list(loaded.get("order"))
+        payload["disabled"] = _coerce_str_list(loaded.get("disabled"))
+        payload["volume"] = _coerce_volume_percent(loaded.get("volume"), default_payload["volume"])
+        payload["last_nonzero_volume"] = _coerce_volume_percent(
+            loaded.get("last_nonzero_volume"),
+            payload["volume"] or default_payload["last_nonzero_volume"],
+        ) or default_payload["last_nonzero_volume"]
+        payload["muted"] = bool(loaded.get("muted", default_payload["muted"]))
+        payload["loop"] = bool(loaded["loop"]) if "loop" in loaded else default_payload["loop"]
+        payload["run_while_launcher_closed"] = bool(loaded.get("run_while_launcher_closed", default_payload["run_while_launcher_closed"]))
+        payload["resume_checkpoint"] = bool(loaded.get("resume_checkpoint", default_payload["resume_checkpoint"]))
+        payload["checkpoint_music_id"] = _optional_str(loaded.get("checkpoint_music_id"))
+        payload["checkpoint_position_ms"] = _coerce_non_negative_int(loaded.get("checkpoint_position_ms"))
+        payload["current_music_id"] = _optional_str(loaded.get("current_music_id"))
+        return payload
+
+    def _write_music_payload(self, payload: dict[str, Any]) -> None:
+        normalized: dict[str, Any] = {
+            "order": _coerce_str_list(payload.get("order")),
+            "disabled": _coerce_str_list(payload.get("disabled")),
+            "volume": _coerce_volume_percent(payload.get("volume"), 75),
+            "last_nonzero_volume": _coerce_volume_percent(payload.get("last_nonzero_volume"), 75) or 75,
+            "muted": bool(payload.get("muted", False)),
+            "loop": bool(payload.get("loop", True)),
+            "run_while_launcher_closed": bool(payload.get("run_while_launcher_closed", False)),
+            "resume_checkpoint": bool(payload.get("resume_checkpoint", True)),
+            "checkpoint_music_id": _optional_str(payload.get("checkpoint_music_id")),
+            "checkpoint_position_ms": _coerce_non_negative_int(payload.get("checkpoint_position_ms")),
+            "current_music_id": _optional_str(payload.get("current_music_id")),
+        }
+        if normalized["volume"] > 0:
+            normalized["last_nonzero_volume"] = normalized["volume"]
+        self.music_settings_file.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
 
     def _read_runtime_session_payload(self, path: Path) -> dict[str, Any]:
         if not path.is_file():
@@ -3811,6 +4154,14 @@ def _coerce_memory_mb(value: Any) -> int:
     except (TypeError, ValueError):
         return max(1024, min(_system_memory_cap_mb(), DEFAULT_MEMORY_MB))
     return max(1024, min(_system_memory_cap_mb(), memory_mb))
+
+
+def _coerce_volume_percent(value: Any, default: int = 75) -> int:
+    try:
+        volume = int(value)
+    except (TypeError, ValueError):
+        volume = int(default)
+    return max(0, min(100, volume))
 
 
 def _system_memory_cap_mb() -> int:

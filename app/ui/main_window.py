@@ -21,6 +21,7 @@ from ui.message_utils import show_java_error
 from ui.responsive import fitted_window_size, scaled_px
 from ui.sidebar import SideBar
 from ui.app_icon import application_icon
+from ui.music import MusicController, MusicManagerDialog, TopBarMusicWidget
 from ui.theme import theme_palette
 from ui.topbar import ActionPopup, PopupAction, TopBar
 from ui.version_display import format_launcher_version_label
@@ -83,6 +84,8 @@ class MainWindow(QWidget):
         self._progress_dialogs: list["InstallProgressDialog"] = []
         self._edit_dialogs: dict[str, "EditInstanceDialog"] = {}
         self._settings_dialog: "SettingsDialog | None" = None
+        self._music_dialog: MusicManagerDialog | None = None
+        self.music_controller = MusicController(self.service, self)
         self._instance_popup_target_id: str | None = None
         self._background_pixmap = QPixmap()
         self._background_path: str | None = None
@@ -109,12 +112,17 @@ class MainWindow(QWidget):
         self._refresh_background()
         self._apply_responsive_layout()
         self.refresh_instances()
+        QTimer.singleShot(0, self.music_controller.start)
 
         self.runtime_timer = QTimer(self)
         self.runtime_timer.setInterval(1000)
         self.runtime_timer.timeout.connect(self._sync_runtime_sessions)
         self.runtime_timer.timeout.connect(self._update_playtime_bar)
         self.runtime_timer.start()
+
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.music_controller.stop_with_checkpoint)
 
         QTimer.singleShot(0, self._apply_initial_restore_request)
 
@@ -127,6 +135,14 @@ class MainWindow(QWidget):
         self._apply_responsive_layout()
         self._invalidate_background_cache()
         super().resizeEvent(event)
+
+    def closeEvent(self, event) -> None:
+        if self.music_controller.run_while_closed and self.music_controller.is_playing:
+            event.ignore()
+            self._hide_for_background_music()
+            return
+        self.music_controller.stop_with_checkpoint()
+        super().closeEvent(event)
 
     def paintEvent(self, event) -> None:
         del event
@@ -180,6 +196,9 @@ class MainWindow(QWidget):
         main_layout.setSpacing(8)
 
         self.topbar = TopBar()
+        self.music_widget = TopBarMusicWidget(self.music_controller)
+        self.music_widget.manager_requested.connect(self._open_music_manager)
+        self.topbar.add_right_widget(self.music_widget)
         self.topbar.set_accounts(self.service.list_accounts(), self.service.get_player_name())
         self.topbar.action_requested.connect(self._handle_topbar_action)
         main_layout.addWidget(self.topbar)
@@ -628,6 +647,14 @@ class MainWindow(QWidget):
         self._settings_dialog.raise_()
         self._settings_dialog.activateWindow()
 
+    def _open_music_manager(self) -> None:
+        if self._music_dialog is None:
+            self._music_dialog = MusicManagerDialog(self.music_controller, self)
+            self._music_dialog.destroyed.connect(lambda *_: setattr(self, "_music_dialog", None))
+        self._music_dialog.show()
+        self._music_dialog.raise_()
+        self._music_dialog.activateWindow()
+
     def _refresh_background(self) -> None:
         self._background_path = self.service.get_active_background_path()
         self._background_is_video = bool(self._background_path and self._background_path.lower().endswith(tuple(VIDEO_SUFFIXES)))
@@ -822,6 +849,11 @@ class MainWindow(QWidget):
         self._activate_window()
 
     def _close_for_running_session(self) -> None:
+        keep_music_running = self.music_controller.run_while_closed and self.music_controller.is_playing
+        if not keep_music_running:
+            self.music_controller.stop_with_checkpoint()
+        if self._music_dialog is not None:
+            self._music_dialog.close()
         if self._settings_dialog is not None:
             self._settings_dialog.close()
         for dialog in list(self._edit_dialogs.values()):
@@ -829,9 +861,22 @@ class MainWindow(QWidget):
         for dialog in list(self._progress_dialogs):
             dialog.close()
         self.hide()
+        if keep_music_running:
+            return
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    def _hide_for_background_music(self) -> None:
+        if self._music_dialog is not None:
+            self._music_dialog.hide()
+        if self._settings_dialog is not None:
+            self._settings_dialog.hide()
+        for dialog in list(self._edit_dialogs.values()):
+            dialog.hide()
+        for dialog in list(self._progress_dialogs):
+            dialog.hide()
+        self.hide()
 
     def _instance_is_active(self, instance_id: str) -> bool:
         session = self._runtime_sessions.get(instance_id) or self.service.get_runtime_session(instance_id)

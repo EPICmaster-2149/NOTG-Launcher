@@ -51,6 +51,21 @@ QFrame#accountChip {
     border-radius: 12px;
 }
 
+QFrame#musicControl {
+    background-color: rgba(22, 35, 56, 0.78);
+    border: 1px solid rgba(122, 166, 237, 0.44);
+    border-radius: 12px;
+}
+
+QFrame#musicControlDivider {
+    min-width: 1px;
+    max-width: 1px;
+    min-height: 24px;
+    max-height: 24px;
+    border: none;
+    background-color: rgba(122, 166, 237, 0.28);
+}
+
 QLabel#accountAvatar {
     min-width: 28px;
     max-width: 28px;
@@ -208,6 +223,7 @@ QDialog#installProgressDialog,
 QDialog#iconSelectorDialog,
 QDialog#backgroundSelectorDialog,
 QDialog#accountsDialog,
+QDialog#musicManagerDialog,
 QDialog#settingsDialog {
     background-color: qradialgradient(
         cx: 0.18,
@@ -657,6 +673,158 @@ QSlider#editorRamSlider::handle:horizontal {
     border-radius: 9px;
     background-color: #dbeaff;
     border: 1px solid rgba(116, 165, 229, 0.9);
+}
+
+QSlider#musicVolumeSlider::groove:horizontal,
+QSlider#musicSeekSlider::groove:horizontal {
+    height: 6px;
+    border-radius: 3px;
+    background-color: rgba(17, 28, 44, 0.96);
+    border: 1px solid rgba(72, 105, 151, 0.32);
+}
+
+QSlider#musicVolumeSlider::sub-page:horizontal,
+QSlider#musicSeekSlider::sub-page:horizontal {
+    border-radius: 3px;
+    background: qlineargradient(
+        x1: 0,
+        y1: 0,
+        x2: 1,
+        y2: 0,
+        stop: 0 rgba(88, 144, 228, 0.82),
+        stop: 1 rgba(124, 199, 255, 0.88)
+    );
+}
+
+QSlider#musicVolumeSlider::handle:horizontal,
+QSlider#musicSeekSlider::handle:horizontal {
+    width: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+    background-color: #dbeaff;
+    border: 1px solid rgba(116, 165, 229, 0.92);
+}
+
+QLabel#musicCurrentLabel {
+    color: #f5f9ff;
+    font-size: 22px;
+    font-weight: 700;
+    background: transparent;
+}
+
+QLabel#musicLoopLabel {
+    color: #d7e7ff;
+    font-size: 13px;
+    font-weight: 800;
+    background: transparent;
+}
+
+QFrame#musicSeekHolder {
+    background: transparent;
+    border: none;
+}
+
+QLabel#musicTimeBubble {
+    color: #f7fbff;
+    background-color: rgba(18, 30, 50, 0.96);
+    border: 1px solid rgba(128, 176, 255, 0.5);
+    border-radius: 8px;
+    padding: 3px 8px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+QListWidget#musicTrackList {
+    background-color: rgba(12, 20, 33, 0.54);
+    border: 1px solid rgba(79, 111, 159, 0.28);
+    border-radius: 12px;
+    padding: 6px 8px;
+    outline: 0;
+}
+
+QListWidget#musicTrackList::item {
+    background: transparent;
+    border: none;
+    margin: 0;
+    padding: 0;
+}
+
+QListWidget#musicTrackList::item:selected {
+    background: transparent;
+}
+
+QLabel#musicTrackNumber,
+QLabel#musicTrackName,
+QLabel#musicTrackSource {
+    background: transparent;
+    color: #eef5ff;
+}
+
+QLabel#musicTrackNumber {
+    color: #9fc7ff;
+    font-size: 17px;
+    font-weight: 800;
+}
+
+QLabel#musicTrackName {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#musicTrackSource {
+    color: #9db3d8;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+QCheckBox#musicTrackCheck {
+    background: transparent;
+    color: #b9d4ff;
+    font-size: 12px;
+    font-weight: 800;
+    spacing: 8px;
+}
+
+QCheckBox#musicTrackCheck::indicator {
+    width: 34px;
+    height: 18px;
+}
+
+QCheckBox#musicTrackCheck::indicator:unchecked {
+    border: 1px solid rgba(112, 144, 188, 0.7);
+    border-radius: 9px;
+    background-color: rgba(12, 20, 31, 0.9);
+}
+
+QCheckBox#musicTrackCheck::indicator:checked {
+    border: 1px solid rgba(142, 194, 255, 0.92);
+    border-radius: 9px;
+    background-color: rgba(92, 150, 232, 0.9);
+}
+
+QCheckBox#musicCompactCheck {
+    background: transparent;
+    color: #d7e7ff;
+    font-size: 12px;
+    font-weight: 700;
+    spacing: 7px;
+}
+
+QCheckBox#musicCompactCheck::indicator {
+    width: 16px;
+    height: 16px;
+}
+
+QCheckBox#musicCompactCheck::indicator:unchecked {
+    border: 1px solid rgba(112, 144, 188, 0.74);
+    border-radius: 4px;
+    background-color: rgba(12, 20, 31, 0.9);
+}
+
+QCheckBox#musicCompactCheck::indicator:checked {
+    border: 1px solid rgba(142, 194, 255, 0.92);
+    border-radius: 4px;
+    background-color: rgba(92, 150, 232, 0.9);
 }
 
 QFrame#playtimeBar {

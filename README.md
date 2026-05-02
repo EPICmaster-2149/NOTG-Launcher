@@ -413,3 +413,5 @@ Make sure:
 NOTG Launcher is still a local desktop launcher project. The code favors
 straightforward file-based state, local instance folders, and a PyInstaller
 one-folder distribution model.
+
+## Also its mostly vibe codded
