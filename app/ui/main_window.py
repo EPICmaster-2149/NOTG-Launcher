@@ -582,7 +582,7 @@ class MainWindow(QWidget):
         self._replace_instance(instance)
         self._sync_runtime_sessions(force_refresh=True)
         if self.service.get_close_ui_on_launch():
-            self._close_for_running_session()
+            self._close_after_launch()
 
     def _handle_launch_failure(self, instance_id: str, message: str) -> None:
         self._set_instance_status(instance_id, "Crashed")
@@ -850,8 +850,8 @@ class MainWindow(QWidget):
                 dialog.notify_crash(int(exit_code) if isinstance(exit_code, int) else -1)
         self._activate_window()
 
-    def _close_for_running_session(self) -> None:
-        keep_music_running = self._should_keep_music_for_active_session()
+    def _close_after_launch(self) -> None:
+        keep_music_running = self.music_controller.run_while_closed and self.music_controller.is_playing
         self.music_controller.save_checkpoint()
         if not keep_music_running:
             self.music_controller.stop_with_checkpoint()

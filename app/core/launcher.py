@@ -1839,6 +1839,20 @@ class LauncherService:
             return None
         return pid if pid > 0 else None
 
+    def runtime_session_is_active(self, instance_id: str) -> bool:
+        session = self.get_runtime_session(instance_id)
+        if session is None:
+            return False
+        if str(session.get("status") or "") not in {"launching", "running"}:
+            return False
+        try:
+            pid = int(session.get("pid"))
+        except (TypeError, ValueError):
+            return False
+        if pid <= 0:
+            return False
+        return _process_is_alive(pid)
+
     def runtime_session_started_at(self, instance_id: str) -> str | None:
         session = self.get_runtime_session(instance_id)
         return _optional_str(session.get("started_at")) if session else None
@@ -2438,6 +2452,16 @@ def terminate_process_tree(pid: int) -> None:
             proc.kill()
         except psutil.Error:
             continue
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        process = psutil.Process(pid)
+        if not process.is_running():
+            return False
+        return process.status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
 
 
 def _run_standard_install(
