@@ -137,8 +137,9 @@ class MainWindow(QWidget):
         super().resizeEvent(event)
 
     def closeEvent(self, event) -> None:
-        if self.music_controller.run_while_closed and self.music_controller.is_playing:
+        if self._should_keep_music_for_active_session():
             event.ignore()
+            self.music_controller.save_checkpoint()
             self._hide_for_background_music()
             return
         self.music_controller.stop_with_checkpoint()
@@ -506,6 +507,7 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "Launch Failed", str(exc))
             return
 
+        self.music_controller.save_checkpoint()
         self._set_instance_status(instance.instance_id, "Launching")
         worker = LaunchWorker(self.service, instance, self.service.get_player_name())
         worker.launched.connect(self._handle_launch_success)
@@ -849,7 +851,8 @@ class MainWindow(QWidget):
         self._activate_window()
 
     def _close_for_running_session(self) -> None:
-        keep_music_running = self.music_controller.run_while_closed and self.music_controller.is_playing
+        keep_music_running = self._should_keep_music_for_active_session()
+        self.music_controller.save_checkpoint()
         if not keep_music_running:
             self.music_controller.stop_with_checkpoint()
         if self._music_dialog is not None:
@@ -877,6 +880,18 @@ class MainWindow(QWidget):
         for dialog in list(self._progress_dialogs):
             dialog.hide()
         self.hide()
+
+    def _should_keep_music_for_active_session(self) -> bool:
+        return (
+            self.music_controller.run_while_closed
+            and self.music_controller.is_playing
+            and self._has_active_runtime_session()
+        )
+
+    def _has_active_runtime_session(self) -> bool:
+        sessions = self.service.list_runtime_sessions()
+        self._runtime_sessions = sessions
+        return any(self.service.runtime_session_is_active(instance_id) for instance_id in sessions)
 
     def _instance_is_active(self, instance_id: str) -> bool:
         session = self._runtime_sessions.get(instance_id) or self.service.get_runtime_session(instance_id)

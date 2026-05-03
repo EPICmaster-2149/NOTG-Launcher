@@ -62,7 +62,11 @@ class MusicController(QObject):
         self._loop = self.service.get_music_loop()
         self._run_while_closed = self.service.get_music_run_while_closed()
         self._resume_checkpoint = self.service.get_music_resume_checkpoint_enabled()
+        checkpoint_id, checkpoint_position = self.service.get_music_checkpoint()
+        self._stored_checkpoint_id = checkpoint_id
+        self._stored_checkpoint_position = checkpoint_position
         self._pending_checkpoint_position = 0
+        self._pending_checkpoint_attempts = 0
         self._last_known_position = 0
         self._checkpoint_saved_for_stop = False
         self._started = False
@@ -138,10 +142,15 @@ class MusicController(QObject):
         self._started = True
         if not self.available:
             return
-        checkpoint_id, checkpoint_position = self.service.get_music_checkpoint() if self._resume_checkpoint else (None, 0)
+        checkpoint_id, checkpoint_position = (
+            (self._stored_checkpoint_id, self._stored_checkpoint_position)
+            if self._resume_checkpoint
+            else (None, 0)
+        )
         track = self._track_by_id(checkpoint_id) if checkpoint_id else None
         if track is not None and track.enabled:
             self._pending_checkpoint_position = checkpoint_position
+            self._pending_checkpoint_attempts = 0
         else:
             track = self._track_by_id(self._current_music_id)
         if track is None or not track.enabled:
@@ -241,6 +250,8 @@ class MusicController(QObject):
 
     def set_resume_checkpoint_enabled(self, enabled: bool) -> None:
         self._resume_checkpoint = self.service.set_music_resume_checkpoint_enabled(enabled)
+        if self._resume_checkpoint:
+            self.save_checkpoint()
         self.checkpoint_resume_changed.emit(self._resume_checkpoint)
 
     def save_checkpoint(self) -> None:
@@ -248,7 +259,18 @@ class MusicController(QObject):
             return
         track = self.current_track()
         position = max(self.position, self._last_known_position)
-        self.service.set_music_checkpoint(track.music_id if track is not None else self._current_music_id, position)
+        music_id = track.music_id if track is not None else self._current_music_id
+        if not music_id:
+            return
+        if (
+            self._pending_checkpoint_position > 0
+            and music_id == self._stored_checkpoint_id
+            and position <= 0
+        ):
+            position = self._pending_checkpoint_position
+        self._stored_checkpoint_id = music_id
+        self._stored_checkpoint_position = max(0, position)
+        self.service.set_music_checkpoint(music_id, self._stored_checkpoint_position)
 
     def stop_with_checkpoint(self) -> None:
         if not self._checkpoint_saved_for_stop:
@@ -357,10 +379,20 @@ class MusicController(QObject):
             return
         duration = self.duration
         if duration <= 0:
+            self._pending_checkpoint_attempts += 1
+            QTimer.singleShot(200, self._apply_pending_checkpoint)
+            return
+        if (
+            hasattr(self._player, "isSeekable")
+            and not self._player.isSeekable()
+            and self._pending_checkpoint_attempts < 50
+        ):
+            self._pending_checkpoint_attempts += 1
             QTimer.singleShot(200, self._apply_pending_checkpoint)
             return
         position = min(self._pending_checkpoint_position, max(0, duration - 800))
         self._pending_checkpoint_position = 0
+        self._pending_checkpoint_attempts = 0
         self.seek(position)
 
     def _refresh_default_audio_device(self) -> None:
@@ -951,6 +983,7 @@ class AnimatedTrackList(QListWidget):
 
     def set_tracks(self, records: list[MusicRecord], current_music_id: str | None = None) -> None:
         selected_id = self.selected_music_id()
+        scroll_value = self.verticalScrollBar().value()
         self.clear()
         for index, record in enumerate(records, start=1):
             item = QListWidgetItem()
@@ -967,6 +1000,7 @@ class AnimatedTrackList(QListWidget):
         item = self._item_for_id(restore_id)
         if item is not None:
             self.setCurrentItem(item)
+        QTimer.singleShot(0, lambda value=scroll_value: self._restore_scroll_value(value))
 
     def selected_music_id(self) -> str | None:
         item = self.currentItem()
@@ -1112,6 +1146,10 @@ class AnimatedTrackList(QListWidget):
             if item.data(Qt.UserRole) == music_id:
                 return item
         return None
+
+    def _restore_scroll_value(self, value: int) -> None:
+        scroll_bar = self.verticalScrollBar()
+        scroll_bar.setValue(max(scroll_bar.minimum(), min(int(value), scroll_bar.maximum())))
 
     def _emit_selected_track(self) -> None:
         self.selected_track_changed.emit(self.selected_record())

@@ -115,6 +115,21 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".avi", ".mkv", ".webm", ".wmv"}
 BACKGROUND_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES
 MUSIC_SUFFIXES = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".wma"}
+DEFAULT_MUSIC_ORDER = [
+    "assets/default-musics/.Fireflies.ogg",
+    "assets/default-musics/Biome Fest.ogg",
+    "assets/default-musics/Broken Clocks.ogg",
+    "assets/default-musics/Echo in the Wind.ogg",
+    "assets/default-musics/Familiar Room.ogg",
+    "assets/default-musics/Renoir Boss Theme Clair Obscur Expedition.mp3",
+    "assets/default-musics/SOLARIS _ Epic Violin Song.mp3",
+    "assets/default-musics/Luminary.mp3",
+]
+DEFAULT_DISABLED_MUSIC = [
+    "assets/default-musics/Renoir Boss Theme Clair Obscur Expedition.mp3",
+    "assets/default-musics/SOLARIS _ Epic Violin Song.mp3",
+    "assets/default-musics/Luminary.mp3",
+]
 BACKGROUND_FILE_NAME = "active-background"
 MUSIC_FILE_NAME = "music"
 JAVA_DOWNLOAD_URL = "https://www.oracle.com/in/java/technologies/downloads/#java25"
@@ -1839,6 +1854,23 @@ class LauncherService:
             return None
         return pid if pid > 0 else None
 
+    def runtime_session_is_active(self, instance_id: str) -> bool:
+        session = self.get_runtime_session(instance_id)
+        if session is None:
+            return False
+        if str(session.get("status") or "") not in {"launching", "running"}:
+            return False
+        try:
+            pid = int(session.get("pid"))
+        except (TypeError, ValueError):
+            return False
+        if pid <= 0:
+            return False
+        return _process_is_alive(pid)
+
+    def has_active_runtime_session(self) -> bool:
+        return any(self.runtime_session_is_active(instance_id) for instance_id in self.list_runtime_sessions())
+
     def runtime_session_started_at(self, instance_id: str) -> str | None:
         session = self.get_runtime_session(instance_id)
         return _optional_str(session.get("started_at")) if session else None
@@ -2047,7 +2079,7 @@ class LauncherService:
                 ordered.append(record)
                 seen.add(record.music_id)
 
-        return [record for record in ordered if record.enabled] + [record for record in ordered if not record.enabled]
+        return ordered
 
     def _unique_music_path(self, safe_name: str, suffix: str) -> Path:
         target = self.user_music_root / f"{safe_name}{suffix}"
@@ -2120,8 +2152,8 @@ class LauncherService:
 
     def _read_music_payload(self) -> dict[str, Any]:
         default_payload: dict[str, Any] = {
-            "order": [],
-            "disabled": [],
+            "order": list(DEFAULT_MUSIC_ORDER),
+            "disabled": list(DEFAULT_DISABLED_MUSIC),
             "volume": 75,
             "last_nonzero_volume": 75,
             "muted": False,
@@ -2130,7 +2162,7 @@ class LauncherService:
             "resume_checkpoint": True,
             "checkpoint_music_id": None,
             "checkpoint_position_ms": 0,
-            "current_music_id": None,
+            "current_music_id": DEFAULT_MUSIC_ORDER[0] if DEFAULT_MUSIC_ORDER else None,
         }
         if not self.music_settings_file.is_file():
             return default_payload
@@ -2142,8 +2174,8 @@ class LauncherService:
             return default_payload
 
         payload = dict(default_payload)
-        payload["order"] = _coerce_str_list(loaded.get("order"))
-        payload["disabled"] = _coerce_str_list(loaded.get("disabled"))
+        payload["order"] = _coerce_str_list(loaded.get("order", default_payload["order"]))
+        payload["disabled"] = _coerce_str_list(loaded.get("disabled", default_payload["disabled"]))
         payload["volume"] = _coerce_volume_percent(loaded.get("volume"), default_payload["volume"])
         payload["last_nonzero_volume"] = _coerce_volume_percent(
             loaded.get("last_nonzero_volume"),
@@ -2155,7 +2187,7 @@ class LauncherService:
         payload["resume_checkpoint"] = bool(loaded.get("resume_checkpoint", default_payload["resume_checkpoint"]))
         payload["checkpoint_music_id"] = _optional_str(loaded.get("checkpoint_music_id"))
         payload["checkpoint_position_ms"] = _coerce_non_negative_int(loaded.get("checkpoint_position_ms"))
-        payload["current_music_id"] = _optional_str(loaded.get("current_music_id"))
+        payload["current_music_id"] = _optional_str(loaded.get("current_music_id", default_payload["current_music_id"]))
         return payload
 
     def _write_music_payload(self, payload: dict[str, Any]) -> None:
@@ -2438,6 +2470,16 @@ def terminate_process_tree(pid: int) -> None:
             proc.kill()
         except psutil.Error:
             continue
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        process = psutil.Process(pid)
+        if not process.is_running():
+            return False
+        return process.status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
 
 
 def _run_standard_install(
