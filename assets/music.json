@@ -1,0 +1,26 @@
+{
+  "order": [
+    "assets/default-musics/.Fireflies.ogg",
+    "assets/default-musics/Biome Fest.ogg",
+    "assets/default-musics/Broken Clocks.ogg",
+    "assets/default-musics/Echo in the Wind.ogg",
+    "assets/default-musics/Familiar Room.ogg",
+    "assets/default-musics/SOLARIS _ Epic Violin Song.mp3",
+    "assets/default-musics/Luminary.mp3",
+    "assets/default-musics/Renoir Boss Theme Clair Obscur Expedition.mp3"
+  ],
+  "disabled": [
+    "assets/default-musics/SOLARIS _ Epic Violin Song.mp3",
+    "assets/default-musics/Luminary.mp3",
+    "assets/default-musics/Renoir Boss Theme Clair Obscur Expedition.mp3"
+  ],
+  "volume": 75,
+  "last_nonzero_volume": 75,
+  "muted": false,
+  "loop": true,
+  "run_while_launcher_closed": false,
+  "resume_checkpoint": true,
+  "checkpoint_music_id": "assets/default-musics/.Fireflies.ogg",
+  "checkpoint_position_ms": 0,
+  "current_music_id": "assets/default-musics/.Fireflies.ogg"
+}

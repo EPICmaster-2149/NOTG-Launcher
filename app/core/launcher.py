@@ -385,6 +385,7 @@ class LauncherService:
         self.logs_root = Path(dirs.user_log_dir).resolve()
         self.backgrounds_root = self.data_root / "backgrounds"
         self.default_background_root = self.assets_root / "default-background"
+        self.default_music_settings_file = self.assets_root / "music.json"
         self.default_music_root = self.assets_root / "default-musics"
         self.legacy_default_music_root = self.assets_root / "deafult-musics"
         self.generated_icons_root = self.cache_root / "generated-icons"
@@ -408,6 +409,7 @@ class LauncherService:
 
         self._bootstrap_legacy_storage()
         self._ensure_account_store()
+        self._ensure_music_settings_store()
 
         self._version_cache: list[dict[str, Any]] | None = None
         self._loader_support_cache: dict[str, set[str]] = {}
@@ -2104,6 +2106,24 @@ class LauncherService:
             return
         self._write_accounts_payload({"accounts": ["player1"], "active": "player1"})
 
+    def _ensure_music_settings_store(self) -> None:
+        if not self.music_settings_file.is_file():
+            self._write_music_payload(self._default_music_payload())
+            return
+
+        try:
+            loaded = json.loads(self.music_settings_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._write_music_payload(self._default_music_payload())
+            return
+        if not isinstance(loaded, dict):
+            self._write_music_payload(self._default_music_payload())
+            return
+
+        payload = self._normalize_music_payload(loaded, self._default_music_payload())
+        payload = self._merge_new_default_music(payload, loaded)
+        self._write_music_payload(payload)
+
     def _read_background_payload(self) -> dict[str, Any]:
         payload = {
             "mode": "default",
@@ -2132,8 +2152,8 @@ class LauncherService:
         payload["theme"] = "light" if str(payload.get("theme", "dark")).strip().lower() == "light" else "dark"
         self.background_settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    def _read_music_payload(self) -> dict[str, Any]:
-        default_payload: dict[str, Any] = {
+    def _base_music_payload(self) -> dict[str, Any]:
+        return {
             "order": [],
             "disabled": [],
             "volume": 75,
@@ -2146,6 +2166,84 @@ class LauncherService:
             "checkpoint_position_ms": 0,
             "current_music_id": None,
         }
+
+    def _default_music_payload(self) -> dict[str, Any]:
+        default_payload = self._base_music_payload()
+        if not self.default_music_settings_file.is_file():
+            return default_payload
+        try:
+            loaded = json.loads(self.default_music_settings_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return default_payload
+        if not isinstance(loaded, dict):
+            return default_payload
+        return self._normalize_music_payload(loaded, default_payload)
+
+    def _normalize_music_payload(self, loaded: dict[str, Any], default_payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(default_payload)
+
+        loaded_order = loaded.get("order", UNSET)
+        payload["order"] = _coerce_str_list(loaded_order) if isinstance(loaded_order, list) else list(default_payload["order"])
+
+        loaded_disabled = loaded.get("disabled", UNSET)
+        payload["disabled"] = (
+            _coerce_str_list(loaded_disabled)
+            if isinstance(loaded_disabled, list)
+            else list(default_payload["disabled"])
+        )
+
+        payload["volume"] = _coerce_volume_percent(loaded.get("volume", default_payload["volume"]), default_payload["volume"])
+        payload["last_nonzero_volume"] = _coerce_volume_percent(
+            loaded.get("last_nonzero_volume", payload["volume"] or default_payload["last_nonzero_volume"]),
+            payload["volume"] or default_payload["last_nonzero_volume"],
+        ) or default_payload["last_nonzero_volume"]
+        payload["muted"] = bool(loaded.get("muted", default_payload["muted"]))
+        payload["loop"] = bool(loaded["loop"]) if "loop" in loaded else bool(default_payload["loop"])
+        payload["run_while_launcher_closed"] = bool(
+            loaded.get("run_while_launcher_closed", default_payload["run_while_launcher_closed"])
+        )
+        payload["resume_checkpoint"] = bool(loaded.get("resume_checkpoint", default_payload["resume_checkpoint"]))
+        payload["checkpoint_music_id"] = (
+            _optional_str(loaded.get("checkpoint_music_id"))
+            if "checkpoint_music_id" in loaded
+            else _optional_str(default_payload.get("checkpoint_music_id"))
+        )
+        payload["checkpoint_position_ms"] = (
+            _coerce_non_negative_int(loaded.get("checkpoint_position_ms"))
+            if "checkpoint_position_ms" in loaded
+            else _coerce_non_negative_int(default_payload.get("checkpoint_position_ms"))
+        )
+        payload["current_music_id"] = (
+            _optional_str(loaded.get("current_music_id"))
+            if "current_music_id" in loaded
+            else _optional_str(default_payload.get("current_music_id"))
+        )
+        return payload
+
+    def _merge_new_default_music(self, payload: dict[str, Any], loaded: dict[str, Any]) -> dict[str, Any]:
+        default_payload = self._default_music_payload()
+        default_order = _coerce_str_list(default_payload.get("order"))
+        default_disabled = set(_coerce_str_list(default_payload.get("disabled")))
+        existing_order = set(_coerce_str_list(loaded.get("order")))
+        existing_disabled = set(_coerce_str_list(loaded.get("disabled")))
+
+        order = _coerce_str_list(payload.get("order"))
+        disabled = set(_coerce_str_list(payload.get("disabled")))
+        for music_id in default_order:
+            if music_id not in order:
+                order.append(music_id)
+            if music_id in default_disabled and music_id not in existing_order and music_id not in existing_disabled:
+                disabled.add(music_id)
+
+        payload = dict(payload)
+        payload["order"] = order
+        payload["disabled"] = [music_id for music_id in order if music_id in disabled] + [
+            music_id for music_id in disabled if music_id not in order
+        ]
+        return payload
+
+    def _read_music_payload(self) -> dict[str, Any]:
+        default_payload = self._default_music_payload()
         if not self.music_settings_file.is_file():
             return default_payload
         try:
@@ -2154,23 +2252,7 @@ class LauncherService:
             return default_payload
         if not isinstance(loaded, dict):
             return default_payload
-
-        payload = dict(default_payload)
-        payload["order"] = _coerce_str_list(loaded.get("order"))
-        payload["disabled"] = _coerce_str_list(loaded.get("disabled"))
-        payload["volume"] = _coerce_volume_percent(loaded.get("volume"), default_payload["volume"])
-        payload["last_nonzero_volume"] = _coerce_volume_percent(
-            loaded.get("last_nonzero_volume"),
-            payload["volume"] or default_payload["last_nonzero_volume"],
-        ) or default_payload["last_nonzero_volume"]
-        payload["muted"] = bool(loaded.get("muted", default_payload["muted"]))
-        payload["loop"] = bool(loaded["loop"]) if "loop" in loaded else default_payload["loop"]
-        payload["run_while_launcher_closed"] = bool(loaded.get("run_while_launcher_closed", default_payload["run_while_launcher_closed"]))
-        payload["resume_checkpoint"] = bool(loaded.get("resume_checkpoint", default_payload["resume_checkpoint"]))
-        payload["checkpoint_music_id"] = _optional_str(loaded.get("checkpoint_music_id"))
-        payload["checkpoint_position_ms"] = _coerce_non_negative_int(loaded.get("checkpoint_position_ms"))
-        payload["current_music_id"] = _optional_str(loaded.get("current_music_id"))
-        return payload
+        return self._normalize_music_payload(loaded, default_payload)
 
     def _write_music_payload(self, payload: dict[str, Any]) -> None:
         normalized: dict[str, Any] = {
@@ -3752,7 +3834,7 @@ def _optional_int(value: Any) -> int | None:
 
 def _format_server_activity(address: str) -> str:
     normalized = address.lower()
-    if "mineberry" in normalized or "bw-lobby" in normalized or "65.20.73.213" in normalized:
+    if "mineberry" in normalized or "bw-lobby" in normalized or "65.20" in normalized:
         return "Playing in Mineberry"
     if "amplifiedsmp" in normalized:
         return "Playing in Amplified SMP"
@@ -3883,7 +3965,7 @@ def _friendly_asset_name(value: str) -> str:
 
 
 def _default_background_sort_key(path: Path) -> tuple[int, str]:
-    return (0 if path.name.lower() == "Black Hole.mp4" else 1, path.name.lower())
+    return (0 if path.name.lower() == ".Black Hole.mp4" else 1, path.name.lower())
 
 
 def _utc_now() -> str:
