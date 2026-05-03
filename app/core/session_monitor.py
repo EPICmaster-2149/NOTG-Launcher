@@ -24,13 +24,18 @@ def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
     presence = None
     if instance is not None and instance.rich_presence_enabled:
         started = _parse_timestamp(session.get("started_at"))
-        started_at = started.timestamp() if started != datetime.min.replace(tzinfo=timezone.utc) else time.time()
-        presence = DiscordRichPresence(
+        started_at = (
+            started.timestamp()
+            if started != datetime.min.replace(tzinfo=timezone.utc)
+            else time.time()
         )
+        presence = DiscordRichPresence()
         if presence.connect():
+            details = service.resolve_instance_rich_presence_details(instance)
             presence.update(
                 state=service.build_instance_rich_presence_state(instance),
-                details=service.resolve_instance_rich_presence_details(instance),
+                details=details,
+                pid=pid,
                 started_at=started_at,
                 large_text="NOTG Launcher",
                 small_text=instance.name or player_name,
@@ -49,9 +54,12 @@ def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
                 refreshed = service.get_instance(instance_id)
                 if refreshed is None:
                     continue
+                state = service.build_instance_rich_presence_state(refreshed)
+                details = service.resolve_instance_rich_presence_details(refreshed)
                 presence.update(
-                    state=service.build_instance_rich_presence_state(refreshed),
-                    details=service.resolve_instance_rich_presence_details(refreshed),
+                    state=state,
+                    details=details,
+                    pid=pid,
                     started_at=started_at,
                     large_text="NOTG Launcher",
                     small_text=refreshed.name or player_name,
@@ -63,7 +71,10 @@ def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
         presence.clear()
         presence.close()
 
-    finished_session = service.complete_runtime_session(instance_id, return_code)
+    finished_session = service.complete_runtime_session(
+        instance_id,
+        return_code,
+    )
     if finished_session is None:
         return 1
 
@@ -73,7 +84,10 @@ def run_session_monitor(instance_id: str, pid: int, player_name: str) -> int:
         if elapsed_seconds > 0:
             service.record_instance_playtime(instance, elapsed_seconds)
 
-    activate = bool(finished_session.get("close_ui_on_launch")) or str(finished_session.get("status")) == "crashed"
+    activate = (
+        bool(finished_session.get("close_ui_on_launch"))
+        or str(finished_session.get("status")) == "crashed"
+    )
     restore_message = {
         "action": "session-sync",
         "instance_id": instance_id,
