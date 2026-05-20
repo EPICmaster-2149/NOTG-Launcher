@@ -27,6 +27,11 @@ import psutil
 from platformdirs import PlatformDirs
 
 try:
+    from mutagen import File as MutagenFile
+except ImportError:  # pragma: no cover - optional metadata helper
+    MutagenFile = None
+
+try:
     from version import APP_VERSION
 except ImportError:  # pragma: no cover - defensive for isolated imports
     APP_VERSION = "0.0.0"
@@ -172,6 +177,30 @@ class MusicRecord:
     absolute_path: str
     is_default: bool
     enabled: bool = True
+    source_url: str | None = None
+    stream_url: str | None = None
+    artwork_url: str | None = None
+    artwork_path: str | None = None
+    date_added: str | None = None
+    duration_ms: int = 0
+    platform: str = "local"
+    artist: str | None = None
+    album: str | None = None
+    error: str | None = None
+
+    @property
+    def is_stream(self) -> bool:
+        return bool(self.source_url)
+
+
+@dataclass(slots=True)
+class MusicPlaylistRecord:
+    playlist_id: str
+    name: str
+    icon_path: str | None
+    tracks: list[MusicRecord]
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(slots=True)
@@ -374,7 +403,8 @@ class LauncherService:
         self.cache_root = Path(dirs.user_cache_dir).resolve()
         self.accounts_file = self.config_root / "accounts.json"
         self.background_settings_file = self.config_root / "background.json"
-        self.music_settings_file = self.config_root / "music.json"
+        self.legacy_music_settings_file = self.config_root / "music.json"
+        self.music_settings_file = self.data_root / "music.json"
         self.user_icons_root = self.data_root / "icons"
         self.user_music_root = self.data_root / "MUSIC"
         self.instances_root = self.data_root / "instances"
@@ -408,6 +438,7 @@ class LauncherService:
             path.mkdir(parents=True, exist_ok=True)
 
         self._bootstrap_legacy_storage()
+        self._migrate_music_settings_to_data_root()
         self._ensure_account_store()
         self._ensure_music_settings_store()
 
@@ -1051,7 +1082,108 @@ class LauncherService:
         return self.user_music_root
 
     def list_music_tracks(self) -> list[MusicRecord]:
-        return self._ordered_music_records(self._read_music_payload())
+        payload = self._read_music_payload()
+        playlist = self._active_music_playlist_payload(payload)
+        return self._ordered_music_records(payload, preferred_order=_coerce_str_list(playlist.get("order")), include_unordered=False)
+
+    def list_music_playlists(self) -> list[MusicPlaylistRecord]:
+        payload = self._read_music_payload()
+        playlists: list[MusicPlaylistRecord] = []
+        for playlist in self._music_playlist_payloads(payload):
+            playlists.append(
+                MusicPlaylistRecord(
+                    playlist_id=str(playlist["playlist_id"]),
+                    name=str(playlist["name"]),
+                    icon_path=_optional_str(playlist.get("icon_path")),
+                    tracks=self._ordered_music_records(
+                        payload,
+                        preferred_order=_coerce_str_list(playlist.get("order")),
+                        include_unordered=False,
+                    ),
+                    created_at=_optional_str(playlist.get("created_at")),
+                    updated_at=_optional_str(playlist.get("updated_at")),
+                )
+            )
+        return playlists
+
+    def get_active_music_playlist_id(self) -> str:
+        payload = self._read_music_payload()
+        return str(self._active_music_playlist_payload(payload)["playlist_id"])
+
+    def set_active_music_playlist_id(self, playlist_id: str | None) -> str:
+        payload = self._read_music_payload()
+        requested = _optional_str(playlist_id)
+        available = {str(playlist["playlist_id"]) for playlist in self._music_playlist_payloads(payload)}
+        if requested not in available:
+            requested = str(self._music_playlist_payloads(payload)[0]["playlist_id"])
+        payload["current_playlist_id"] = requested
+        self._write_music_payload(payload)
+        return requested
+
+    def create_music_playlist(self, name: str, icon_path: str | None = None) -> MusicPlaylistRecord:
+        payload = self._read_music_payload()
+        playlist_id = f"playlist-{uuid.uuid4().hex[:12]}"
+        now = _utc_now()
+        playlist = {
+            "playlist_id": playlist_id,
+            "name": _optional_str(name) or "New Playlist",
+            "icon_path": _optional_str(icon_path) or self._random_playlist_icon_reference(playlist_id),
+            "order": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        payload["playlists"] = [*self._music_playlist_payloads(payload), playlist]
+        payload["current_playlist_id"] = playlist_id
+        self._write_music_payload(payload)
+        return self.get_music_playlist(playlist_id)
+
+    def get_music_playlist(self, playlist_id: str | None) -> MusicPlaylistRecord:
+        payload = self._read_music_payload()
+        requested = _optional_str(playlist_id)
+        for playlist in self._music_playlist_payloads(payload):
+            if playlist["playlist_id"] == requested:
+                return MusicPlaylistRecord(
+                    playlist_id=str(playlist["playlist_id"]),
+                    name=str(playlist["name"]),
+                    icon_path=_optional_str(playlist.get("icon_path")),
+                    tracks=self._ordered_music_records(
+                        payload,
+                        preferred_order=_coerce_str_list(playlist.get("order")),
+                        include_unordered=False,
+                    ),
+                    created_at=_optional_str(playlist.get("created_at")),
+                    updated_at=_optional_str(playlist.get("updated_at")),
+                )
+        return self.list_music_playlists()[0]
+
+    def update_music_playlist(
+        self,
+        playlist_id: str,
+        *,
+        name: str | None = None,
+        icon_path: str | None | object = UNSET,
+        order: list[str] | None = None,
+    ) -> MusicPlaylistRecord:
+        payload = self._read_music_payload()
+        playlists = self._music_playlist_payloads(payload)
+        updated = False
+        for playlist in playlists:
+            if playlist["playlist_id"] != playlist_id:
+                continue
+            if name is not None:
+                playlist["name"] = _optional_str(name) or "New Playlist"
+            if icon_path is not UNSET:
+                playlist["icon_path"] = _optional_str(icon_path)
+            if order is not None:
+                playlist["order"] = self._validated_music_order(payload, order)
+            playlist["updated_at"] = _utc_now()
+            updated = True
+            break
+        if not updated:
+            raise FileNotFoundError(f"Playlist not found: {playlist_id}")
+        payload["playlists"] = playlists
+        self._write_music_payload(payload)
+        return self.get_music_playlist(playlist_id)
 
     def get_music_volume(self) -> int:
         return _coerce_volume_percent(self._read_music_payload().get("volume"), 75)
@@ -1084,6 +1216,24 @@ class LauncherService:
         payload["loop"] = bool(enabled)
         self._write_music_payload(payload)
         return bool(payload["loop"])
+
+    def get_music_shuffle(self) -> bool:
+        return bool(self._read_music_payload().get("shuffle", False))
+
+    def set_music_shuffle(self, enabled: bool) -> bool:
+        payload = self._read_music_payload()
+        payload["shuffle"] = bool(enabled)
+        self._write_music_payload(payload)
+        return bool(payload["shuffle"])
+
+    def get_music_paused(self) -> bool:
+        return bool(self._read_music_payload().get("paused", False))
+
+    def set_music_paused(self, paused: bool) -> bool:
+        payload = self._read_music_payload()
+        payload["paused"] = bool(paused)
+        self._write_music_payload(payload)
+        return bool(payload["paused"])
 
     def get_music_run_while_closed(self) -> bool:
         return bool(self._read_music_payload().get("run_while_launcher_closed", False))
@@ -1126,9 +1276,37 @@ class LauncherService:
 
     def set_music_order(self, music_ids: list[str]) -> list[MusicRecord]:
         payload = self._read_music_payload()
-        records = self._ordered_music_records(payload, preferred_order=music_ids)
-        payload["order"] = [record.music_id for record in records]
+        playlist = self._active_music_playlist_payload(payload)
+        playlist["order"] = self._validated_music_order(payload, music_ids)
+        payload["playlists"] = [
+            playlist if item["playlist_id"] == playlist["playlist_id"] else item
+            for item in self._music_playlist_payloads(payload)
+        ]
+        records = self._ordered_music_records(payload, preferred_order=playlist["order"], include_unordered=False)
+        payload["order"] = list(playlist["order"])
         payload["disabled"] = [record.music_id for record in records if not record.enabled]
+        self._write_music_payload(payload)
+        return records
+
+    def set_music_playlist_order(self, playlist_id: str, music_ids: list[str]) -> list[MusicRecord]:
+        payload = self._read_music_payload()
+        playlists = self._music_playlist_payloads(payload)
+        records: list[MusicRecord] = []
+        updated = False
+        for playlist in playlists:
+            if playlist["playlist_id"] != playlist_id:
+                continue
+            playlist["order"] = self._validated_music_order(payload, music_ids)
+            playlist["updated_at"] = _utc_now()
+            records = self._ordered_music_records(payload, preferred_order=playlist["order"], include_unordered=False)
+            updated = True
+            break
+        if not updated:
+            raise FileNotFoundError(f"Playlist not found: {playlist_id}")
+        payload["playlists"] = playlists
+        if payload.get("current_playlist_id") == playlist_id:
+            active = next((item for item in playlists if item["playlist_id"] == playlist_id), playlists[0])
+            payload["order"] = list(active["order"])
         self._write_music_payload(payload)
         return records
 
@@ -1152,6 +1330,9 @@ class LauncherService:
         return records
 
     def store_user_music(self, source_path: str | Path, preferred_name: str | None = None) -> str:
+        return self.add_local_music_to_playlist(self.get_active_music_playlist_id(), source_path, preferred_name=preferred_name)
+
+    def add_local_music_to_playlist(self, playlist_id: str, source_path: str | Path, preferred_name: str | None = None) -> str:
         source = Path(source_path)
         if not source.is_file():
             raise FileNotFoundError(f"Music file not found: {source}")
@@ -1167,12 +1348,154 @@ class LauncherService:
 
         reference = self._user_music_reference(target)
         payload = self._read_music_payload()
-        order = _coerce_str_list(payload.get("order"))
-        if reference not in order:
-            order.append(reference)
-        payload["order"] = order
+        payload["track_metadata"] = self._music_track_metadata_payload(payload)
+        payload["track_metadata"].setdefault(
+            reference,
+            {
+                "date_added": _utc_now(),
+                "duration_ms": _probe_audio_duration_ms(target),
+                "platform": "local",
+            },
+        )
+        playlists = self._music_playlist_payloads(payload)
+        updated = False
+        for playlist in playlists:
+            if playlist["playlist_id"] != playlist_id:
+                continue
+            order = _coerce_str_list(playlist.get("order"))
+            if reference not in order:
+                order.append(reference)
+            playlist["order"] = order
+            playlist["updated_at"] = _utc_now()
+            updated = True
+            break
+        if not updated:
+            raise FileNotFoundError(f"Playlist not found: {playlist_id}")
+        payload["playlists"] = playlists
+        if payload.get("current_playlist_id") == playlist_id:
+            payload["order"] = list(order)
         self._write_music_payload(payload)
         return reference
+
+    def add_remote_music_to_playlist(self, playlist_id: str, track_payload: dict[str, Any]) -> str:
+        payload = self._read_music_payload()
+        music_id = _optional_str(track_payload.get("music_id")) or f"remote/{uuid.uuid4().hex}"
+        metadata = self._music_track_metadata_payload(payload)
+        now = _utc_now()
+        metadata[music_id] = {
+            "name": _optional_str(track_payload.get("name")) or "Untitled Track",
+            "source_url": _optional_str(track_payload.get("source_url")) or _optional_str(track_payload.get("url")),
+            "stream_url": _optional_str(track_payload.get("stream_url")),
+            "artwork_url": _optional_str(track_payload.get("artwork_url")),
+            "artwork_path": _optional_str(track_payload.get("artwork_path")),
+            "date_added": _optional_str(track_payload.get("date_added")) or now,
+            "duration_ms": _coerce_non_negative_int(track_payload.get("duration_ms")),
+            "platform": _optional_str(track_payload.get("platform")) or "stream",
+            "artist": _optional_str(track_payload.get("artist")),
+            "album": _optional_str(track_payload.get("album")),
+            "error": _optional_str(track_payload.get("error")),
+            "remote": True,
+        }
+        payload["track_metadata"] = metadata
+
+        playlists = self._music_playlist_payloads(payload)
+        updated = False
+        for playlist in playlists:
+            if playlist["playlist_id"] != playlist_id:
+                continue
+            order = _coerce_str_list(playlist.get("order"))
+            if music_id not in order:
+                order.append(music_id)
+            playlist["order"] = order
+            playlist["updated_at"] = now
+            updated = True
+            break
+        if not updated:
+            raise FileNotFoundError(f"Playlist not found: {playlist_id}")
+        payload["playlists"] = playlists
+        if payload.get("current_playlist_id") == playlist_id:
+            payload["order"] = list(order)
+        self._write_music_payload(payload)
+        return music_id
+
+    def update_music_track_metadata(self, music_id: str, metadata_updates: dict[str, Any]) -> MusicRecord | None:
+        payload = self._read_music_payload()
+        metadata = self._music_track_metadata_payload(payload)
+        existing = dict(metadata.get(music_id, {}))
+        for key in (
+            "name",
+            "source_url",
+            "stream_url",
+            "artwork_url",
+            "artwork_path",
+            "date_added",
+            "duration_ms",
+            "platform",
+            "artist",
+            "album",
+            "error",
+            "remote",
+        ):
+            if key in metadata_updates:
+                if key == "duration_ms":
+                    existing[key] = _coerce_non_negative_int(metadata_updates.get(key))
+                elif key == "remote":
+                    existing[key] = bool(metadata_updates.get(key))
+                else:
+                    existing[key] = _optional_str(metadata_updates.get(key))
+        metadata[music_id] = existing
+        payload["track_metadata"] = metadata
+        self._write_music_payload(payload)
+        return next((record for record in self._music_records_from_disk(payload) if record.music_id == music_id), None)
+
+    def remove_music_from_playlist(self, playlist_id: str, music_id: str) -> bool:
+        payload = self._read_music_payload()
+        playlists = self._music_playlist_payloads(payload)
+        removed = False
+        for playlist in playlists:
+            if playlist["playlist_id"] != playlist_id:
+                continue
+            order = _coerce_str_list(playlist.get("order"))
+            playlist["order"] = [item for item in order if item != music_id]
+            playlist["updated_at"] = _utc_now()
+            removed = len(order) != len(playlist["order"])
+            break
+        if not removed:
+            return False
+        payload["playlists"] = playlists
+        if _optional_str(payload.get("current_music_id")) == music_id:
+            payload["current_music_id"] = None
+        if payload.get("current_playlist_id") == playlist_id:
+            active = next((item for item in playlists if item["playlist_id"] == playlist_id), playlists[0])
+            payload["order"] = list(active["order"])
+        if not any(music_id in _coerce_str_list(playlist.get("order")) for playlist in playlists):
+            metadata = self._music_track_metadata_payload(payload)
+            if bool(metadata.get(music_id, {}).get("remote")):
+                metadata.pop(music_id, None)
+                payload["track_metadata"] = metadata
+        self._write_music_payload(payload)
+        return True
+
+    def delete_music_playlist(self, playlist_id: str) -> bool:
+        payload = self._read_music_payload()
+        playlists = self._music_playlist_payloads(payload)
+        if len(playlists) <= 1:
+            return False
+        remaining = [playlist for playlist in playlists if playlist["playlist_id"] != playlist_id]
+        if len(remaining) == len(playlists):
+            return False
+        used_ids = {music_id for playlist in remaining for music_id in _coerce_str_list(playlist.get("order"))}
+        metadata = self._music_track_metadata_payload(payload)
+        for music_id, entry in list(metadata.items()):
+            if bool(entry.get("remote")) and music_id not in used_ids:
+                metadata.pop(music_id, None)
+        payload["track_metadata"] = metadata
+        payload["playlists"] = remaining
+        if payload.get("current_playlist_id") == playlist_id:
+            payload["current_playlist_id"] = remaining[0]["playlist_id"]
+            payload["order"] = list(remaining[0]["order"])
+        self._write_music_payload(payload)
+        return True
 
     def remove_user_music(self, music_path: str | Path) -> bool:
         music = self._resolve_music_candidate(str(music_path))
@@ -1191,6 +1514,16 @@ class LauncherService:
         payload = self._read_music_payload()
         payload["order"] = [item for item in _coerce_str_list(payload.get("order")) if item != reference]
         payload["disabled"] = [item for item in _coerce_str_list(payload.get("disabled")) if item != reference]
+        payload["playlists"] = [
+            {
+                **playlist,
+                "order": [item for item in _coerce_str_list(playlist.get("order")) if item != reference],
+            }
+            for playlist in self._music_playlist_payloads(payload)
+        ]
+        metadata = self._music_track_metadata_payload(payload)
+        metadata.pop(reference, None)
+        payload["track_metadata"] = metadata
         if _optional_str(payload.get("current_music_id")) == reference:
             payload["current_music_id"] = None
         self._write_music_payload(payload)
@@ -2034,16 +2367,71 @@ class LauncherService:
 
     def _music_records_from_disk(self, payload: dict[str, Any]) -> list[MusicRecord]:
         disabled = set(_coerce_str_list(payload.get("disabled")))
+        metadata = self._music_track_metadata_payload(payload)
         records = [*self._default_music_records(), *self._user_music_records()]
         for record in records:
             record.enabled = record.music_id not in disabled
+            self._apply_music_record_metadata(record, metadata.get(record.music_id))
+        records.extend(self._remote_music_records(payload))
         return records
+
+    def _remote_music_records(self, payload: dict[str, Any]) -> list[MusicRecord]:
+        disabled = set(_coerce_str_list(payload.get("disabled")))
+        records: list[MusicRecord] = []
+        for music_id, metadata in self._music_track_metadata_payload(payload).items():
+            if not isinstance(metadata, dict) or not bool(metadata.get("remote")):
+                continue
+            name = _optional_str(metadata.get("name")) or "Untitled Track"
+            source_url = _optional_str(metadata.get("source_url"))
+            stream_url = _optional_str(metadata.get("stream_url"))
+            records.append(
+                MusicRecord(
+                    music_id=music_id,
+                    name=name,
+                    relative_path=source_url or music_id,
+                    absolute_path=stream_url or source_url or "",
+                    is_default=False,
+                    enabled=music_id not in disabled,
+                    source_url=source_url,
+                    stream_url=stream_url,
+                    artwork_url=_optional_str(metadata.get("artwork_url")),
+                    artwork_path=_optional_str(metadata.get("artwork_path")),
+                    date_added=_optional_str(metadata.get("date_added")),
+                    duration_ms=_coerce_non_negative_int(metadata.get("duration_ms")),
+                    platform=_optional_str(metadata.get("platform")) or "stream",
+                    artist=_optional_str(metadata.get("artist")),
+                    album=_optional_str(metadata.get("album")),
+                    error=_optional_str(metadata.get("error")),
+                )
+            )
+        return records
+
+    def _apply_music_record_metadata(self, record: MusicRecord, metadata: Any) -> None:
+        if not isinstance(metadata, dict):
+            if record.date_added is None:
+                record.date_added = _file_modified_iso(Path(record.absolute_path))
+            if record.duration_ms <= 0:
+                record.duration_ms = _probe_audio_duration_ms(Path(record.absolute_path))
+            return
+
+        record.name = _optional_str(metadata.get("name")) or record.name
+        record.source_url = _optional_str(metadata.get("source_url"))
+        record.stream_url = _optional_str(metadata.get("stream_url"))
+        record.artwork_url = _optional_str(metadata.get("artwork_url"))
+        record.artwork_path = _optional_str(metadata.get("artwork_path"))
+        record.date_added = _optional_str(metadata.get("date_added")) or _file_modified_iso(Path(record.absolute_path))
+        record.duration_ms = _coerce_non_negative_int(metadata.get("duration_ms")) or _probe_audio_duration_ms(Path(record.absolute_path))
+        record.platform = _optional_str(metadata.get("platform")) or record.platform
+        record.artist = _optional_str(metadata.get("artist"))
+        record.album = _optional_str(metadata.get("album"))
+        record.error = _optional_str(metadata.get("error"))
 
     def _ordered_music_records(
         self,
         payload: dict[str, Any],
         *,
         preferred_order: list[str] | None = None,
+        include_unordered: bool = True,
     ) -> list[MusicRecord]:
         records = self._music_records_from_disk(payload)
         records_by_id = {record.music_id: record for record in records}
@@ -2058,10 +2446,11 @@ class LauncherService:
             ordered.append(record)
             seen.add(music_id)
 
-        for record in records:
-            if record.music_id not in seen:
-                ordered.append(record)
-                seen.add(record.music_id)
+        if include_unordered:
+            for record in records:
+                if record.music_id not in seen:
+                    ordered.append(record)
+                    seen.add(record.music_id)
 
         return [record for record in ordered if record.enabled] + [record for record in ordered if not record.enabled]
 
@@ -2099,6 +2488,14 @@ class LauncherService:
         self._copy_tree_if_target_empty(self.legacy_instances_root, self.instances_root)
         self._copy_tree_if_target_empty(self.legacy_user_icons_root, self.user_icons_root)
 
+    def _migrate_music_settings_to_data_root(self) -> None:
+        if self.music_settings_file.is_file() or not self.legacy_music_settings_file.is_file():
+            return
+        try:
+            shutil.copy2(self.legacy_music_settings_file, self.music_settings_file)
+        except OSError:
+            return
+
     def _ensure_account_store(self) -> None:
         if self.accounts_file.is_file():
             payload = self._read_accounts_payload()
@@ -2122,6 +2519,7 @@ class LauncherService:
 
         payload = self._normalize_music_payload(loaded, self._default_music_payload())
         payload = self._merge_new_default_music(payload, loaded)
+        payload = self._merge_appdata_music_folder(payload)
         self._write_music_payload(payload)
 
     def _read_background_payload(self) -> dict[str, Any]:
@@ -2156,15 +2554,21 @@ class LauncherService:
         return {
             "order": [],
             "disabled": [],
+            "playlists": [],
+            "track_metadata": {},
             "volume": 75,
             "last_nonzero_volume": 75,
             "muted": False,
             "loop": True,
+            "shuffle": False,
+            "paused": False,
+            "schema_version": 3,
             "run_while_launcher_closed": False,
             "resume_checkpoint": True,
             "checkpoint_music_id": None,
             "checkpoint_position_ms": 0,
             "current_music_id": None,
+            "current_playlist_id": "default",
         }
 
     def _default_music_payload(self) -> dict[str, Any]:
@@ -2192,6 +2596,13 @@ class LauncherService:
             else list(default_payload["disabled"])
         )
 
+        loaded_metadata = loaded.get("track_metadata", UNSET)
+        payload["track_metadata"] = (
+            _coerce_music_track_metadata(loaded_metadata)
+            if isinstance(loaded_metadata, dict)
+            else dict(default_payload.get("track_metadata", {}))
+        )
+        payload["playlists"] = self._normalize_music_playlists(loaded, default_payload, payload)
         payload["volume"] = _coerce_volume_percent(loaded.get("volume", default_payload["volume"]), default_payload["volume"])
         payload["last_nonzero_volume"] = _coerce_volume_percent(
             loaded.get("last_nonzero_volume", payload["volume"] or default_payload["last_nonzero_volume"]),
@@ -2199,6 +2610,9 @@ class LauncherService:
         ) or default_payload["last_nonzero_volume"]
         payload["muted"] = bool(loaded.get("muted", default_payload["muted"]))
         payload["loop"] = bool(loaded["loop"]) if "loop" in loaded else bool(default_payload["loop"])
+        payload["shuffle"] = bool(loaded.get("shuffle", default_payload.get("shuffle", False)))
+        payload["paused"] = bool(loaded.get("paused", default_payload.get("paused", False)))
+        payload["schema_version"] = _coerce_non_negative_int(loaded.get("schema_version"), 0)
         payload["run_while_launcher_closed"] = bool(
             loaded.get("run_while_launcher_closed", default_payload["run_while_launcher_closed"])
         )
@@ -2218,6 +2632,9 @@ class LauncherService:
             if "current_music_id" in loaded
             else _optional_str(default_payload.get("current_music_id"))
         )
+        requested_playlist_id = _optional_str(loaded.get("current_playlist_id")) or _optional_str(default_payload.get("current_playlist_id"))
+        available_playlist_ids = {str(playlist["playlist_id"]) for playlist in payload["playlists"]}
+        payload["current_playlist_id"] = requested_playlist_id if requested_playlist_id in available_playlist_ids else str(payload["playlists"][0]["playlist_id"])
         return payload
 
     def _merge_new_default_music(self, payload: dict[str, Any], loaded: dict[str, Any]) -> dict[str, Any]:
@@ -2240,7 +2657,148 @@ class LauncherService:
         payload["disabled"] = [music_id for music_id in order if music_id in disabled] + [
             music_id for music_id in disabled if music_id not in order
         ]
+        playlists = self._music_playlist_payloads(payload)
+        for playlist in playlists:
+            if playlist["playlist_id"] != "default":
+                continue
+            playlist_order = _coerce_str_list(playlist.get("order"))
+            for music_id in default_order:
+                if music_id not in playlist_order:
+                    playlist_order.append(music_id)
+            playlist["order"] = playlist_order
+            break
+        payload["playlists"] = playlists
         return payload
+
+    def _merge_appdata_music_folder(self, payload: dict[str, Any]) -> dict[str, Any]:
+        user_music_ids = [record.music_id for record in self._user_music_records()]
+        if not user_music_ids:
+            return payload
+
+        payload = dict(payload)
+        playlists = self._music_playlist_payloads(payload)
+        target = next((playlist for playlist in playlists if playlist["playlist_id"] == "default"), playlists[0])
+        order = _coerce_str_list(target.get("order"))
+        changed = False
+        for music_id in user_music_ids:
+            if music_id not in order:
+                order.append(music_id)
+                changed = True
+        if not changed:
+            return payload
+
+        target["order"] = order
+        target["updated_at"] = _utc_now()
+        payload["playlists"] = playlists
+        if payload.get("current_playlist_id") == target["playlist_id"]:
+            payload["order"] = list(order)
+        return payload
+
+    def _normalize_music_playlists(
+        self,
+        loaded: dict[str, Any],
+        default_payload: dict[str, Any],
+        normalized_payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        loaded_playlists = loaded.get("playlists")
+        schema_version = _coerce_non_negative_int(loaded.get("schema_version"), 0)
+        if schema_version >= 3 and isinstance(loaded_playlists, list) and loaded_playlists:
+            playlists = []
+            seen: set[str] = set()
+            for entry in loaded_playlists:
+                if not isinstance(entry, dict):
+                    continue
+                playlist_id = _optional_str(entry.get("playlist_id")) or f"playlist-{uuid.uuid4().hex[:12]}"
+                if playlist_id in seen:
+                    continue
+                seen.add(playlist_id)
+                playlists.append(
+                    {
+                        "playlist_id": playlist_id,
+                        "name": _optional_str(entry.get("name")) or "New Playlist",
+                        "icon_path": _optional_str(entry.get("icon_path")),
+                        "order": _coerce_str_list(entry.get("order")),
+                        "created_at": _optional_str(entry.get("created_at")),
+                        "updated_at": _optional_str(entry.get("updated_at")),
+                    }
+                )
+            if playlists:
+                return playlists
+
+        default_playlists = default_payload.get("playlists")
+        if isinstance(default_playlists, list) and default_playlists:
+            return self._music_playlist_payloads(default_payload)
+
+        order = _coerce_str_list(default_payload.get("order")) or _coerce_str_list(loaded.get("order")) or list(normalized_payload.get("order", []))
+        now = _utc_now()
+        return [
+            {
+                "playlist_id": "default",
+                "name": "Minecraft Music",
+                "icon_path": self._random_playlist_icon_reference("default"),
+                "order": order,
+                "created_at": now,
+                "updated_at": now,
+            }
+        ]
+
+    def _music_playlist_payloads(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        entries = payload.get("playlists")
+        playlists: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                playlist_id = _optional_str(entry.get("playlist_id")) or f"playlist-{uuid.uuid4().hex[:12]}"
+                if playlist_id in seen:
+                    continue
+                seen.add(playlist_id)
+                playlists.append(
+                    {
+                        "playlist_id": playlist_id,
+                "name": _optional_str(entry.get("name")) or "New Playlist",
+                "icon_path": _optional_str(entry.get("icon_path")) or self._random_playlist_icon_reference(playlist_id),
+                        "order": _coerce_str_list(entry.get("order")),
+                        "created_at": _optional_str(entry.get("created_at")),
+                        "updated_at": _optional_str(entry.get("updated_at")),
+                    }
+                )
+
+        if playlists:
+            return playlists
+
+        return [
+            {
+                "playlist_id": "default",
+                "name": "Minecraft Music",
+                "icon_path": self._random_playlist_icon_reference("default"),
+                "order": _coerce_str_list(payload.get("order")),
+                "created_at": _utc_now(),
+                "updated_at": _utc_now(),
+            }
+        ]
+
+    def _active_music_playlist_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        playlists = self._music_playlist_payloads(payload)
+        active_id = _optional_str(payload.get("current_playlist_id"))
+        for playlist in playlists:
+            if playlist["playlist_id"] == active_id:
+                return playlist
+        return playlists[0]
+
+    def _music_track_metadata_payload(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return _coerce_music_track_metadata(payload.get("track_metadata"))
+
+    def _validated_music_order(self, payload: dict[str, Any], requested_order: list[str]) -> list[str]:
+        available = {record.music_id for record in self._music_records_from_disk(payload)}
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for music_id in _coerce_str_list(requested_order):
+            if music_id in available and music_id not in seen:
+                ordered.append(music_id)
+                seen.add(music_id)
+        return ordered
 
     def _read_music_payload(self) -> dict[str, Any]:
         default_payload = self._default_music_payload()
@@ -2252,25 +2810,56 @@ class LauncherService:
             return default_payload
         if not isinstance(loaded, dict):
             return default_payload
-        return self._normalize_music_payload(loaded, default_payload)
+        return self._merge_appdata_music_folder(self._normalize_music_payload(loaded, default_payload))
 
     def _write_music_payload(self, payload: dict[str, Any]) -> None:
         normalized: dict[str, Any] = {
             "order": _coerce_str_list(payload.get("order")),
             "disabled": _coerce_str_list(payload.get("disabled")),
+            "playlists": self._music_playlist_payloads(payload),
+            "track_metadata": self._music_track_metadata_payload(payload),
             "volume": _coerce_volume_percent(payload.get("volume"), 75),
             "last_nonzero_volume": _coerce_volume_percent(payload.get("last_nonzero_volume"), 75) or 75,
             "muted": bool(payload.get("muted", False)),
             "loop": bool(payload.get("loop", True)),
+            "shuffle": bool(payload.get("shuffle", False)),
+            "paused": bool(payload.get("paused", False)),
+            "schema_version": 3,
             "run_while_launcher_closed": bool(payload.get("run_while_launcher_closed", False)),
             "resume_checkpoint": bool(payload.get("resume_checkpoint", True)),
             "checkpoint_music_id": _optional_str(payload.get("checkpoint_music_id")),
             "checkpoint_position_ms": _coerce_non_negative_int(payload.get("checkpoint_position_ms")),
             "current_music_id": _optional_str(payload.get("current_music_id")),
+            "current_playlist_id": _optional_str(payload.get("current_playlist_id")) or "default",
         }
+        available_playlist_ids = {str(playlist["playlist_id"]) for playlist in normalized["playlists"]}
+        if normalized["current_playlist_id"] not in available_playlist_ids:
+            normalized["current_playlist_id"] = str(normalized["playlists"][0]["playlist_id"])
+        active = next(
+            (playlist for playlist in normalized["playlists"] if playlist["playlist_id"] == normalized["current_playlist_id"]),
+            normalized["playlists"][0],
+        )
+        normalized["order"] = list(active["order"])
         if normalized["volume"] > 0:
             normalized["last_nonzero_volume"] = normalized["volume"]
+        normalized = self._merge_appdata_music_folder(normalized)
         self.music_settings_file.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+
+    def _random_playlist_icon_reference(self, seed: str | None = None) -> str | None:
+        folder = self.assets_root / "Playlist-Default-Icons"
+        if not folder.is_dir():
+            return None
+        icons = [
+            self._project_relative(path)
+            for path in sorted(folder.iterdir(), key=lambda item: item.name.lower())
+            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+        ]
+        if not icons:
+            return None
+        if seed:
+            index = int(hashlib.sha1(seed.encode("utf-8")).hexdigest(), 16) % len(icons)
+            return icons[index]
+        return icons[uuid.uuid4().int % len(icons)]
 
     def _read_runtime_session_payload(self, path: Path) -> dict[str, Any]:
         if not path.is_file():
@@ -4008,6 +4597,29 @@ def _format_file_timestamp(path: Path) -> str:
     return modified.strftime("%m/%d/%y %I:%M %p")
 
 
+def _file_modified_iso(path: Path) -> str | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        return None
+
+
+def _probe_audio_duration_ms(path: Path) -> int:
+    if MutagenFile is None:
+        return 0
+    try:
+        audio = MutagenFile(str(path))
+    except Exception:  # noqa: BLE001
+        return 0
+    if audio is None or getattr(audio, "info", None) is None:
+        return 0
+    length = getattr(audio.info, "length", 0) or 0
+    try:
+        return max(0, int(float(length) * 1000))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _format_screenshot_label(path: Path) -> str:
     try:
         modified = datetime.fromtimestamp(path.stat().st_mtime)
@@ -4282,6 +4894,31 @@ def _coerce_str_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if _optional_str(item)]
+
+
+def _coerce_music_track_metadata(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_metadata in value.items():
+        music_id = _optional_str(raw_key)
+        if not music_id or not isinstance(raw_metadata, dict):
+            continue
+        result[music_id] = {
+            "name": _optional_str(raw_metadata.get("name")),
+            "source_url": _optional_str(raw_metadata.get("source_url")),
+            "stream_url": _optional_str(raw_metadata.get("stream_url")),
+            "artwork_url": _optional_str(raw_metadata.get("artwork_url")),
+            "artwork_path": _optional_str(raw_metadata.get("artwork_path")),
+            "date_added": _optional_str(raw_metadata.get("date_added")),
+            "duration_ms": _coerce_non_negative_int(raw_metadata.get("duration_ms")),
+            "platform": _optional_str(raw_metadata.get("platform")) or "local",
+            "artist": _optional_str(raw_metadata.get("artist")),
+            "album": _optional_str(raw_metadata.get("album")),
+            "error": _optional_str(raw_metadata.get("error")),
+            "remote": bool(raw_metadata.get("remote", False)),
+        }
+    return result
 
 
 def _optional_str(value: Any) -> str | None:
