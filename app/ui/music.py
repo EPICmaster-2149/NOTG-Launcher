@@ -624,13 +624,6 @@ class MusicController(QObject):
         if track is None or not track.enabled:
             self.play_playlist()
             return
-        if track.is_stream and not track.stream_url:
-            self.play_track(track.music_id)
-            return
-        source = QUrl(track.stream_url) if track.is_stream else QUrl.fromLocalFile(track.absolute_path)
-        if self._player is not None and self._player.source() != source:
-            self.play_track(track.music_id)
-            return
         self._player.play()
 
     def pause(self) -> None:
