@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRectF, QSize, Qt, QTimer, Signal, QVariantAnimation
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QRadialGradient
+from PySide6.QtGui import QColor, QConicalGradient, QFont, QPainter, QPen, QPixmap, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
@@ -90,13 +90,12 @@ class ToggleSwitch(QAbstractButton):
         self._progress = 1.0 if checked else 0.0
         self._animation = QVariantAnimation(
             self,
-            duration=160,
+            duration=180,
             easingCurve=QEasingCurve.OutCubic,
             valueChanged=self._set_progress,
         )
         self.toggled.connect(self._animate_toggle)
         self.setChecked(checked)
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
     def sizeHint(self) -> QSize:
         return QSize(56, 30)
@@ -129,6 +128,7 @@ class ToggleSwitch(QAbstractButton):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+
         rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
         painter.setPen(QPen(track_border, 1.1))
         painter.setBrush(track_fill)
@@ -148,14 +148,12 @@ class SettingsNavButton(QAbstractButton):
         super().__init__(parent)
         self._icon_kind = icon_kind
         self._compact = False
-        self._hover = 0.0
         self._active = 0.0
-
+        self._hover = 0.0
         self.setText(text)
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
         self._hover_animation = QVariantAnimation(self, duration=150, easingCurve=QEasingCurve.OutCubic)
         self._hover_animation.valueChanged.connect(lambda value: self._set_value("_hover", value))
         self._active_animation = QVariantAnimation(self, duration=190, easingCurve=QEasingCurve.OutCubic)
@@ -164,11 +162,8 @@ class SettingsNavButton(QAbstractButton):
     def sizeHint(self) -> QSize:
         return QSize(52 if self._compact else 196, 48)
 
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
     def set_compact(self, compact: bool) -> None:
-        self._compact = bool(compact)
+        self._compact = compact
         self.updateGeometry()
         self.update()
 
@@ -307,73 +302,61 @@ class ThemeColorWheel(QWidget):
         painter.drawEllipse(QRectF(center.x() - side * 0.6, center.y() - side * 0.22, side * 1.2, side * 0.7))
         painter.restore()
 
-        # Wheel ring: draw arc segments to ensure pin math matches rendering
-        painter.setOpacity(0.88 if self._adaptive else 1.0)
-        steps = 120
-        adj = rect.adjusted(ring_width / 2, ring_width / 2, -ring_width / 2, -ring_width / 2)
-        painter.setBrush(Qt.NoBrush)
-        span = 360.0 / steps
-        for i in range(steps):
-            h = i / steps
-            col = QColor.fromHsvF(h if h < 1.0 else 0.0, 0.88, 1.0)
+        # Wheel ring (conical gradient) - keep efficient step count but connected palette
+        painter.setOpacity(0.68 if self._adaptive else 1.0)
+        gradient = QConicalGradient(center, -90)
+        for step in range(13):
+            hue = step / 12
+            display_hue = (1.0 - hue) % 1.0
+            color = QColor.fromHsvF(display_hue if display_hue < 1.0 else 0.0, 0.88, 1.0)
             if self._adaptive:
-                col = blend_colors(col, QColor("#d7e7ff"), 0.28)
-            pen_seg = QPen(col, ring_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen_seg)
-            start_deg = (h * 360.0) - 90.0
-            painter.drawArc(adj, int(start_deg * 16), int(span * 16))
+                color = blend_colors(color, QColor("#d7e7ff"), 0.38)
+            gradient.setColorAt(step / 12, color)
 
-        # Center preview (simplified, non-metallic)
+        pen = QPen()
+        pen.setWidthF(ring_width)
+        pen.setBrush(gradient)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(rect.adjusted(ring_width / 2, ring_width / 2, -ring_width / 2, -ring_width / 2))
+
         painter.setOpacity(1.0)
         active_color = current_theme_accent(self) if self._adaptive else self._color
+        pulse_alpha = 70 + int(45 * math.sin(self._pulse * math.tau))
+        glow = QColor(active_color)
+        glow.setAlpha(pulse_alpha if self._adaptive else 82)
         preview_radius = side * 0.255
         preview = QRectF(center.x() - preview_radius, center.y() - preview_radius, preview_radius * 2, preview_radius * 2)
-
-        core_grad = QRadialGradient(center.x(), center.y(), preview_radius)
-        inner = blend_colors(QColor("#ffffff"), QColor(active_color), 0.18)
-        inner.setAlpha(230)
-        mid = QColor(active_color)
-        mid.setAlpha(210)
-        outer = QColor(active_color)
-        outer.setAlpha(36)
-        core_grad.setColorAt(0.0, inner)
-        core_grad.setColorAt(0.6, mid)
-        core_grad.setColorAt(1.0, outer)
-
-        painter.setPen(QPen(blend_colors(QColor("#000000"), QColor(active_color), 0.12), 1.0))
-        painter.setBrush(core_grad)
+        painter.setPen(QPen(glow, 2.0))
+        fill = blend_colors(QColor("#07101d"), QColor(active_color), 0.34 if self._adaptive else 0.48)
+        fill.setAlpha(238)
+        painter.setBrush(fill)
         painter.drawEllipse(preview)
 
-        # Show hex and friendly name inside the preview
         font = QFont(self.font())
-        font.setPointSize(9)
+        font.setPointSize(10)
+        font.setWeight(QFont.Bold)
+        painter.setFont(font)
+        painter.setPen(QColor("#f7fbff"))
+        painter.drawText(preview.adjusted(0, -10, 0, 0), Qt.AlignCenter, active_color.name().upper())
+        font.setPointSize(8)
         font.setWeight(QFont.DemiBold)
         painter.setFont(font)
-        painter.setPen(QColor(247, 251, 255, 230))
-        painter.drawText(preview.adjusted(0, -8, 0, 0), Qt.AlignCenter, active_color.name().upper())
-        font.setPointSize(8)
-        font.setWeight(QFont.Normal)
-        painter.setFont(font)
-        painter.setPen(QColor(210, 225, 245, 160))
-        painter.drawText(preview.adjusted(0, 14, 0, 0), Qt.AlignCenter, _color_name(active_color))
+        painter.setPen(QColor(210, 225, 245, 180))
+        painter.drawText(preview.adjusted(0, 18, 0, 0), Qt.AlignCenter, _color_name(active_color))
 
         if self._adaptive:
             return
 
-        # Pin: simple filled circle with subtle glow (no metallic specular)
         pin = self._pin_position(rect, ring_width)
         pin_radius = 7.5 if self._hover_pin else 6.0
-
-        # subtle outer halo
-        halo = QColor(active_color)
-        halo.setAlpha(80)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(halo)
-        painter.drawEllipse(QRectF(pin.x() - pin_radius * 1.8, pin.y() - pin_radius * 1.8, pin_radius * 3.6, pin_radius * 3.6))
-
-        # pin body
+        pin_glow = QColor(self._color)
+        pin_glow.setAlpha(110)
+        painter.setPen(QPen(pin_glow, 5.0))
+        painter.setBrush(QColor("#f8fbff"))
+        painter.drawEllipse(QRectF(pin.x() - pin_radius, pin.y() - pin_radius, pin_radius * 2, pin_radius * 2))
         painter.setPen(QPen(QColor("#ffffff"), 1.0))
-        painter.setBrush(QColor(active_color))
         painter.drawEllipse(QRectF(pin.x() - pin_radius, pin.y() - pin_radius, pin_radius * 2, pin_radius * 2))
 
     def mousePressEvent(self, event) -> None:
@@ -399,7 +382,7 @@ class ThemeColorWheel(QWidget):
 
     def _set_color_from_point(self, point: QPointF) -> None:
         center = QPointF(self.width() / 2, self.height() / 2)
-        angle = math.degrees(math.atan2(center.y() - point.y(), point.x() - center.x()))
+        angle = math.degrees(math.atan2(point.y() - center.y(), point.x() - center.x()))
         hue = ((angle + 90.0) % 360.0) / 360.0
         self._color = QColor.fromHsvF(hue, 0.82, 1.0)
         self.color_changed.emit(self._color.name())
@@ -418,7 +401,7 @@ class ThemeColorWheel(QWidget):
         angle = math.radians((hue * 360.0) - 90.0)
         radius = (rect.width() - ring_width) / 2
         center = rect.center()
-        return QPointF(center.x() + math.cos(angle) * radius, center.y() - math.sin(angle) * radius)
+        return QPointF(center.x() + math.cos(angle) * radius, center.y() + math.sin(angle) * radius)
 
     def _set_pulse(self, value: float) -> None:
         self._pulse = float(value)
