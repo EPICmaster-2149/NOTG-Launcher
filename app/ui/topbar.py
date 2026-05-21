@@ -111,6 +111,10 @@ class ModernButton(QPushButton):
         self.updateGeometry()
         self.update()
 
+    def set_role(self, role: str) -> None:
+        self._role = role
+        self.update()
+
     def refresh_theme(self) -> None:
         self.update()
 

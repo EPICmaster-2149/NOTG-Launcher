@@ -9,11 +9,7 @@
     "assets/default-musics/Luminary.mp3",
     "assets/default-musics/Renoir Boss Theme Clair Obscur Expedition.mp3"
   ],
-  "disabled": [
-    "assets/default-musics/SOLARIS _ Epic Violin Song.mp3",
-    "assets/default-musics/Luminary.mp3",
-    "assets/default-musics/Renoir Boss Theme Clair Obscur Expedition.mp3"
-  ],
+  "disabled": [],
   "volume": 75,
   "last_nonzero_volume": 75,
   "muted": false,

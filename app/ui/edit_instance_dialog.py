@@ -158,6 +158,7 @@ class EditInstanceDialog(QDialog):
         "Minecraft Log",
         "Versions",
         "Mods",
+        "Install Mods",
         "Screenshots",
         "Rich Presence",
         "Advanced",
@@ -199,6 +200,7 @@ class EditInstanceDialog(QDialog):
         self._mods_loaded = False
         self._screenshots_loaded = False
         self._advanced_loaded = False
+        self._install_mods_dialog: QDialog | None = None
 
         self.setObjectName("editInstanceDialog")
         self.setWindowTitle(f"Edit {instance.name}")
@@ -235,6 +237,9 @@ class EditInstanceDialog(QDialog):
             if worker.isRunning():
                 worker.requestInterruption()
                 worker.wait()
+        if self._install_mods_dialog is not None:
+            self._install_mods_dialog.close()
+            self._install_mods_dialog = None
         super().closeEvent(event)
 
     def accept(self) -> None:
@@ -337,6 +342,7 @@ class EditInstanceDialog(QDialog):
         self.page_stack.addWidget(self._build_log_page())
         self.page_stack.addWidget(self._build_versions_page())
         self.page_stack.addWidget(self._build_mods_page())
+        self.page_stack.addWidget(self._build_install_mods_page())
         self.page_stack.addWidget(self._build_screenshots_page())
         self.page_stack.addWidget(self._build_presence_page())
         self.page_stack.addWidget(self._build_advanced_page())
@@ -525,6 +531,48 @@ class EditInstanceDialog(QDialog):
         self.mods_search = AccentLineEdit("Search mods")
         self.mods_search.textChanged.connect(self._apply_mod_search)
         layout.addWidget(self.mods_search)
+        return page
+
+    def _build_install_mods_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        surface = QFrame()
+        surface.setObjectName("editorSelectionSurface")
+        surface_layout = QVBoxLayout(surface)
+        surface_layout.setContentsMargins(14, 14, 14, 14)
+        surface_layout.setSpacing(10)
+
+        title = QLabel("Install Mods")
+        title.setObjectName("editorSectionTitle")
+        surface_layout.addWidget(title)
+
+        status = QLabel(
+            f"Browse compatible content for Minecraft {self.instance.vanilla_version} and {self.instance.loader_name}."
+        )
+        status.setObjectName("editorStatusText")
+        status.setWordWrap(True)
+        surface_layout.addWidget(status)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.addStretch()
+        self.open_install_mods_button = ModernButton(
+            "Open Browser",
+            role="accent",
+            height=38,
+            icon_size=0,
+            minimum_width=132,
+            horizontal_padding=24,
+        )
+        self.open_install_mods_button.clicked.connect(self._open_install_mods_dialog)
+        button_row.addWidget(self.open_install_mods_button)
+        surface_layout.addLayout(button_row)
+
+        layout.addWidget(surface)
+        layout.addStretch()
         return page
 
     def _build_screenshots_page(self) -> QWidget:
@@ -776,6 +824,52 @@ class EditInstanceDialog(QDialog):
         ram_actions.addWidget(self.ram_confirm_button)
         ram_actions.addStretch()
 
+        java_divider = QFrame()
+        java_divider.setObjectName("editorSectionDivider")
+        advanced_layout.addWidget(java_divider)
+
+        java_title = QLabel("Java & JVM")
+        java_title.setObjectName("editorSectionTitle")
+        advanced_layout.addWidget(java_title)
+
+        jvm_label = QLabel("Custom JVM Launch Command")
+        jvm_label.setObjectName("editorFilterTitle")
+        advanced_layout.addWidget(jvm_label)
+
+        self.jvm_args_input = QPlainTextEdit()
+        self.jvm_args_input.setObjectName("instanceLogOutput")
+        self.jvm_args_input.setPlaceholderText("-XX:+UseG1GC -XX:+UnlockExperimentalVMOptions")
+        self.jvm_args_input.setPlainText(self.instance.custom_jvm_args or "")
+        self.jvm_args_input.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.jvm_args_input.setMinimumHeight(76)
+        self.jvm_args_input.setMaximumHeight(108)
+        advanced_layout.addWidget(self.jvm_args_input)
+
+        java_row = QHBoxLayout()
+        java_row.setContentsMargins(0, 0, 0, 0)
+        java_row.setSpacing(12)
+        advanced_layout.addLayout(java_row)
+
+        java_label = QLabel("Java Version:")
+        java_label.setObjectName("editorFilterTitle")
+        java_row.addWidget(java_label)
+
+        self.java_runtime_combo = SearchableComboBox("Automatic")
+        java_row.addWidget(self.java_runtime_combo, 1)
+
+        self.java_refresh_button = ModernButton("Refresh", role="sidebar", height=36, icon_size=0, radius=10, minimum_width=104, horizontal_padding=22)
+        self.java_refresh_button.clicked.connect(self._reload_java_runtime_options)
+        java_row.addWidget(self.java_refresh_button)
+
+        self.java_save_button = ModernButton("Save Java", role="accent", height=36, icon_size=0, radius=10, minimum_width=112, horizontal_padding=22)
+        self.java_save_button.clicked.connect(self._save_java_settings)
+        java_row.addWidget(self.java_save_button)
+
+        self.java_status_label = QLabel("")
+        self.java_status_label.setObjectName("editorStatusText")
+        self.java_status_label.setWordWrap(True)
+        advanced_layout.addWidget(self.java_status_label)
+
         layout.addWidget(advanced_surface, 1)
         return page
 
@@ -1021,6 +1115,7 @@ class EditInstanceDialog(QDialog):
             self.remove_mod_button,
             self.enable_mod_button,
             self.disable_mod_button,
+            self.open_install_mods_button,
             self.view_mods_folder_button,
             self.view_configs_button,
             self.copy_image_button,
@@ -1034,10 +1129,14 @@ class EditInstanceDialog(QDialog):
             self.copy_execute_button,
             self.ram_revert_button,
             self.ram_confirm_button,
+            self.java_refresh_button,
+            self.java_save_button,
         ):
             button.set_metrics(height=scaled_px(self, button.minimumHeight(), minimum=34, maximum=max(38, button.minimumHeight() + 1)), icon_size=0)
 
         self.ram_display.setMinimumWidth(scaled_px(self, 170, minimum=148, maximum=176))
+        self.jvm_args_input.setMinimumHeight(scaled_px(self, 76, minimum=68, maximum=92))
+        self.jvm_args_input.setMaximumHeight(scaled_px(self, 108, minimum=92, maximum=124))
         self.version_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 34, minimum=30, maximum=36))
         self.loader_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 34, minimum=30, maximum=36))
         self.mods_table.verticalHeader().setDefaultSectionSize(scaled_px(self, 36, minimum=32, maximum=40))
@@ -1070,6 +1169,8 @@ class EditInstanceDialog(QDialog):
             self._thumbnail_worker.requestInterruption()
         if page_name == "Minecraft Log":
             self._poll_log_output()
+        elif page_name == "Install Mods":
+            self._open_install_mods_dialog()
 
     def _sync_page_stack_height(self) -> None:
         current_page = self.page_stack.currentWidget()
@@ -1079,6 +1180,22 @@ class EditInstanceDialog(QDialog):
         self.page_stack.setMinimumHeight(max(0, current_page.sizeHint().height()))
         self.page_stack.updateGeometry()
         self.page_scroll_container.adjustSize()
+
+    def _open_install_mods_dialog(self) -> None:
+        if self._install_mods_dialog is not None and self._install_mods_dialog.isVisible():
+            self._install_mods_dialog.raise_()
+            self._install_mods_dialog.activateWindow()
+            return
+
+        from ui.install_mods_dialog import InstallModsDialog
+
+        dialog = InstallModsDialog(self.service, self.instance, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.finished.connect(lambda *_: setattr(self, "_install_mods_dialog", None))
+        self._install_mods_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _resolved_rich_presence_state(self) -> str:
         text = self.rich_presence_state_input.text().strip()
@@ -1178,6 +1295,7 @@ class EditInstanceDialog(QDialog):
         self._set_ram_value(instance.memory_mb)
         if self._advanced_loaded:
             self._reload_copy_source_instances()
+            self._sync_java_settings_fields()
         if self._mods_loaded:
             self._reload_mods()
         if self._screenshots_loaded:
@@ -1228,6 +1346,7 @@ class EditInstanceDialog(QDialog):
         if page_name == "Advanced" and not self._advanced_loaded:
             self._advanced_loaded = True
             self._reload_copy_source_instances()
+            self._reload_java_runtime_options()
 
     def _sync_log_polling_state(self) -> None:
         if not hasattr(self, "log_timer"):
@@ -2042,6 +2161,83 @@ class EditInstanceDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Memory", str(exc))
             self._set_ram_value(self.instance.memory_mb)
+
+    def _reload_java_runtime_options(self) -> None:
+        if not hasattr(self, "java_runtime_combo"):
+            return
+
+        current_path = self.instance.java_executable or None
+        self.java_runtime_combo.blockSignals(True)
+        self.java_runtime_combo.clear()
+        self.java_runtime_combo.addItem("Automatic", None)
+        selected_index = 0
+        status_text = "Automatic selects the newest compatible Java runtime found for this instance."
+        try:
+            rows = self.service.list_java_runtime_options(self.instance)
+        except Exception as exc:  # noqa: BLE001
+            rows = []
+            status_text = f"Could not detect Java runtimes: {exc}"
+
+        for row in rows:
+            executable_path = row.get("executable_path")
+            if executable_path is None:
+                if row.get("label"):
+                    self.java_runtime_combo.setItemText(0, str(row["label"]))
+                continue
+            label = str(row.get("label") or executable_path)
+            if not row.get("compatible", True):
+                label = f"{label} (incompatible)"
+            self.java_runtime_combo.addItem(label, str(executable_path))
+            if current_path and str(executable_path) == current_path:
+                selected_index = self.java_runtime_combo.count() - 1
+
+        if current_path and selected_index == 0:
+            self.java_runtime_combo.addItem(f"Selected runtime not found - {current_path}", current_path)
+            selected_index = self.java_runtime_combo.count() - 1
+            status_text = "The selected Java path could not be detected. Refresh after installing Java or switch back to Automatic."
+
+        self.java_runtime_combo.setCurrentIndex(selected_index)
+        self.java_runtime_combo.blockSignals(False)
+        self.java_status_label.setText(status_text)
+
+    def _sync_java_settings_fields(self) -> None:
+        if not hasattr(self, "jvm_args_input"):
+            return
+        self.jvm_args_input.blockSignals(True)
+        self.jvm_args_input.setPlainText(self.instance.custom_jvm_args or "")
+        self.jvm_args_input.blockSignals(False)
+        self._reload_java_runtime_options()
+
+    def _save_java_settings(self) -> None:
+        custom_jvm_args = self.jvm_args_input.toPlainText().strip() or None
+        java_executable = self.java_runtime_combo.selected_value()
+        if java_executable:
+            try:
+                runtime_rows = self.service.list_java_runtime_options(self.instance)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Java Version", str(exc))
+                return
+            for row in runtime_rows:
+                if row.get("executable_path") == java_executable and not row.get("compatible", True):
+                    QMessageBox.warning(
+                        self,
+                        "Java Version",
+                        "The selected Java runtime is not compatible with this Minecraft version.",
+                    )
+                    return
+        try:
+            self._apply_instance(
+                self.service.set_instance_java_settings(
+                    self.instance,
+                    custom_jvm_args=custom_jvm_args,
+                    java_executable=java_executable,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Java Version", str(exc))
+            self._sync_java_settings_fields()
+            return
+        self.java_status_label.setText("Java settings saved for this instance.")
 
     def _update_ram_slider_range(self) -> None:
         maximum_mb = self._ram_slider_limit_mb()

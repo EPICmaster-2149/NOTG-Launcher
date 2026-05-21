@@ -5,10 +5,12 @@ import gzip
 import hashlib
 import ipaddress
 import json
+import logging
 import math
 import os
 import re
 import shutil
+import shlex
 import socket
 import subprocess
 import sys
@@ -24,6 +26,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 import psutil
+import requests
 from platformdirs import PlatformDirs
 
 try:
@@ -36,6 +39,7 @@ try:
 except ImportError:  # pragma: no cover - defensive for isolated imports
     APP_VERSION = "0.0.0"
 
+logger = logging.getLogger(__name__)
 
 EXPERIMENT_TYPES = {
     "experiment",
@@ -116,12 +120,41 @@ APP_NAME = "NOTG Launcher"
 USER_ICON_PREFIX = "user-icons"
 USER_BACKGROUND_PREFIX = "user-backgrounds"
 USER_MUSIC_PREFIX = "user-music"
+APPDATA_MUSIC_PLAYLIST_ID = "appdata-music"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".avi", ".mkv", ".webm", ".wmv"}
 BACKGROUND_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES
 MUSIC_SUFFIXES = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".wma"}
+REMOTE_CONTENT_TYPES = {
+    "mods": "Mods",
+    "resourcepacks": "Resource Packs",
+}
+REMOTE_CONTENT_TARGET_DIRS = {
+    "mods": "mods",
+    "resourcepacks": "resourcepacks",
+}
+MODRINTH_PROJECT_TYPES = {
+    "mods": "mod",
+    "resourcepacks": "resourcepack",
+}
+CURSEFORGE_MINECRAFT_GAME_ID = 432
+CURSEFORGE_CLASS_IDS = {
+    "mods": 6,
+    "resourcepacks": 12,
+}
+CURSEFORGE_LOADER_TYPES = {
+    "forge": 1,
+    "fabric": 4,
+    "quilt": 5,
+    "neoforge": 6,
+}
+MODRINTH_API_BASE = "https://api.modrinth.com/v2"
+CURSEFORGE_API_BASE = "https://api.curseforge.com"
+REMOTE_USER_AGENT = f"NOTG-Launcher/{APP_NAME.replace(' ', '-')}"
 BACKGROUND_FILE_NAME = "active-background"
 MUSIC_FILE_NAME = "music"
+CURSEFORGE_API_KEY_FILE_NAME = "curseforge-api-key.txt"
+CURSEFORGE_CONFIG_FILE_NAME = "curseforge_config.json"
 JAVA_DOWNLOAD_URL = "https://www.oracle.com/in/java/technologies/downloads/#java25"
 UNSET = object()
 SESSION_STATUS_TO_INSTANCE_STATUS = {
@@ -233,6 +266,8 @@ class InstanceRecord:
     rich_presence_state: str | None = None
     rich_presence_details: str | None = None
     rich_presence_adaptive_details: bool = True
+    custom_jvm_args: str | None = None
+    java_executable: str | None = None
     status: str = "Quit"
     pid: int | None = None
 
@@ -267,6 +302,8 @@ class InstanceRecord:
             "rich_presence_state": self.rich_presence_state,
             "rich_presence_details": self.rich_presence_details,
             "rich_presence_adaptive_details": self.rich_presence_adaptive_details,
+            "custom_jvm_args": self.custom_jvm_args,
+            "java_executable": self.java_executable,
         }
 
     @classmethod
@@ -288,6 +325,8 @@ class InstanceRecord:
             rich_presence_state=_optional_str(metadata.get("rich_presence_state")),
             rich_presence_details=_optional_str(metadata.get("rich_presence_details")),
             rich_presence_adaptive_details=bool(metadata.get("rich_presence_adaptive_details", True)),
+            custom_jvm_args=_optional_str(metadata.get("custom_jvm_args")),
+            java_executable=_optional_str(metadata.get("java_executable")),
             root_dir=root_dir,
             minecraft_dir=root_dir / ".minecraft",
         )
@@ -308,6 +347,7 @@ class InstallRequest:
     operation: str = "create"
     modpack_path: str | None = None
     minecraft_import_dir: str | None = None
+    minecraft_import_entries: list[str] | None = None
     copy_source_instance_id: str | None = None
     copy_user_data: list[str] | None = None
 
@@ -326,6 +366,7 @@ class InstallRequest:
             "operation": self.operation,
             "modpack_path": self.modpack_path,
             "minecraft_import_dir": self.minecraft_import_dir,
+            "minecraft_import_entries": list(self.minecraft_import_entries or []),
             "copy_source_instance_id": self.copy_source_instance_id,
             "copy_user_data": list(self.copy_user_data or []),
         }
@@ -346,6 +387,7 @@ class InstallRequest:
             operation=str(payload.get("operation", "create")),
             modpack_path=_optional_str(payload.get("modpack_path")),
             minecraft_import_dir=_optional_str(payload.get("minecraft_import_dir")),
+            minecraft_import_entries=_coerce_str_list(payload.get("minecraft_import_entries")),
             copy_source_instance_id=_optional_str(payload.get("copy_source_instance_id")),
             copy_user_data=_coerce_str_list(payload.get("copy_user_data")),
         )
@@ -389,9 +431,10 @@ class LauncherService:
     def __init__(self, project_root: Path | None = None):
         if hasattr(sys, '_MEIPASS'):
             self.project_root = Path(sys._MEIPASS)
+            self.install_root = Path(sys.executable).resolve().parent
         else:
             self.project_root = project_root or Path(__file__).resolve().parents[2]
-        self.install_root = self.project_root
+            self.install_root = self.project_root
         self.assets_root = self.project_root / "assets"
         self.default_icons_root = self.assets_root / "default-instance-icons"
         self.legacy_user_icons_root = self.project_root / "app" / "icons"
@@ -405,6 +448,9 @@ class LauncherService:
         self.background_settings_file = self.config_root / "background.json"
         self.legacy_music_settings_file = self.config_root / "music.json"
         self.music_settings_file = self.data_root / "music.json"
+        self.curseforge_config_file = self.install_root / CURSEFORGE_CONFIG_FILE_NAME
+        self.curseforge_api_key_file = self.install_root / CURSEFORGE_API_KEY_FILE_NAME
+        self.legacy_curseforge_api_key_file = self.data_root / CURSEFORGE_API_KEY_FILE_NAME
         self.user_icons_root = self.data_root / "icons"
         self.user_music_root = self.data_root / "MUSIC"
         self.instances_root = self.data_root / "instances"
@@ -439,6 +485,7 @@ class LauncherService:
 
         self._bootstrap_legacy_storage()
         self._migrate_music_settings_to_data_root()
+        self._migrate_curseforge_key_to_install_root()
         self._ensure_account_store()
         self._ensure_music_settings_store()
 
@@ -678,6 +725,8 @@ class LauncherService:
         rich_presence_state: Any = UNSET,
         rich_presence_details: Any = UNSET,
         rich_presence_adaptive_details: bool | None = None,
+        custom_jvm_args: Any = UNSET,
+        java_executable: Any = UNSET,
     ) -> InstanceRecord:
         metadata_path = self.instance_metadata_path(instance)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -711,6 +760,10 @@ class LauncherService:
             metadata["rich_presence_details"] = _optional_str(rich_presence_details)
         if rich_presence_adaptive_details is not None:
             metadata["rich_presence_adaptive_details"] = bool(rich_presence_adaptive_details)
+        if custom_jvm_args is not UNSET:
+            metadata["custom_jvm_args"] = _optional_str(custom_jvm_args)
+        if java_executable is not UNSET:
+            metadata["java_executable"] = _optional_str(java_executable)
 
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         refreshed = InstanceRecord.from_metadata(metadata, instance.root_dir)
@@ -725,6 +778,19 @@ class LauncherService:
 
     def set_instance_memory(self, instance: InstanceRecord, memory_mb: int) -> InstanceRecord:
         return self.update_instance(instance, memory_mb=memory_mb)
+
+    def set_instance_java_settings(
+        self,
+        instance: InstanceRecord,
+        *,
+        custom_jvm_args: str | None,
+        java_executable: str | None,
+    ) -> InstanceRecord:
+        return self.update_instance(
+            instance,
+            custom_jvm_args=custom_jvm_args,
+            java_executable=java_executable,
+        )
 
     def set_instance_rich_presence(
         self,
@@ -931,6 +997,159 @@ class LauncherService:
             reverse=True,
         )
         return reports[0] if reports else None
+
+    def curseforge_api_key_hint(self) -> str:
+        return f"Set CURSEFORGE_API_KEY or put curseforge_config.json next to the launcher executable ({self.install_root})"
+
+    def get_curseforge_api_key(self) -> str | None:
+        env_key = _optional_str(os.environ.get("CURSEFORGE_API_KEY"))
+        if env_key:
+            return env_key
+
+        for candidate in (self.curseforge_config_file, self.curseforge_api_key_file):
+            if not candidate.is_file():
+                continue
+            try:
+                raw_text = candidate.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if candidate.suffix.lower() == ".json":
+                try:
+                    payload = json.loads(raw_text)
+                except json.JSONDecodeError:
+                    payload = {}
+                if isinstance(payload, dict):
+                    for key in ("api_key", "curseforge_api_key", "x-api-key", "key"):
+                        value = _optional_str(payload.get(key))
+                        if value:
+                            return value
+                continue
+            value = _optional_str(raw_text)
+            if value:
+                return value
+        return None
+
+    def _migrate_curseforge_key_to_install_root(self) -> None:
+        if self.curseforge_config_file.is_file() or self.curseforge_api_key_file.is_file():
+            return
+        legacy = getattr(self, "legacy_curseforge_api_key_file", None)
+        if legacy is None or not legacy.is_file():
+            return
+        try:
+            key = _optional_str(legacy.read_text(encoding="utf-8").strip())
+        except OSError:
+            return
+        if not key:
+            return
+        try:
+            self.curseforge_config_file.write_text(
+                json.dumps({"api_key": key}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.debug("Could not migrate CurseForge key to install folder: %s", exc)
+
+    def search_remote_content(
+        self,
+        instance: InstanceRecord,
+        *,
+        provider: str,
+        content_type: str,
+        query: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        content_type = _normalize_remote_content_type(content_type)
+        provider_key = provider.strip().lower()
+        if provider_key == "modrinth":
+            return _search_modrinth_content(instance, content_type, query, limit)
+        if provider_key == "curseforge":
+            api_key = self.get_curseforge_api_key()
+            if not api_key:
+                logger.debug("CurseForge API Auth Failure: Check x-api-key validation and local file path mapping.")
+                return []
+            return _search_curseforge_content(instance, content_type, query, limit, api_key)
+        raise ValueError(f"Unsupported content provider: {provider}")
+
+    def get_remote_content_details(
+        self,
+        instance: InstanceRecord,
+        project: dict[str, Any],
+    ) -> dict[str, Any]:
+        provider = str(project.get("provider") or "").lower()
+        content_type = _normalize_remote_content_type(str(project.get("content_type") or "mods"))
+        if provider == "modrinth":
+            return _modrinth_content_details(instance, content_type, project)
+        if provider == "curseforge":
+            api_key = self.get_curseforge_api_key()
+            if not api_key:
+                raise RuntimeError(f"CurseForge requires an API key. {self.curseforge_api_key_hint()}.")
+            return _curseforge_content_details(instance, content_type, project, api_key)
+        raise ValueError(f"Unsupported content provider: {provider}")
+
+    def install_remote_content(
+        self,
+        instance: InstanceRecord,
+        project: dict[str, Any],
+        *,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> list[str]:
+        provider = str(project.get("provider") or "").lower()
+        content_type = _normalize_remote_content_type(str(project.get("content_type") or "mods"))
+        target_dir = _remote_content_target_dir(instance, content_type)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        local_index = _local_remote_content_index(target_dir)
+        installed: list[str] = []
+        if provider == "modrinth":
+            _install_modrinth_project(
+                instance,
+                content_type,
+                project,
+                target_dir,
+                installed,
+                set(),
+                local_index,
+                progress_callback,
+            )
+        elif provider == "curseforge":
+            api_key = self.get_curseforge_api_key()
+            if not api_key:
+                raise RuntimeError(f"CurseForge requires an API key. {self.curseforge_api_key_hint()}.")
+            _install_curseforge_project(
+                instance,
+                content_type,
+                project,
+                target_dir,
+                installed,
+                set(),
+                local_index,
+                api_key,
+                progress_callback,
+            )
+        else:
+            raise ValueError(f"Unsupported content provider: {provider}")
+        return installed
+
+    def remote_content_installed_index(self, instance: InstanceRecord, content_type: str = "mods") -> set[str]:
+        content_type = _normalize_remote_content_type(content_type)
+        return _local_remote_content_index(_remote_content_target_dir(instance, content_type))
+
+    def preview_import_metadata(
+        self,
+        *,
+        modpack_path: str | None = None,
+        minecraft_import_dir: str | None = None,
+    ) -> tuple[str, str, str | None, str | None] | None:
+        if modpack_path:
+            archive = Path(modpack_path)
+            if not archive.is_file():
+                return None
+            return _infer_archive_metadata(archive)
+        if minecraft_import_dir:
+            source_dir = self.resolve_minecraft_import_source(minecraft_import_dir)
+            if source_dir is None:
+                return None
+            return _infer_minecraft_metadata(source_dir)
+        return None
 
     def get_default_background_path(self) -> str | None:
         defaults = self._default_background_records()
@@ -1311,21 +1530,11 @@ class LauncherService:
         return records
 
     def set_music_enabled(self, music_id: str, enabled: bool) -> list[MusicRecord]:
+        del music_id, enabled
         payload = self._read_music_payload()
-        available = {record.music_id for record in self._music_records_from_disk(payload)}
-        if music_id not in available:
-            raise FileNotFoundError(f"Music file not found: {music_id}")
-
-        disabled = set(_coerce_str_list(payload.get("disabled")))
-        if enabled:
-            disabled.discard(music_id)
-        else:
-            disabled.add(music_id)
-        payload["disabled"] = list(disabled)
-
+        payload["disabled"] = []
         records = self._ordered_music_records(payload)
         payload["order"] = [record.music_id for record in records]
-        payload["disabled"] = [record.music_id for record in records if not record.enabled]
         self._write_music_payload(payload)
         return records
 
@@ -1654,6 +1863,7 @@ class LauncherService:
         operation: str = "create",
         modpack_path: str | None = None,
         minecraft_import_dir: str | None = None,
+        minecraft_import_entries: list[str] | None = None,
         copy_source_instance_id: str | None = None,
         copy_user_data: list[str] | None = None,
     ) -> InstallRequest:
@@ -1686,6 +1896,7 @@ class LauncherService:
             operation=operation,
             modpack_path=_optional_str(modpack_path),
             minecraft_import_dir=_optional_str(minecraft_import_dir),
+            minecraft_import_entries=_sanitize_import_entries(minecraft_import_entries),
             copy_source_instance_id=_optional_str(copy_source_instance_id),
             copy_user_data=_sanitize_copy_user_data(copy_user_data),
         )
@@ -1724,6 +1935,8 @@ class LauncherService:
             "rich_presence_state": _optional_str(existing_metadata.get("rich_presence_state")),
             "rich_presence_details": _optional_str(existing_metadata.get("rich_presence_details")),
             "rich_presence_adaptive_details": bool(existing_metadata.get("rich_presence_adaptive_details", True)),
+            "custom_jvm_args": _optional_str(existing_metadata.get("custom_jvm_args")),
+            "java_executable": _optional_str(existing_metadata.get("java_executable")),
         }
         (stage_dir / "instance.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         backup_dir: Path | None = None
@@ -1877,7 +2090,7 @@ class LauncherService:
         if replace_existing:
             _assert_directory_writable(final_dir, "instance folder")
 
-        if request.operation in {"create", "reinstall"} and request.vanilla_version:
+        if request.operation in {"create", "reinstall", "import_minecraft", "import_modpack"} and request.vanilla_version:
             self.select_java_runtime(request.vanilla_version, minecraft_dir)
 
     def required_java_major(self, version: str, minecraft_dir: Path) -> int:
@@ -1909,6 +2122,49 @@ class LauncherService:
         raise JavaCompatibilityError(
             f"Java {required_major} or newer is required for Minecraft {version}.{found_text}"
         )
+
+    def list_java_runtime_options(self, instance: InstanceRecord) -> list[dict[str, Any]]:
+        required_major = self.required_java_major(instance.installed_version, instance.minecraft_dir)
+        candidates = self._java_runtime_candidates(instance.installed_version, instance.minecraft_dir)
+        candidates.sort(key=lambda candidate: (candidate.major_version, candidate.label.lower()), reverse=True)
+        seen: set[str] = set()
+        rows = [
+            {
+                "label": f"Automatic (Java {required_major}+)",
+                "executable_path": None,
+                "major_version": required_major,
+                "compatible": True,
+            }
+        ]
+        for candidate in candidates:
+            key = str(Path(candidate.executable_path).resolve()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "label": f"Java {candidate.major_version} - {candidate.label}",
+                    "executable_path": candidate.executable_path,
+                    "major_version": candidate.major_version,
+                    "compatible": candidate.major_version >= required_major,
+                }
+            )
+        return rows
+
+    def select_instance_java_runtime(self, instance: InstanceRecord) -> JavaRuntimeCandidate:
+        if not instance.java_executable:
+            return self.select_java_runtime(instance.installed_version, instance.minecraft_dir)
+
+        candidate = _java_candidate_from_executable(instance.java_executable, Path(instance.java_executable).parent.parent.name)
+        required_major = self.required_java_major(instance.installed_version, instance.minecraft_dir)
+        if candidate is None:
+            raise JavaCompatibilityError(f"Selected Java runtime was not found: {instance.java_executable}")
+        if candidate.major_version < required_major:
+            raise JavaCompatibilityError(
+                f"Java {required_major} or newer is required for Minecraft {instance.installed_version}. "
+                f"The selected runtime is Java {candidate.major_version}."
+            )
+        return candidate
 
     def _java_runtime_candidates(self, version: str, minecraft_dir: Path) -> list[JavaRuntimeCandidate]:
         candidates: list[JavaRuntimeCandidate] = []
@@ -1964,8 +2220,15 @@ class LauncherService:
         game_directory: Path,
         memory_mb: int | None = None,
         java_executable: str | None = None,
+        custom_jvm_args: str | None = None,
     ) -> dict[str, Any]:
         resolved_memory = _coerce_memory_mb(memory_mb)
+        jvm_arguments = [
+            f"-Xmx{resolved_memory}M",
+            "-Dminecraft.launcher.brand=vanilla",
+            "-Dminecraft.launcher.version=vanilla",
+        ]
+        jvm_arguments.extend(_split_custom_jvm_args(custom_jvm_args))
         options: dict[str, Any] = {
             "username": player_name,
             "uuid": _offline_uuid(player_name),
@@ -1973,11 +2236,7 @@ class LauncherService:
             "launcherName": "vanilla",
             "launcherVersion": "vanilla",
             "gameDirectory": str(game_directory),
-            "jvmArguments": [
-                f"-Xmx{resolved_memory}M",
-                "-Dminecraft.launcher.brand=vanilla",
-                "-Dminecraft.launcher.version=vanilla",
-            ],
+            "jvmArguments": jvm_arguments,
             "enableLoggingConfig": True,
         }
         if java_executable:
@@ -1987,7 +2246,7 @@ class LauncherService:
 
     def launch_instance(self, instance: InstanceRecord, player_name: str) -> subprocess.Popen[Any]:
         minecraft_directory = instance.minecraft_dir
-        java_runtime = self.select_java_runtime(instance.installed_version, minecraft_directory)
+        java_runtime = self.select_instance_java_runtime(instance)
         command = minecraft_launcher_lib.command.get_minecraft_command(
             instance.installed_version,
             minecraft_directory,
@@ -1996,6 +2255,7 @@ class LauncherService:
                 minecraft_directory,
                 instance.memory_mb,
                 java_runtime.executable_path,
+                instance.custom_jvm_args,
             ),
         )
         _normalize_minecraft_version_argument(command, instance.vanilla_version)
@@ -2349,7 +2609,7 @@ class LauncherService:
         if not self.user_music_root.is_dir():
             return []
         records: list[MusicRecord] = []
-        for path in sorted(self.user_music_root.iterdir(), key=lambda item: item.name.lower()):
+        for path in sorted(self.user_music_root.rglob("*"), key=lambda item: item.relative_to(self.user_music_root).as_posix().lower()):
             if not path.is_file() or path.suffix.lower() not in MUSIC_SUFFIXES:
                 continue
             relative_path = self._user_music_reference(path)
@@ -2366,17 +2626,15 @@ class LauncherService:
         return records
 
     def _music_records_from_disk(self, payload: dict[str, Any]) -> list[MusicRecord]:
-        disabled = set(_coerce_str_list(payload.get("disabled")))
         metadata = self._music_track_metadata_payload(payload)
         records = [*self._default_music_records(), *self._user_music_records()]
         for record in records:
-            record.enabled = record.music_id not in disabled
+            record.enabled = True
             self._apply_music_record_metadata(record, metadata.get(record.music_id))
         records.extend(self._remote_music_records(payload))
         return records
 
     def _remote_music_records(self, payload: dict[str, Any]) -> list[MusicRecord]:
-        disabled = set(_coerce_str_list(payload.get("disabled")))
         records: list[MusicRecord] = []
         for music_id, metadata in self._music_track_metadata_payload(payload).items():
             if not isinstance(metadata, dict) or not bool(metadata.get("remote")):
@@ -2391,7 +2649,7 @@ class LauncherService:
                     relative_path=source_url or music_id,
                     absolute_path=stream_url or source_url or "",
                     is_default=False,
-                    enabled=music_id not in disabled,
+                    enabled=True,
                     source_url=source_url,
                     stream_url=stream_url,
                     artwork_url=_optional_str(metadata.get("artwork_url")),
@@ -2589,12 +2847,7 @@ class LauncherService:
         loaded_order = loaded.get("order", UNSET)
         payload["order"] = _coerce_str_list(loaded_order) if isinstance(loaded_order, list) else list(default_payload["order"])
 
-        loaded_disabled = loaded.get("disabled", UNSET)
-        payload["disabled"] = (
-            _coerce_str_list(loaded_disabled)
-            if isinstance(loaded_disabled, list)
-            else list(default_payload["disabled"])
-        )
+        payload["disabled"] = []
 
         loaded_metadata = loaded.get("track_metadata", UNSET)
         payload["track_metadata"] = (
@@ -2640,23 +2893,14 @@ class LauncherService:
     def _merge_new_default_music(self, payload: dict[str, Any], loaded: dict[str, Any]) -> dict[str, Any]:
         default_payload = self._default_music_payload()
         default_order = _coerce_str_list(default_payload.get("order"))
-        default_disabled = set(_coerce_str_list(default_payload.get("disabled")))
-        existing_order = set(_coerce_str_list(loaded.get("order")))
-        existing_disabled = set(_coerce_str_list(loaded.get("disabled")))
-
         order = _coerce_str_list(payload.get("order"))
-        disabled = set(_coerce_str_list(payload.get("disabled")))
         for music_id in default_order:
             if music_id not in order:
                 order.append(music_id)
-            if music_id in default_disabled and music_id not in existing_order and music_id not in existing_disabled:
-                disabled.add(music_id)
 
         payload = dict(payload)
         payload["order"] = order
-        payload["disabled"] = [music_id for music_id in order if music_id in disabled] + [
-            music_id for music_id in disabled if music_id not in order
-        ]
+        payload["disabled"] = []
         playlists = self._music_playlist_payloads(payload)
         for playlist in playlists:
             if playlist["playlist_id"] != "default":
@@ -2677,13 +2921,28 @@ class LauncherService:
 
         payload = dict(payload)
         playlists = self._music_playlist_payloads(payload)
-        target = next((playlist for playlist in playlists if playlist["playlist_id"] == "default"), playlists[0])
+        target = next((playlist for playlist in playlists if playlist["playlist_id"] == APPDATA_MUSIC_PLAYLIST_ID), None)
+        if target is None:
+            now = _utc_now()
+            target = {
+                "playlist_id": APPDATA_MUSIC_PLAYLIST_ID,
+                "name": "AppData Music",
+                "icon_path": self._random_playlist_icon_reference(APPDATA_MUSIC_PLAYLIST_ID),
+                "order": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+            playlists.append(target)
         order = _coerce_str_list(target.get("order"))
         changed = False
         for music_id in user_music_ids:
             if music_id not in order:
                 order.append(music_id)
                 changed = True
+        stale_ids = [music_id for music_id in order if music_id.startswith(f"{USER_MUSIC_PREFIX}/") and music_id not in user_music_ids]
+        if stale_ids:
+            order = [music_id for music_id in order if music_id not in stale_ids]
+            changed = True
         if not changed:
             return payload
 
@@ -2815,7 +3074,7 @@ class LauncherService:
     def _write_music_payload(self, payload: dict[str, Any]) -> None:
         normalized: dict[str, Any] = {
             "order": _coerce_str_list(payload.get("order")),
-            "disabled": _coerce_str_list(payload.get("disabled")),
+            "disabled": [],
             "playlists": self._music_playlist_payloads(payload),
             "track_metadata": self._music_track_metadata_payload(payload),
             "volume": _coerce_volume_percent(payload.get("volume"), 75),
@@ -3343,7 +3602,50 @@ def _run_minecraft_directory_import(
     _queue_event(event_queue, "log", text=f"Copying {source_dir} into the new instance")
     if progress is not None:
         progress.begin_phase(0.45)
-    _copy_tree_with_progress(source_dir, minecraft_dir, event_queue, "Copying imported files", progress)
+    if request.minecraft_import_entries:
+        _copy_selected_import_entries(
+            source_dir,
+            minecraft_dir,
+            request.minecraft_import_entries,
+            event_queue,
+            "Copying selected imported files",
+            progress,
+        )
+    else:
+        _copy_tree_with_progress(source_dir, minecraft_dir, event_queue, "Copying imported files", progress)
+
+    selected_vanilla = _optional_str(request.vanilla_version)
+    if selected_vanilla:
+        if progress is not None:
+            progress.begin_phase(0.49)
+        _queue_event(event_queue, "status", text="Replacing launch files")
+        _queue_event(event_queue, "log", text="Removing imported launch/runtime files before installing the selected version stack.")
+        _remove_launch_runtime_files(minecraft_dir)
+        installed_version = _install_dependency_stack(
+            selected_vanilla,
+            request.mod_loader_id,
+            request.mod_loader_version,
+            minecraft_dir,
+            callback,
+            event_queue,
+        )
+
+        staged_icon_path = _stage_folder_icon(source_dir, Path(request.stage_dir))
+        resolved_name = request.name.strip()
+        if not resolved_name:
+            if source_dir.name == ".minecraft" and source_dir.parent.name:
+                resolved_name = source_dir.parent.name
+            else:
+                resolved_name = source_dir.name or "Imported Instance"
+        return InstallResult(
+            name=resolved_name,
+            vanilla_version=selected_vanilla,
+            installed_version=installed_version,
+            mod_loader_id=request.mod_loader_id,
+            mod_loader_version=request.mod_loader_version,
+            icon_path=request.icon_path,
+            staged_icon_path=str(staged_icon_path) if staged_icon_path else None,
+        )
 
     metadata = _infer_minecraft_metadata(minecraft_dir)
     if metadata is None:
@@ -3574,12 +3876,15 @@ def _import_curseforge_archive(
         staged_icon_path = _stage_archive_icon(zf, stripped_files, stage_dir)
 
         file_entries = manifest.get("files") or []
+        curseforge_api_key = None
         if file_entries:
-            raise RuntimeError(
-                "This CurseForge export references external CurseForge-hosted files. "
-                "This build does not ship a CurseForge download API, so please import a .mrpack, "
-                "a self-contained Prism/MultiMC export, or a full .minecraft folder instead."
-            )
+            service = LauncherService(Path(__file__).resolve().parents[2])
+            curseforge_api_key = service.get_curseforge_api_key()
+            if not curseforge_api_key:
+                raise RuntimeError(
+                    "This CurseForge export references external CurseForge-hosted files. "
+                    f"Add a CurseForge API key first: {service.curseforge_api_key_hint()}."
+                )
 
         minecraft_block = manifest.get("minecraft") or {}
         vanilla_version = _required_str(minecraft_block.get("version"), "CurseForge Minecraft version")
@@ -3603,6 +3908,12 @@ def _import_curseforge_archive(
         if progress is not None:
             progress.begin_phase(0.39)
         _extract_archive_mappings(zf, mappings, minecraft_dir, event_queue, "Extracting imported files", progress)
+
+        if file_entries and curseforge_api_key:
+            if progress is not None:
+                progress.begin_phase(0.24)
+            _queue_event(event_queue, "status", text="Downloading CurseForge files")
+            _download_curseforge_manifest_files(file_entries, minecraft_dir / "mods", curseforge_api_key, event_queue, progress)
 
     resolved_name = request.name.strip() or str(manifest.get("name") or archive.stem)
     return InstallResult(
@@ -3653,8 +3964,33 @@ def _import_generic_archive(
 
     metadata = _infer_minecraft_metadata(minecraft_dir)
     if metadata is None:
-        raise RuntimeError(
-            "The selected archive was extracted, but the launcher could not determine a Minecraft version from it."
+        selected_vanilla = _optional_str(request.vanilla_version)
+        if not selected_vanilla:
+            raise RuntimeError(
+                "The selected archive was extracted, but the launcher could not determine a Minecraft version from it."
+            )
+        if progress is not None:
+            progress.begin_phase(0.49)
+        _queue_event(event_queue, "status", text="Installing selected version")
+        _queue_event(event_queue, "log", text="Archive has no readable launch metadata; installing the selected version stack.")
+        _remove_launch_runtime_files(minecraft_dir)
+        installed_version = _install_dependency_stack(
+            selected_vanilla,
+            request.mod_loader_id,
+            request.mod_loader_version,
+            minecraft_dir,
+            callback,
+            event_queue,
+        )
+        resolved_name = request.name.strip() or archive.stem
+        return InstallResult(
+            name=resolved_name,
+            vanilla_version=selected_vanilla,
+            installed_version=installed_version,
+            mod_loader_id=request.mod_loader_id,
+            mod_loader_version=request.mod_loader_version,
+            icon_path=request.icon_path,
+            staged_icon_path=str(staged_icon_path) if staged_icon_path else None,
         )
 
     vanilla_version, installed_version, mod_loader_id, mod_loader_version = metadata
@@ -3742,7 +4078,14 @@ def _metadata_from_version_json(
     except (OSError, json.JSONDecodeError):
         return None
 
-    installed_version = _optional_str(data.get("id")) or json_path.stem
+    return _metadata_from_version_payload(data, json_path.stem)
+
+
+def _metadata_from_version_payload(
+    data: dict[str, Any],
+    fallback_id: str,
+) -> tuple[str, str, str | None, str | None] | None:
+    installed_version = _optional_str(data.get("id")) or fallback_id
     inherits_from = _optional_str(data.get("inheritsFrom"))
     vanilla_version, mod_loader_id, mod_loader_version = _parse_installed_version(
         installed_version,
@@ -3755,6 +4098,53 @@ def _metadata_from_version_json(
         return inherits_from, installed_version, mod_loader_id, mod_loader_version
 
     return None
+
+
+def _infer_archive_metadata(archive: Path) -> tuple[str, str, str | None, str | None] | None:
+    try:
+        with zipfile.ZipFile(archive, "r") as zf:
+            prefix, stripped_files = _archive_file_index(zf)
+            names = set(stripped_files.values())
+            if "modrinth.index.json" in names:
+                index = _load_json_from_zip(zf, prefix + "modrinth.index.json")
+                dependencies = index.get("dependencies") if isinstance(index.get("dependencies"), dict) else {}
+                vanilla_version = _optional_str(dependencies.get("minecraft"))
+                if vanilla_version:
+                    mod_loader_id, mod_loader_version = _loader_from_mrpack_dependencies(dependencies)
+                    installed_version = _modpack_installed_version(vanilla_version, mod_loader_id, mod_loader_version)
+                    return vanilla_version, installed_version, mod_loader_id, mod_loader_version
+            if "manifest.json" in names:
+                manifest = _load_json_from_zip(zf, prefix + "manifest.json")
+                minecraft_block = manifest.get("minecraft") if isinstance(manifest.get("minecraft"), dict) else {}
+                vanilla_version = _optional_str(minecraft_block.get("version"))
+                if vanilla_version:
+                    mod_loader_id, mod_loader_version = _loader_from_curseforge_manifest(minecraft_block)
+                    installed_version = _modpack_installed_version(vanilla_version, mod_loader_id, mod_loader_version)
+                    return vanilla_version, installed_version, mod_loader_id, mod_loader_version
+            if "mmc-pack.json" in names:
+                mmc_manifest = _load_json_from_zip(zf, prefix + "mmc-pack.json")
+                vanilla_version, mod_loader_id, mod_loader_version = _metadata_from_mmc_manifest(mmc_manifest)
+                installed_version = _modpack_installed_version(vanilla_version, mod_loader_id, mod_loader_version)
+                return vanilla_version, installed_version, mod_loader_id, mod_loader_version
+            for original_name, stripped_name in stripped_files.items():
+                if not stripped_name.startswith(("versions/", ".minecraft/versions/", "bin/")) or not stripped_name.endswith(".json"):
+                    continue
+                try:
+                    data = json.loads(_read_text_from_zip(zf, original_name) or "{}")
+                except json.JSONDecodeError:
+                    continue
+                metadata = _metadata_from_version_payload(data, Path(stripped_name).stem)
+                if metadata:
+                    return metadata
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _modpack_installed_version(vanilla_version: str, mod_loader_id: str | None, mod_loader_version: str | None) -> str:
+    if mod_loader_id and mod_loader_version:
+        return f"{mod_loader_id}-{mod_loader_version}-{vanilla_version}"
+    return vanilla_version
 
 
 def _read_last_version_id(minecraft_dir: Path) -> str | None:
@@ -4037,6 +4427,75 @@ def _copy_selected_user_data(
     _queue_event(event_queue, "status", text="Copying selected instance data")
 
 
+def _copy_selected_import_entries(
+    source_root: Path,
+    destination_root: Path,
+    selected_entries: list[str],
+    event_queue: Any,
+    status_text: str,
+    progress: "_InstallProgressReporter | None" = None,
+) -> None:
+    entries = _sanitize_import_entries(selected_entries)
+    if not entries:
+        _set_progress_max(event_queue, progress, 1)
+        _set_progress_value(event_queue, progress, 1)
+        return
+
+    source_root = source_root.resolve()
+    files_to_copy: list[tuple[Path, Path]] = []
+    empty_dirs: list[Path] = []
+    seen_targets: set[str] = set()
+    for entry_name in entries:
+        source_path = _safe_local_path_join(source_root, entry_name)
+        if not source_path.exists():
+            continue
+        if source_path.is_dir():
+            directory_files = [path for path in source_path.rglob("*") if path.is_file()]
+            if not directory_files:
+                empty_dirs.append(_safe_local_path_join(destination_root, entry_name))
+                continue
+            for file_path in directory_files:
+                relative = file_path.relative_to(source_root).as_posix()
+                target = _safe_local_path_join(destination_root, relative)
+                target_key = str(target).lower()
+                if target_key in seen_targets:
+                    continue
+                seen_targets.add(target_key)
+                files_to_copy.append((file_path, target))
+            continue
+
+        target = _safe_local_path_join(destination_root, entry_name)
+        target_key = str(target).lower()
+        if target_key in seen_targets:
+            continue
+        seen_targets.add(target_key)
+        files_to_copy.append((source_path, target))
+
+    for directory in empty_dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    _set_progress_max(event_queue, progress, max(1, len(files_to_copy)))
+    if not files_to_copy:
+        _set_progress_value(event_queue, progress, 1)
+        return
+
+    for index, (source_path, target_path) in enumerate(files_to_copy, start=1):
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+        _set_progress_value(event_queue, progress, index)
+
+    _queue_event(event_queue, "status", text=status_text)
+
+
+def _remove_launch_runtime_files(minecraft_dir: Path) -> None:
+    for entry_name in ("versions", "libraries", "assets", "runtime", "bin", "natives"):
+        target = _safe_local_path_join(minecraft_dir, entry_name)
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        elif target.is_file():
+            target.unlink(missing_ok=True)
+
+
 def _remove_selected_user_data(destination_root: Path, selected_entries: list[str]) -> None:
     for entry_name in _sanitize_copy_user_data(selected_entries):
         target_path = _safe_local_path_join(destination_root, entry_name)
@@ -4118,6 +4577,603 @@ def _safe_local_path_join(root: Path, relative_name: str) -> Path:
     except ValueError as exc:
         raise RuntimeError(f"Path would escape the instance directory: {relative_name}") from exc
     return candidate
+
+
+def _normalize_remote_content_type(content_type: str) -> str:
+    normalized = content_type.strip().lower().replace(" ", "")
+    if normalized in {"mod", "mods"}:
+        return "mods"
+    if normalized in {"resourcepack", "resourcepacks", "resource-packs"}:
+        return "resourcepacks"
+    raise ValueError(f"Unsupported content type: {content_type}")
+
+
+def _remote_content_target_dir(instance: InstanceRecord, content_type: str) -> Path:
+    return instance.minecraft_dir / REMOTE_CONTENT_TARGET_DIRS[_normalize_remote_content_type(content_type)]
+
+
+def _remote_loader(instance: InstanceRecord, content_type: str) -> str | None:
+    content_type = _normalize_remote_content_type(content_type)
+    if content_type == "resourcepacks":
+        return "minecraft"
+    if content_type != "mods":
+        return instance.mod_loader_id
+    if not instance.mod_loader_id:
+        raise RuntimeError("This instance does not have a mod loader. Install a loader before installing mods.")
+    return instance.mod_loader_id
+
+
+def _request_json(url: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
+    request_headers = {
+        "User-Agent": REMOTE_USER_AGENT,
+        "Accept": "application/json",
+    }
+    if headers:
+        request_headers.update(headers)
+    response = requests.get(url, params=params, headers=request_headers, timeout=25)
+    if not response.ok:
+        if response.status_code in {401, 403} and "curseforge" in url.lower():
+            logger.debug("CurseForge API Auth Failure: Check x-api-key validation and local file path mapping.")
+        raise RuntimeError(f"Request failed ({response.status_code}): {url}")
+    return response.json()
+
+
+def _download_remote_file(url: str, target_dir: Path, filename: str, progress_callback: Callable[[str], None] | None = None) -> Path:
+    safe_name = _slugify_filename(filename) or "download.jar"
+    target = target_dir / safe_name
+    if target.exists() and target.stat().st_size > 0:
+        if progress_callback:
+            progress_callback(f"Already installed {safe_name}")
+        return target
+    if progress_callback:
+        progress_callback(f"Downloading {safe_name}")
+    response = requests.get(url, headers={"User-Agent": REMOTE_USER_AGENT}, timeout=45, stream=True)
+    if not response.ok:
+        raise RuntimeError(f"Download failed ({response.status_code}): {safe_name}")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    temp_target = target.with_suffix(target.suffix + ".part")
+    with temp_target.open("wb") as handle:
+        for chunk in response.iter_content(chunk_size=1024 * 256):
+            if chunk:
+                handle.write(chunk)
+    temp_target.replace(target)
+    return target
+
+
+def _modrinth_facets(instance: InstanceRecord, content_type: str) -> str:
+    facets = [
+        [f"project_type:{MODRINTH_PROJECT_TYPES[content_type]}"],
+        [f"versions:{instance.vanilla_version}"],
+    ]
+    loader = _remote_loader(instance, content_type)
+    if loader:
+        facets.append([f"categories:{loader}"])
+    return json.dumps(facets)
+
+
+def _search_modrinth_content(
+    instance: InstanceRecord,
+    content_type: str,
+    query: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    payload = _request_json(
+        f"{MODRINTH_API_BASE}/search",
+        params={
+            "query": query.strip(),
+            "facets": _modrinth_facets(instance, content_type),
+            "index": "relevance" if query.strip() else "downloads",
+            "limit": max(1, min(100, int(limit))),
+        },
+    )
+    hits = payload.get("hits") if isinstance(payload, dict) else []
+    results: list[dict[str, Any]] = []
+    for hit in hits if isinstance(hits, list) else []:
+        if not isinstance(hit, dict):
+            continue
+        results.append(
+            {
+                "provider": "modrinth",
+                "content_type": content_type,
+                "project_id": _optional_str(hit.get("project_id")),
+                "slug": _optional_str(hit.get("slug")),
+                "title": _optional_str(hit.get("title")) or "Untitled",
+                "description": _optional_str(hit.get("description")) or "",
+                "icon_url": _optional_str(hit.get("icon_url")),
+                "downloads": _coerce_non_negative_int(hit.get("downloads")),
+                "author": _optional_str(hit.get("author")),
+            }
+        )
+    return results
+
+
+def _modrinth_versions(instance: InstanceRecord, content_type: str, project_id: str) -> list[dict[str, Any]]:
+    loader = _remote_loader(instance, content_type)
+    loaders = [loader] if loader else ["minecraft"]
+    payload = _request_json(
+        f"{MODRINTH_API_BASE}/project/{project_id}/version",
+        params={
+            "loaders": json.dumps(loaders),
+            "game_versions": json.dumps([instance.vanilla_version]),
+            "include_changelog": "false",
+        },
+    )
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+
+def _modrinth_pick_version(instance: InstanceRecord, content_type: str, project_id: str) -> dict[str, Any]:
+    versions = _modrinth_versions(instance, content_type, project_id)
+    if not versions:
+        raise RuntimeError("No compatible Modrinth version was found for this instance.")
+    releases = [version for version in versions if str(version.get("version_type") or "").lower() == "release"]
+    return releases[0] if releases else versions[0]
+
+
+def _modrinth_primary_file(version: dict[str, Any]) -> dict[str, Any]:
+    files = version.get("files")
+    if not isinstance(files, list) or not files:
+        raise RuntimeError("The selected Modrinth version does not expose a downloadable file.")
+    primary = next((item for item in files if isinstance(item, dict) and bool(item.get("primary"))), None)
+    return primary if isinstance(primary, dict) else next(item for item in files if isinstance(item, dict))
+
+
+def _modrinth_content_details(instance: InstanceRecord, content_type: str, project: dict[str, Any]) -> dict[str, Any]:
+    project_id = _required_str(project.get("project_id") or project.get("slug"), "Modrinth project")
+    version = _modrinth_pick_version(instance, content_type, project_id)
+    file_info = _modrinth_primary_file(version)
+    dependencies = [
+        dep
+        for dep in version.get("dependencies", [])
+        if isinstance(dep, dict) and str(dep.get("dependency_type") or "").lower() == "required"
+    ]
+    details = dict(project)
+    details.update(
+        {
+            "version_name": _optional_str(version.get("name")) or _optional_str(version.get("version_number")) or "Latest",
+            "version_number": _optional_str(version.get("version_number")),
+            "file_name": _optional_str(file_info.get("filename")),
+            "file_size": _coerce_non_negative_int(file_info.get("size")),
+            "dependencies_count": len(dependencies),
+        }
+    )
+    return details
+
+
+def _install_modrinth_project(
+    instance: InstanceRecord,
+    content_type: str,
+    project: dict[str, Any],
+    target_dir: Path,
+    installed: list[str],
+    seen: set[str],
+    local_index: set[str],
+    progress_callback: Callable[[str], None] | None,
+    version_override: dict[str, Any] | None = None,
+) -> None:
+    project_id = _required_str(project.get("project_id") or project.get("slug"), "Modrinth project")
+    seen_key = f"modrinth:{project_id}"
+    if seen_key in seen:
+        return
+    seen.add(seen_key)
+    if _remote_project_is_installed(project, local_index):
+        if progress_callback:
+            progress_callback(f"Already installed {project.get('title') or project_id}")
+        return
+
+    if progress_callback:
+        progress_callback(f"Resolving {project.get('title') or project_id}")
+    version = (
+        version_override
+        if isinstance(version_override, dict)
+        else _modrinth_pick_version(instance, content_type, project_id)
+    )
+    for dependency in version.get("dependencies", []):
+        if not isinstance(dependency, dict) or str(dependency.get("dependency_type") or "").lower() != "required":
+            continue
+        dependency_version: dict[str, Any] | None = None
+        version_id = _optional_str(dependency.get("version_id"))
+        dependency_project_id = _optional_str(dependency.get("project_id"))
+        if version_id:
+            payload = _request_json(f"{MODRINTH_API_BASE}/version/{version_id}")
+            dependency_version = payload if isinstance(payload, dict) else None
+            dependency_project_id = _optional_str(dependency_version.get("project_id")) if dependency_version else dependency_project_id
+        elif dependency_project_id:
+            dependency_version = _modrinth_pick_version(instance, content_type, dependency_project_id)
+        if dependency_version is None or not dependency_project_id:
+            continue
+        _install_modrinth_project(
+            instance,
+            content_type,
+            {
+                "provider": "modrinth",
+                "content_type": content_type,
+                "project_id": dependency_project_id,
+                "title": dependency.get("file_name") or dependency_project_id,
+            },
+            target_dir,
+            installed,
+            seen,
+            local_index,
+            progress_callback,
+            dependency_version,
+        )
+
+    file_info = _modrinth_primary_file(version)
+    url = _required_str(file_info.get("url"), "Modrinth download URL")
+    filename = _required_str(file_info.get("filename"), "Modrinth file name")
+    target = _download_remote_file(url, target_dir, filename, progress_callback)
+    if target.name not in installed:
+        installed.append(target.name)
+    local_index.update(_remote_project_key_candidates(project))
+    if progress_callback:
+        progress_callback(f"Installed {target.name}")
+
+
+def _curseforge_headers(api_key: str) -> dict[str, str]:
+    return {"x-api-key": api_key, "Content-Type": "application/json", "Accept": "application/json"}
+
+
+def _search_curseforge_content(
+    instance: InstanceRecord,
+    content_type: str,
+    query: str,
+    limit: int,
+    api_key: str,
+) -> list[dict[str, Any]]:
+    loader = _remote_loader(instance, content_type)
+    params: dict[str, Any] = {
+        "gameId": CURSEFORGE_MINECRAFT_GAME_ID,
+        "classId": CURSEFORGE_CLASS_IDS[content_type],
+        "gameVersion": instance.vanilla_version,
+        "pageSize": max(1, min(50, int(limit))),
+    }
+    if query.strip():
+        params["searchFilter"] = query.strip()
+    loader_type = CURSEFORGE_LOADER_TYPES.get(loader or "")
+    if loader_type and content_type == "mods":
+        params["modLoaderType"] = loader_type
+    params["sortField"] = 2
+    params["sortOrder"] = "desc"
+    try:
+        payload = _request_json(
+            f"{CURSEFORGE_API_BASE}/v1/mods/search",
+            params=params,
+            headers=_curseforge_headers(api_key),
+        )
+    except requests.RequestException as exc:
+        logger.debug("CurseForge search failed: %s", exc)
+        return []
+    except RuntimeError as exc:
+        logger.debug("CurseForge search failed: %s", exc)
+        return []
+    data = payload.get("data") if isinstance(payload, dict) else []
+    results: list[dict[str, Any]] = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        logo = item.get("logo") if isinstance(item.get("logo"), dict) else {}
+        results.append(
+            {
+                "provider": "curseforge",
+                "content_type": content_type,
+                "project_id": str(item.get("id") or ""),
+                "slug": _optional_str(item.get("slug")),
+                "title": _optional_str(item.get("name")) or "Untitled",
+                "description": _optional_str(item.get("summary")) or "",
+                "icon_url": _optional_str(logo.get("thumbnailUrl") or logo.get("url")),
+                "downloads": _coerce_non_negative_int(item.get("downloadCount")),
+                "author": ", ".join(
+                    str(author.get("name"))
+                    for author in item.get("authors", [])
+                    if isinstance(author, dict) and author.get("name")
+                ),
+            }
+        )
+    return results
+
+
+def _curseforge_project_files(
+    instance: InstanceRecord,
+    content_type: str,
+    mod_id: str,
+    api_key: str,
+) -> list[dict[str, Any]]:
+    loader = _remote_loader(instance, content_type)
+    params: dict[str, Any] = {
+        "gameVersion": instance.vanilla_version,
+        "pageSize": 50,
+    }
+    loader_type = CURSEFORGE_LOADER_TYPES.get(loader or "")
+    if loader_type and content_type == "mods":
+        params["modLoaderType"] = loader_type
+    payload = _request_json(
+        f"{CURSEFORGE_API_BASE}/v1/mods/{mod_id}/files",
+        params=params,
+        headers=_curseforge_headers(api_key),
+    )
+    data = payload.get("data") if isinstance(payload, dict) else []
+    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+
+def _curseforge_pick_file(instance: InstanceRecord, content_type: str, mod_id: str, api_key: str) -> dict[str, Any]:
+    files = _curseforge_project_files(instance, content_type, mod_id, api_key)
+    if not files:
+        raise RuntimeError("No compatible CurseForge file was found for this instance.")
+    releases = [file for file in files if int(file.get("releaseType") or 0) == 1]
+    return releases[0] if releases else files[0]
+
+
+def _curseforge_download_url(mod_id: str, file_info: dict[str, Any], api_key: str) -> str:
+    direct = _optional_str(file_info.get("downloadUrl"))
+    if direct:
+        return direct
+    file_id = _required_str(file_info.get("id"), "CurseForge file ID")
+    payload = _request_json(
+        f"{CURSEFORGE_API_BASE}/v1/mods/{mod_id}/files/{file_id}/download-url",
+        headers=_curseforge_headers(api_key),
+    )
+    if isinstance(payload, dict):
+        url = _optional_str(payload.get("data"))
+        if url:
+            return url
+    raise RuntimeError("CurseForge did not return a download URL for this file.")
+
+
+def _curseforge_content_details(
+    instance: InstanceRecord,
+    content_type: str,
+    project: dict[str, Any],
+    api_key: str,
+) -> dict[str, Any]:
+    mod_id = _required_str(project.get("project_id"), "CurseForge project")
+    file_info = _curseforge_pick_file(instance, content_type, mod_id, api_key)
+    dependencies = [
+        dep
+        for dep in file_info.get("dependencies", [])
+        if isinstance(dep, dict) and int(dep.get("relationType") or 0) == 3
+    ]
+    details = dict(project)
+    details.update(
+        {
+            "version_name": _optional_str(file_info.get("displayName")) or _optional_str(file_info.get("fileName")) or "Latest",
+            "file_name": _optional_str(file_info.get("fileName")),
+            "file_size": _coerce_non_negative_int(file_info.get("fileLength") or file_info.get("fileSizeOnDisk")),
+            "dependencies_count": len(dependencies),
+        }
+    )
+    return details
+
+
+def _remote_project_key_candidates(project: dict[str, Any]) -> set[str]:
+    provider = str(project.get("provider") or "").strip().lower()
+    candidates: set[str] = set()
+    for key_name in ("project_id", "slug"):
+        value = _optional_str(project.get(key_name))
+        if value:
+            normalized = _slugify(value)
+            candidates.add(f"{provider}:{value.lower()}")
+            if normalized:
+                candidates.add(f"{provider}:{normalized}")
+    title = _optional_str(project.get("title"))
+    if title:
+        normalized_title = _slugify(title)
+        if normalized_title:
+            candidates.add(f"{provider}:{normalized_title}")
+    file_name = _optional_str(project.get("file_name"))
+    if file_name:
+        candidates.add(f"file:{Path(file_name).stem.lower()}")
+    return {candidate for candidate in candidates if candidate and not candidate.endswith(":")}
+
+
+def _remote_project_is_installed(project: dict[str, Any], local_index: set[str]) -> bool:
+    return bool(_remote_project_key_candidates(project) & local_index)
+
+
+def _local_remote_content_index(folder: Path) -> set[str]:
+    if not folder.is_dir():
+        return set()
+    result: set[str] = set()
+    for path in folder.iterdir():
+        if not path.is_file():
+            continue
+        display_name = path.name[:-9] if path.name.lower().endswith(".disabled") else path.name
+        suffix = Path(display_name).suffix.lower()
+        if suffix not in {".jar", ".zip"}:
+            continue
+        result.add(f"file:{Path(display_name).stem.lower()}")
+        result.update(_remote_hints_from_archive(path))
+    return result
+
+
+def _remote_hints_from_archive(path: Path) -> set[str]:
+    hints: set[str] = set()
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            names = set(archive.namelist())
+            manifest = _read_manifest_properties(archive)
+            values: list[Any] = [
+                manifest.get("Implementation-Title"),
+                manifest.get("Specification-Title"),
+                manifest.get("Implementation-URL"),
+            ]
+            if "fabric.mod.json" in names:
+                data = json.loads(_read_text_from_zip(archive, "fabric.mod.json") or "{}")
+                values.extend(_fabric_project_hint_values(data))
+            elif "quilt.mod.json" in names:
+                data = json.loads(_read_text_from_zip(archive, "quilt.mod.json") or "{}")
+                values.extend(_quilt_project_hint_values(data))
+            elif "META-INF/neoforge.mods.toml" in names:
+                values.extend(_toml_project_hint_values(_read_text_from_zip(archive, "META-INF/neoforge.mods.toml")))
+            elif "META-INF/mods.toml" in names:
+                values.extend(_toml_project_hint_values(_read_text_from_zip(archive, "META-INF/mods.toml")))
+            elif "mcmod.info" in names:
+                raw = _read_text_from_zip(archive, "mcmod.info")
+                if raw:
+                    values.extend(_mcmod_project_hint_values(json.loads(raw)))
+    except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError, tomllib.TOMLDecodeError):
+        return hints
+
+    for value in values:
+        text = _optional_str(value)
+        if not text:
+            continue
+        lowered = text.lower()
+        normalized = _slugify(text)
+        if normalized:
+            hints.add(f"modrinth:{normalized}")
+            hints.add(f"curseforge:{normalized}")
+        if "modrinth.com" in lowered or "curseforge.com" in lowered:
+            hints.update(_remote_hints_from_url(text))
+    return hints
+
+
+def _remote_hints_from_url(url: str) -> set[str]:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    parts = [part for part in parsed.path.split("/") if part]
+    hints: set[str] = set()
+    provider = ""
+    if "modrinth.com" in host:
+        provider = "modrinth"
+    elif "curseforge.com" in host:
+        provider = "curseforge"
+    if not provider:
+        return hints
+    for part in reversed(parts):
+        if part.lower() in {"mod", "mods", "plugin", "plugins", "minecraft", "mc-mods", "texture-packs", "resource-packs"}:
+            continue
+        slug = _slugify(part)
+        if slug:
+            hints.add(f"{provider}:{slug}")
+            break
+    return hints
+
+
+def _fabric_project_hint_values(data: dict[str, Any]) -> list[Any]:
+    contact = data.get("contact") if isinstance(data.get("contact"), dict) else {}
+    return [data.get("id"), data.get("name"), *contact.values()]
+
+
+def _quilt_project_hint_values(data: dict[str, Any]) -> list[Any]:
+    quilt_loader = data.get("quilt_loader") if isinstance(data.get("quilt_loader"), dict) else {}
+    metadata = quilt_loader.get("metadata") if isinstance(quilt_loader.get("metadata"), dict) else {}
+    contact = metadata.get("contact") if isinstance(metadata.get("contact"), dict) else {}
+    return [quilt_loader.get("id"), metadata.get("name"), *contact.values()]
+
+
+def _toml_project_hint_values(text: str) -> list[Any]:
+    if not text.strip():
+        return []
+    data = tomllib.loads(text)
+    mods = data.get("mods")
+    if not isinstance(mods, list):
+        return []
+    values: list[Any] = []
+    for mod in mods:
+        if isinstance(mod, dict):
+            values.extend([mod.get("modId"), mod.get("displayName"), mod.get("displayURL")])
+    return values
+
+
+def _mcmod_project_hint_values(data: Any) -> list[Any]:
+    entries = data if isinstance(data, list) else [data]
+    values: list[Any] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            values.extend([entry.get("modid"), entry.get("name"), entry.get("url")])
+    return values
+
+
+def _install_curseforge_project(
+    instance: InstanceRecord,
+    content_type: str,
+    project: dict[str, Any],
+    target_dir: Path,
+    installed: list[str],
+    seen: set[str],
+    local_index: set[str],
+    api_key: str,
+    progress_callback: Callable[[str], None] | None,
+) -> None:
+    mod_id = _required_str(project.get("project_id"), "CurseForge project")
+    seen_key = f"curseforge:{mod_id}"
+    if seen_key in seen:
+        return
+    seen.add(seen_key)
+    if _remote_project_is_installed(project, local_index):
+        if progress_callback:
+            progress_callback(f"Already installed {project.get('title') or mod_id}")
+        return
+
+    if progress_callback:
+        progress_callback(f"Resolving {project.get('title') or mod_id}")
+    file_info = _curseforge_pick_file(instance, content_type, mod_id, api_key)
+    for dependency in file_info.get("dependencies", []):
+        if not isinstance(dependency, dict) or int(dependency.get("relationType") or 0) != 3:
+            continue
+        dependency_mod_id = _optional_str(dependency.get("modId"))
+        if not dependency_mod_id:
+            continue
+        _install_curseforge_project(
+            instance,
+            content_type,
+            {
+                "provider": "curseforge",
+                "content_type": content_type,
+                "project_id": dependency_mod_id,
+                "title": f"Dependency {dependency_mod_id}",
+            },
+            target_dir,
+            installed,
+            seen,
+            local_index,
+            api_key,
+            progress_callback,
+        )
+
+    filename = _required_str(file_info.get("fileName"), "CurseForge file name")
+    url = _curseforge_download_url(mod_id, file_info, api_key)
+    target = _download_remote_file(url, target_dir, filename, progress_callback)
+    if target.name not in installed:
+        installed.append(target.name)
+    local_index.update(_remote_project_key_candidates(project))
+    if progress_callback:
+        progress_callback(f"Installed {target.name}")
+
+
+def _download_curseforge_manifest_files(
+    file_entries: list[Any],
+    target_dir: Path,
+    api_key: str,
+    event_queue: Any,
+    progress: "_InstallProgressReporter | None" = None,
+) -> None:
+    entries = [entry for entry in file_entries if isinstance(entry, dict)]
+    _set_progress_max(event_queue, progress, max(1, len(entries)))
+    if not entries:
+        _set_progress_value(event_queue, progress, 1)
+        return
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for index, entry in enumerate(entries, start=1):
+        project_id = _optional_str(entry.get("projectID") or entry.get("projectId"))
+        file_id = _optional_str(entry.get("fileID") or entry.get("fileId"))
+        if not project_id or not file_id:
+            _set_progress_value(event_queue, progress, index)
+            continue
+        payload = _request_json(
+            f"{CURSEFORGE_API_BASE}/v1/mods/{project_id}/files/{file_id}",
+            headers=_curseforge_headers(api_key),
+        )
+        file_info = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(file_info, dict):
+            _set_progress_value(event_queue, progress, index)
+            continue
+        filename = _required_str(file_info.get("fileName"), "CurseForge file name")
+        url = _curseforge_download_url(project_id, file_info, api_key)
+        _queue_event(event_queue, "log", text=f"Downloading {filename}")
+        _download_remote_file(url, target_dir, filename)
+        _set_progress_value(event_queue, progress, index)
+    _queue_event(event_queue, "status", text="Downloaded CurseForge files")
 
 
 def _progress_reporter_from_callback(callback: dict[str, Any]) -> "_InstallProgressReporter | None":
@@ -4384,8 +5440,19 @@ def _detect_minecraft_activity_from_log(
 ) -> str | None:
     activity: str | None = None
     configured_addresses = list(server_addresses or [])
+    transfer_grace_lines = 0
     for line in text.splitlines():
         lowered = line.lower()
+        if _is_minecraft_menu_log_line(lowered):
+            activity = None
+            continue
+        if "transferred to another server" in lowered or "transfer intent" in lowered:
+            transfer_grace_lines = 10
+            continue
+        if transfer_grace_lines > 0:
+            transfer_grace_lines -= 1
+        if _is_secondary_connection_log_line(lowered):
+            continue
         if _is_minecraft_disconnect_log_line(lowered):
             activity = None
             continue
@@ -4401,6 +5468,8 @@ def _detect_minecraft_activity_from_log(
                     configured_addresses,
                     resolver=resolver,
                 )
+                if transfer_grace_lines > 0 and activity and not _display_address_is_configured(display_address, configured_addresses):
+                    continue
                 activity = _format_server_activity(display_address)
                 continue
 
@@ -4411,6 +5480,10 @@ def _detect_minecraft_activity_from_log(
             or "saving and pausing game" in lowered
         ):
             activity = "Playing in singleplayer"
+            continue
+
+        if "refreshing server list" in lowered or "scanning for lan worlds" in lowered:
+            activity = "Browsing multiplayer servers"
     return activity
 
 
@@ -4449,6 +5522,38 @@ def _is_minecraft_disconnect_log_line(lowered_line: str) -> bool:
         "stopping client connection",
     )
     return any(marker in lowered_line for marker in disconnect_markers)
+
+
+def _is_secondary_connection_log_line(lowered_line: str) -> bool:
+    secondary_markers = (
+        "voicechat",
+        "simple voice chat",
+        "openal",
+        "connecting to voice",
+        "voice server",
+    )
+    return any(marker in lowered_line for marker in secondary_markers)
+
+
+def _is_minecraft_menu_log_line(lowered_line: str) -> bool:
+    menu_markers = (
+        "disconnecting from server",
+        "stopping client connection",
+        "unloading server",
+        "stopping integrated server",
+        "narrator library",
+        "created: 1024x",
+    )
+    return any(marker in lowered_line for marker in menu_markers)
+
+
+def _display_address_is_configured(display_address: str, configured_addresses: list[str]) -> bool:
+    normalized = _normalize_server_host(_split_server_address(display_address)[0]).lower()
+    for configured_address in configured_addresses:
+        configured_host, _ = _split_server_address(configured_address)
+        if _normalize_server_host(configured_host).lower() == normalized:
+            return True
+    return False
 
 
 def _resolve_display_server_address(
@@ -4856,6 +5961,38 @@ def _sanitize_copy_user_data(values: list[str] | None) -> list[str]:
         sanitized.append(top_level)
         seen.add(top_level)
     return sanitized
+
+
+def _sanitize_import_entries(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+
+    sanitized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _optional_str(value)
+        if not text:
+            continue
+        normalized = text.replace("\\", "/").strip("/")
+        parts = [part for part in PurePosixPath(normalized).parts if part not in ("", ".", "..")]
+        if not parts:
+            continue
+        candidate = PurePosixPath(*parts).as_posix()
+        if not candidate or candidate in seen:
+            continue
+        sanitized.append(candidate)
+        seen.add(candidate)
+    return sanitized
+
+
+def _split_custom_jvm_args(value: str | None) -> list[str]:
+    text = _optional_str(value)
+    if not text:
+        return []
+    try:
+        return [item for item in shlex.split(text, posix=False) if item.strip()]
+    except ValueError:
+        return [item for item in text.split() if item.strip()]
 
 
 def _coerce_non_negative_int(value: Any, default: int = 0) -> int:

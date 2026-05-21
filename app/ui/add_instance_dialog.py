@@ -41,6 +41,8 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTabWidget,
     QTableView,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -374,6 +376,116 @@ class BrowseInput(QWidget):
         self.line_edit.setFocus()
 
 
+class MinecraftImportSelectionDialog(QDialog):
+    def __init__(self, source_dir: Path, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.source_dir = source_dir.resolve()
+        self.selected_entries: list[str] = []
+        self._syncing_checks = False
+        self.setObjectName("instanceEditor")
+        self.setWindowTitle("Select .minecraft Files")
+        self.setModal(True)
+        self.setMinimumSize(720, 520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("Select files to import")
+        title.setObjectName("editorSectionTitle")
+        layout.addWidget(title)
+
+        self.tree = QTreeWidget()
+        self.tree.setObjectName("modsTable")
+        self.tree.setHeaderLabels(["Name", "Details"])
+        self.tree.setFrameShape(QFrame.NoFrame)
+        self.tree.setColumnWidth(0, 420)
+        self.tree.itemChanged.connect(self._handle_item_changed)
+        layout.addWidget(self.tree, 1)
+
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(12)
+        footer.addStretch()
+        cancel_button = ModernButton("Cancel", role="sidebar", height=40, icon_size=0, minimum_width=104)
+        cancel_button.clicked.connect(self.reject)
+        footer.addWidget(cancel_button)
+        import_button = ModernButton("Import", role="accent", height=40, icon_size=0, minimum_width=104)
+        import_button.clicked.connect(self._accept_checked)
+        footer.addWidget(import_button)
+        layout.addLayout(footer)
+
+        self._populate_tree()
+
+    def _populate_tree(self) -> None:
+        self.tree.clear()
+        for entry in sorted(self.source_dir.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+            self.tree.addTopLevelItem(self._build_item(entry))
+        self.tree.collapseAll()
+
+    def _build_item(self, path: Path) -> QTreeWidgetItem:
+        relative = path.relative_to(self.source_dir).as_posix()
+        details = "Folder" if path.is_dir() else _format_import_file_size(path)
+        item = QTreeWidgetItem([path.name, details])
+        item.setData(0, Qt.UserRole, relative)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(0, Qt.Checked)
+        if path.is_dir():
+            item.setFlags(item.flags() | Qt.ItemIsAutoTristate)
+            for child in sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+                item.addChild(self._build_item(child))
+        return item
+
+    def _handle_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        if self._syncing_checks or column != 0:
+            return
+        state = item.checkState(0)
+        if state == Qt.PartiallyChecked:
+            return
+        self._syncing_checks = True
+        self._set_children_state(item, state)
+        self._syncing_checks = False
+
+    def _set_children_state(self, item: QTreeWidgetItem, state: Qt.CheckState) -> None:
+        for index in range(item.childCount()):
+            child = item.child(index)
+            child.setCheckState(0, state)
+            self._set_children_state(child, state)
+
+    def _accept_checked(self) -> None:
+        entries: list[str] = []
+        for index in range(self.tree.topLevelItemCount()):
+            self._collect_checked_entries(self.tree.topLevelItem(index), entries)
+        if not entries:
+            QMessageBox.warning(self, "Import .minecraft", "Select at least one file or folder to import.")
+            return
+        self.selected_entries = entries
+        self.accept()
+
+    def _collect_checked_entries(self, item: QTreeWidgetItem, entries: list[str]) -> None:
+        state = item.checkState(0)
+        relative = str(item.data(0, Qt.UserRole) or "")
+        if state == Qt.Checked:
+            entries.append(relative)
+            return
+        if state == Qt.Unchecked:
+            return
+        for index in range(item.childCount()):
+            self._collect_checked_entries(item.child(index), entries)
+
+
+def _format_import_file_size(path: Path) -> str:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "File"
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"
+
+
 class SearchableComboBox(QComboBox):
     def __init__(self, placeholder: str, parent: QWidget | None = None):
         super().__init__(parent)
@@ -542,6 +654,9 @@ class AddInstanceDialog(QDialog):
         self._loader_request_id = 0
         self._workers: set[QThread] = set()
         self._copy_source_instances: list[dict[str, str]] = []
+        self._minecraft_import_entries: list[str] = []
+        self._minecraft_import_source_dir: str | None = None
+        self._manual_import_version_requested = False
         self._ram_default_mb = 2048
         self._ram_slider_step_mb = 256
         self._ram_selected_mb = self._ram_default_mb
@@ -861,6 +976,28 @@ class AddInstanceDialog(QDialog):
         minecraft_caption.setObjectName("editorImportCaption")
         minecraft_caption.setAlignment(Qt.AlignLeft)
         import_layout.addWidget(minecraft_caption)
+
+        version_divider = QFrame()
+        version_divider.setObjectName("editorSectionDivider")
+        import_layout.addWidget(version_divider)
+
+        version_row = QHBoxLayout()
+        version_row.setContentsMargins(0, 0, 0, 0)
+        version_row.setSpacing(12)
+        import_layout.addLayout(version_row)
+        version_text = QVBoxLayout()
+        version_text.setSpacing(4)
+        version_title = QLabel("FALLBACK VERSION STACK")
+        version_title.setObjectName("editorImportCaption")
+        version_text.addWidget(version_title)
+        self.import_version_summary = QLabel("The launcher will use imported metadata when it can. Choose a fallback only if detection fails.")
+        self.import_version_summary.setObjectName("editorStatusText")
+        self.import_version_summary.setWordWrap(True)
+        version_text.addWidget(self.import_version_summary)
+        version_row.addLayout(version_text, 1)
+        self.import_choose_version_button = ModernButton("Choose Fallback", role="sidebar", height=40, icon_size=0, minimum_width=150, horizontal_padding=20)
+        self.import_choose_version_button.clicked.connect(self._show_version_selector_for_import)
+        version_row.addWidget(self.import_choose_version_button, 0, Qt.AlignVCenter)
         import_layout.addStretch()
 
         scroll_layout.addWidget(import_surface)
@@ -1110,6 +1247,7 @@ class AddInstanceDialog(QDialog):
         self.loader_refresh.set_metrics(height=scaled_px(self, 42, minimum=38, maximum=44), icon_size=0)
         self.modpack_input.browse_button.set_metrics(height=scaled_px(self, 46, minimum=40, maximum=48), icon_size=0)
         self.minecraft_input.browse_button.set_metrics(height=scaled_px(self, 46, minimum=40, maximum=48), icon_size=0)
+        self.import_choose_version_button.set_metrics(height=scaled_px(self, 40, minimum=36, maximum=42), icon_size=0)
         self.copy_add_button.set_metrics(height=scaled_px(self, 38, minimum=36, maximum=40), icon_size=0)
         self.copy_remove_button.set_metrics(height=scaled_px(self, 38, minimum=36, maximum=40), icon_size=0)
         self.copy_all_button.set_metrics(height=scaled_px(self, 38, minimum=36, maximum=40), icon_size=0)
@@ -1181,9 +1319,11 @@ class AddInstanceDialog(QDialog):
         self._update_name_placeholder()
         self._sync_loader_availability()
         self._refresh_loader_rows(force_refresh=False)
+        self._sync_import_version_summary()
 
     def _on_loader_selection_changed(self) -> None:
         self._update_name_placeholder()
+        self._sync_import_version_summary()
 
     def _on_loader_toggled(self, loader_id: str | None, checked: bool) -> None:
         if not checked:
@@ -1192,6 +1332,7 @@ class AddInstanceDialog(QDialog):
         self._current_loader_id = loader_id
         self._update_name_placeholder()
         self._refresh_loader_rows(force_refresh=False)
+        self._sync_import_version_summary()
 
     def _sync_loader_availability(self) -> None:
         for loader_id, button in self.loader_buttons.items():
@@ -1292,6 +1433,33 @@ class AddInstanceDialog(QDialog):
             version = self.current_version_id() or "New Instance"
             placeholder = self.service.default_instance_name(version, self._current_loader_id)
         self.name_edit.setPlaceholderText(placeholder)
+        self._sync_import_version_summary()
+
+    def _sync_import_version_summary(self) -> None:
+        if not hasattr(self, "import_version_summary"):
+            return
+        if not self._manual_import_version_requested:
+            self.import_version_summary.setText("The launcher will use imported metadata when it can. Choose a fallback only if detection fails.")
+            return
+        version = self.current_version_id()
+        if not version:
+            self.import_version_summary.setText("Select a Minecraft version and mod loader to use when import metadata is missing.")
+            return
+        if self._current_loader_id is None:
+            loader_text = "Vanilla"
+        else:
+            loader_row = self.current_loader_row()
+            loader_name = self.service.get_mod_loader_name(self._current_loader_id)
+            loader_version = str(loader_row["loader_version"]) if loader_row else "select loader version"
+            loader_text = f"{loader_name} {loader_version}"
+        self.import_version_summary.setText(f"Minecraft {version} with {loader_text}")
+
+    def _show_version_selector_for_import(self) -> None:
+        self._manual_import_version_requested = True
+        self._sync_import_version_summary()
+        self.nav_list.setCurrentRow(self.PAGE_CREATE)
+        if hasattr(self, "create_tabs"):
+            self.create_tabs.setCurrentIndex(0)
 
     def _reload_copy_source_instances(self) -> None:
         current_value = self.copy_source_combo.selected_value() if hasattr(self, "copy_source_combo") else None
@@ -1506,43 +1674,97 @@ class AddInstanceDialog(QDialog):
             self.modpack_input.focus_field()
             return
 
-        if modpack_path:
-            if not Path(modpack_path).is_file():
+        source_dir = None
+        if modpack_path and not Path(modpack_path).is_file():
+            self.ok_button.flash_invalid()
+            QMessageBox.warning(self, "Missing Modpack", "Select a valid modpack archive to continue.")
+            return
+        if minecraft_path:
+            valid, message = self.service.is_valid_minecraft_dir(minecraft_path)
+            if not valid:
                 self.ok_button.flash_invalid()
-                QMessageBox.warning(self, "Missing Modpack", "Select a valid modpack archive to continue.")
+                QMessageBox.warning(self, "Invalid .minecraft Folder", message)
                 return
+
+            source_dir = self.service.resolve_minecraft_import_source(minecraft_path)
+            if source_dir is None:
+                self.ok_button.flash_invalid()
+                QMessageBox.warning(self, "Invalid .minecraft Folder", message)
+                return
+
+        preview_metadata = self.service.preview_import_metadata(
+            modpack_path=modpack_path or None,
+            minecraft_import_dir=minecraft_path or None,
+        )
+        selected_loader_version = None
+        selected_version = None
+        if self._manual_import_version_requested:
+            version_row = self.current_version_row()
+            if version_row is None:
+                self.ok_button.flash_invalid()
+                QMessageBox.warning(self, "Missing Version", "Select a Minecraft version for the imported instance.")
+                self._show_version_selector_for_import()
+                return
+            selected_version = str(version_row["id"])
+        elif preview_metadata is None:
+            self._manual_import_version_requested = True
+            self.ok_button.flash_invalid()
+            QMessageBox.warning(
+                self,
+                "Choose Version",
+                "The launcher could not detect a Minecraft version from this import. Choose the Minecraft version and mod loader to install for it.",
+            )
+            self._show_version_selector_for_import()
+            return
+
+        if self._manual_import_version_requested and self._current_loader_id:
+            loader_row = self.current_loader_row()
+            if loader_row is None:
+                self.ok_button.flash_invalid()
+                QMessageBox.warning(self, "Missing Loader Version", "Select a mod loader version or switch the loader back to None.")
+                self._show_version_selector_for_import()
+                return
+            selected_loader_version = str(loader_row["loader_version"])
+
+        if modpack_path:
             self.selection = {
                 "name": self.name_edit.text().strip(),
-                "vanilla_version": None,
-                "mod_loader_id": None,
-                "mod_loader_version": None,
+                "vanilla_version": selected_version,
+                "mod_loader_id": self._current_loader_id if self._manual_import_version_requested else None,
+                "mod_loader_version": selected_loader_version,
                 "icon_path": self._selected_icon_path,
-                "memory_mb": self._ram_default_mb,
+                "memory_mb": self._ram_selected_mb,
                 "operation": "import_modpack",
                 "modpack_path": modpack_path,
                 "minecraft_import_dir": None,
+                "minecraft_import_entries": [],
                 "copy_source_instance_id": None,
                 "copy_user_data": [],
             }
             self.accept()
             return
 
-        valid, message = self.service.is_valid_minecraft_dir(minecraft_path)
-        if not valid:
-            self.ok_button.flash_invalid()
-            QMessageBox.warning(self, "Invalid .minecraft Folder", message)
+        if source_dir is None:
             return
+        resolved_source = str(source_dir.resolve())
+        if not self._minecraft_import_entries or self._minecraft_import_source_dir != resolved_source:
+            selection_dialog = MinecraftImportSelectionDialog(source_dir, self)
+            if selection_dialog.exec() != QDialog.Accepted:
+                return
+            self._minecraft_import_entries = list(selection_dialog.selected_entries)
+            self._minecraft_import_source_dir = resolved_source
 
         self.selection = {
             "name": self.name_edit.text().strip(),
-            "vanilla_version": None,
-            "mod_loader_id": None,
-            "mod_loader_version": None,
+            "vanilla_version": selected_version,
+            "mod_loader_id": self._current_loader_id if self._manual_import_version_requested else None,
+            "mod_loader_version": selected_loader_version,
             "icon_path": self._selected_icon_path,
-            "memory_mb": self._ram_default_mb,
+            "memory_mb": self._ram_selected_mb,
             "operation": "import_minecraft",
             "modpack_path": None,
             "minecraft_import_dir": minecraft_path,
+            "minecraft_import_entries": list(self._minecraft_import_entries),
             "copy_source_instance_id": None,
             "copy_user_data": [],
         }
@@ -1569,6 +1791,10 @@ class AddInstanceDialog(QDialog):
         if not file_path:
             return
         self.modpack_input.setText(file_path)
+        self._minecraft_import_entries = []
+        self._minecraft_import_source_dir = None
+        self._manual_import_version_requested = False
+        self._sync_import_version_summary()
         if self.minecraft_input.text():
             self.minecraft_input.clear()
 
@@ -1587,6 +1813,20 @@ class AddInstanceDialog(QDialog):
             QMessageBox.warning(self, "Invalid .minecraft Folder", message)
             return
 
+        source_dir = self.service.resolve_minecraft_import_source(folder_path)
+        if source_dir is None:
+            self.ok_button.flash_invalid()
+            QMessageBox.warning(self, "Invalid .minecraft Folder", message)
+            return
+
+        selection_dialog = MinecraftImportSelectionDialog(source_dir, self)
+        if selection_dialog.exec() != QDialog.Accepted:
+            return
+
+        self._minecraft_import_entries = list(selection_dialog.selected_entries)
+        self._minecraft_import_source_dir = str(source_dir.resolve())
+        self._manual_import_version_requested = False
+        self._sync_import_version_summary()
         self.minecraft_input.setText(folder_path)
         if self.modpack_input.text():
             self.modpack_input.clear()
@@ -1636,6 +1876,7 @@ class AddInstanceDialog(QDialog):
             else:
                 self.version_placeholder.set_text("No Minecraft versions were returned.")
                 self.version_stack.setCurrentIndex(0)
+            self._sync_import_version_summary()
             return
 
         if job == "loader_versions":
@@ -1652,6 +1893,7 @@ class AddInstanceDialog(QDialog):
                 self.loader_model.set_rows([])
                 self.loader_placeholder.set_text("No compatible loader versions were returned for this selection.")
                 self.loader_stack.setCurrentIndex(0)
+            self._sync_import_version_summary()
 
     def _handle_catalog_failed(self, job: str, request_id: int, message: str) -> None:
         if job == "versions":

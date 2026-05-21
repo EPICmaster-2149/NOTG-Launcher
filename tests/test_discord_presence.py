@@ -8,6 +8,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from core import discord_presence  # noqa: E402
+from core.launcher import _detect_minecraft_activity_from_log  # noqa: E402
 
 
 class FakePresence:
@@ -84,3 +85,16 @@ def test_activity_text_is_trimmed_to_discord_limit(monkeypatch) -> None:
     payload = FakePresence.instances[0].updates[0]
     assert len(payload["state"]) == discord_presence.MAX_ACTIVITY_TEXT_LENGTH
     assert len(payload["details"]) == discord_presence.MAX_ACTIVITY_TEXT_LENGTH
+
+
+def test_minecraft_transfer_keeps_configured_server_address() -> None:
+    log = "\n".join(
+        [
+            "[Render thread/INFO]: Connecting to play.example.com, 25565",
+            "[Render thread/WARN]: Client disconnected with reason: Transferred to another server",
+            "[Render thread/INFO]: Connecting to 10.1.2.3, 25565",
+            "[voicechat/INFO]: Connecting to voice server 10.9.9.9",
+        ]
+    )
+
+    assert _detect_minecraft_activity_from_log(log, server_addresses=["play.example.com"]) == "Playing in play.example.com"

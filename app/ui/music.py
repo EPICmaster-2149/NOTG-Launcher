@@ -1191,7 +1191,7 @@ class IconButton(QPushButton):
         painter.drawRoundedRect(rect, 8, 8)
         painter.setPen(QPen(icon_color, max(1.5, self._button_size / 18), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.setBrush(icon_color)
-        padding = 7 if self._icon_kind == "burger" else 8 if self._icon_kind in {"volume", "dots", "shuffle", "loop", "trash"} else 11
+        padding = 7 if self._icon_kind == "burger" else 8 if self._icon_kind in {"volume", "dots", "shuffle", "loop", "trash", "play", "pause", "plus", "edit", "window_play"} else 10
         self._paint_icon(painter, rect.adjusted(padding, padding, -padding, -padding), icon_color)
 
     def _standard_pixmap(self):
@@ -1229,7 +1229,13 @@ class IconButton(QPushButton):
         elif self._icon_kind == "burger":
             self._paint_burger(painter, rect)
         elif self._icon_kind == "trash":
-            self._paint_standard_icon(painter, rect)
+            self._paint_trash(painter, rect)
+        elif self._icon_kind == "window_play":
+            self._paint_window_play(painter, rect)
+        elif self._icon_kind == "plus":
+            self._paint_plus(painter, rect)
+        elif self._icon_kind == "edit":
+            self._paint_edit(painter, rect)
         else:
             self._paint_play(painter, rect)
 
@@ -1295,11 +1301,43 @@ class IconButton(QPushButton):
         )
 
     def _paint_pause(self, painter: QPainter, rect: QRectF) -> None:
-        bar_width = rect.width() * 0.26
-        gap = rect.width() * 0.18
+        bar_width = max(3.0, rect.width() * 0.22)
+        gap = max(3.8, rect.width() * 0.28)
+        bar_height = rect.height() * 0.86
         start_x = rect.center().x() - (((bar_width * 2) + gap) / 2)
-        painter.drawRoundedRect(QRectF(start_x, rect.top(), bar_width, rect.height()), 2, 2)
-        painter.drawRoundedRect(QRectF(start_x + bar_width + gap, rect.top(), bar_width, rect.height()), 2, 2)
+        top = rect.center().y() - (bar_height / 2)
+        radius = max(1.3, bar_width * 0.45)
+        painter.drawRoundedRect(QRectF(start_x, top, bar_width, bar_height), radius, radius)
+        painter.drawRoundedRect(QRectF(start_x + bar_width + gap, top, bar_width, bar_height), radius, radius)
+
+    def _paint_trash(self, painter: QPainter, rect: QRectF) -> None:
+        painter.save()
+        painter.setBrush(Qt.NoBrush)
+        pen = painter.pen()
+        pen.setWidthF(max(1.7, rect.width() * 0.10))
+        painter.setPen(pen)
+        left = rect.left() + rect.width() * 0.22
+        right = rect.right() - rect.width() * 0.22
+        top = rect.top() + rect.height() * 0.34
+        bottom = rect.bottom() - rect.height() * 0.08
+        lid_y = rect.top() + rect.height() * 0.25
+        handle_left = rect.left() + rect.width() * 0.40
+        handle_right = rect.right() - rect.width() * 0.40
+        handle_y = rect.top() + rect.height() * 0.14
+        painter.drawLine(QPoint(int(left - rect.width() * 0.08), int(lid_y)), QPoint(int(right + rect.width() * 0.08), int(lid_y)))
+        painter.drawLine(QPoint(int(handle_left), int(lid_y - 1)), QPoint(int(handle_left), int(handle_y)))
+        painter.drawLine(QPoint(int(handle_left), int(handle_y)), QPoint(int(handle_right), int(handle_y)))
+        painter.drawLine(QPoint(int(handle_right), int(handle_y)), QPoint(int(handle_right), int(lid_y - 1)))
+        body = QPainterPath()
+        body.moveTo(left, top)
+        body.lineTo(right, top)
+        body.lineTo(right - rect.width() * 0.07, bottom)
+        body.quadTo(rect.center().x(), rect.bottom(), left + rect.width() * 0.07, bottom)
+        body.closeSubpath()
+        painter.drawPath(body)
+        painter.drawLine(QPoint(int(rect.center().x() - rect.width() * 0.11), int(top + rect.height() * 0.18)), QPoint(int(rect.center().x() - rect.width() * 0.08), int(bottom - rect.height() * 0.12)))
+        painter.drawLine(QPoint(int(rect.center().x() + rect.width() * 0.11), int(top + rect.height() * 0.18)), QPoint(int(rect.center().x() + rect.width() * 0.08), int(bottom - rect.height() * 0.12)))
+        painter.restore()
 
     def _paint_loop(self, painter: QPainter, rect: QRectF) -> None:
         painter.save()
@@ -1352,6 +1390,51 @@ class IconButton(QPushButton):
         for offset in (0.25, 0.5, 0.75):
             y = rect.top() + rect.height() * offset
             painter.drawLine(QPoint(int(rect.left()), int(y)), QPoint(int(rect.right()), int(y)))
+
+    def _paint_plus(self, painter: QPainter, rect: QRectF) -> None:
+        painter.drawLine(QPoint(int(rect.center().x()), int(rect.top())), QPoint(int(rect.center().x()), int(rect.bottom())))
+        painter.drawLine(QPoint(int(rect.left()), int(rect.center().y())), QPoint(int(rect.right()), int(rect.center().y())))
+
+    def _paint_window_play(self, painter: QPainter, rect: QRectF) -> None:
+        painter.save()
+        pen = painter.pen()
+        pen.setWidthF(max(1.6, rect.width() * 0.08))
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        window = QRectF(rect.left(), rect.top() + rect.height() * 0.08, rect.width() * 0.72, rect.height() * 0.72)
+        painter.drawRoundedRect(window, 3, 3)
+        painter.drawLine(QPoint(int(window.left()), int(window.top() + window.height() * 0.26)), QPoint(int(window.right()), int(window.top() + window.height() * 0.26)))
+        painter.setBrush(pen.color())
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    QPoint(int(rect.left() + rect.width() * 0.52), int(rect.top() + rect.height() * 0.30)),
+                    QPoint(int(rect.right()), int(rect.center().y())),
+                    QPoint(int(rect.left() + rect.width() * 0.52), int(rect.bottom() - rect.height() * 0.10)),
+                ]
+            )
+        )
+        painter.restore()
+
+    def _paint_edit(self, painter: QPainter, rect: QRectF) -> None:
+        painter.save()
+        painter.setBrush(Qt.NoBrush)
+        pen = painter.pen()
+        pen.setWidthF(max(1.7, rect.width() * 0.11))
+        painter.setPen(pen)
+        shaft = QPainterPath()
+        shaft.moveTo(rect.left() + rect.width() * 0.20, rect.bottom() - rect.height() * 0.18)
+        shaft.lineTo(rect.right() - rect.width() * 0.20, rect.top() + rect.height() * 0.22)
+        painter.drawPath(shaft)
+        painter.drawLine(
+            QPoint(int(rect.right() - rect.width() * 0.34), int(rect.top() + rect.height() * 0.10)),
+            QPoint(int(rect.right() - rect.width() * 0.10), int(rect.top() + rect.height() * 0.34)),
+        )
+        painter.drawLine(
+            QPoint(int(rect.left() + rect.width() * 0.12), int(rect.bottom() - rect.height() * 0.08)),
+            QPoint(int(rect.left() + rect.width() * 0.28), int(rect.bottom() - rect.height() * 0.12)),
+        )
+        painter.restore()
 
     def _animate(self, animation: QVariantAnimation, start: float, end: float) -> None:
         animation.stop()
@@ -1912,8 +1995,7 @@ class PlaylistRowWidget(QFrame):
         if compact:
             self._layout.setContentsMargins(0, 6, 0, 6)
             self._layout.setAlignment(self.icon_label, Qt.AlignCenter)
-            self.setMinimumWidth(48)
-            self.setMaximumWidth(52)
+            self.setFixedWidth(48)
         else:
             self._layout.setContentsMargins(8, 6, 8, 6)
             self._layout.setAlignment(self.icon_label, Qt.Alignment())
@@ -2356,10 +2438,24 @@ class MusicManagerDialog(QDialog):
         side_layout = QVBoxLayout(self.sidebar)
         side_layout.setContentsMargins(10, 10, 10, 10)
         side_layout.setSpacing(10)
+        side_header = QHBoxLayout()
+        self.side_header = side_header
+        side_header.setContentsMargins(0, 0, 0, 0)
+        side_header.setSpacing(8)
         self.burger_button = IconButton("burger", role="toolbar", button_size=34)
         self.burger_button.setToolTip("Collapse sidebar")
         self.burger_button.clicked.connect(self._toggle_sidebar)
-        side_layout.addWidget(self.burger_button, 0, Qt.AlignLeft)
+        side_header.addWidget(self.burger_button)
+        self.add_playlist_button = IconButton("plus", role="toolbar", button_size=34)
+        self.add_playlist_button.setToolTip("Add playlist")
+        self.add_playlist_button.clicked.connect(self._open_add_playlist)
+        side_header.addWidget(self.add_playlist_button)
+        self.background_play_button = IconButton("window_play", role="toolbar", button_size=34)
+        self.background_play_button.setToolTip("Keep music playing when launcher closes")
+        self.background_play_button.clicked.connect(lambda: self.controller.set_run_while_closed(not self.controller.run_while_closed))
+        side_header.addWidget(self.background_play_button)
+        side_header.addStretch()
+        side_layout.addLayout(side_header)
         self.playlist_list = QListWidget()
         self.playlist_list.setObjectName("musicPlaylistList")
         self.playlist_list.setFrameShape(QFrame.NoFrame)
@@ -2367,14 +2463,6 @@ class MusicManagerDialog(QDialog):
         self.playlist_list.setSpacing(6)
         self.playlist_list.itemClicked.connect(self._handle_playlist_clicked)
         side_layout.addWidget(self.playlist_list, 1)
-        self.add_playlist_button = QPushButton("Add Playlist")
-        self.add_playlist_button.setObjectName("musicAddPlaylistButton")
-        self.add_playlist_button.setCursor(Qt.PointingHandCursor)
-        settings_icon = _settings_icon_path(self.controller.service)
-        if settings_icon:
-            self.add_playlist_button.setIcon(QIcon(settings_icon))
-        self.add_playlist_button.clicked.connect(self._open_add_playlist)
-        side_layout.addWidget(self.add_playlist_button)
         body.addWidget(self.sidebar)
 
         main = QFrame()
@@ -2423,7 +2511,6 @@ class MusicManagerDialog(QDialog):
         main_layout.addLayout(action_row)
 
         self.track_list = AnimatedTrackList(self.controller.service)
-        self.track_list.track_enabled_changed.connect(self.controller.set_track_enabled)
         self.track_list.records_reordered.connect(self._handle_records_reordered)
         self.track_list.track_activated.connect(self.controller.play_track)
         self.track_list.selected_track_changed.connect(lambda *_: None)
@@ -2514,6 +2601,7 @@ class MusicManagerDialog(QDialog):
         self.controller.duration_changed.connect(self._sync_duration)
         self.controller.loop_changed.connect(self._sync_loop)
         self.controller.shuffle_changed.connect(self._sync_shuffle)
+        self.controller.background_play_changed.connect(self._sync_background_play)
         self.controller.volume_changed.connect(self._sync_volume)
         self.controller.resolve_failed.connect(lambda message: QMessageBox.warning(self, "Music", message))
 
@@ -2526,6 +2614,7 @@ class MusicManagerDialog(QDialog):
         self._sync_playback(self.controller.is_playing)
         self._sync_loop(self.controller.loop_enabled)
         self._sync_shuffle(self.controller.shuffle_enabled)
+        self._sync_background_play(self.controller.run_while_closed)
         self._sync_volume(self.controller.volume, self.controller.muted)
         if not self.controller.available:
             self.play_button.setEnabled(False)
@@ -2597,6 +2686,10 @@ class MusicManagerDialog(QDialog):
         self.shuffle_button.set_active(enabled)
         self.shuffle_button.setToolTip("Shuffle on" if enabled else "Shuffle off")
 
+    def _sync_background_play(self, enabled: bool) -> None:
+        self.background_play_button.set_active(enabled)
+        self.background_play_button.setToolTip("Keep music playing when launcher closes" if enabled else "Stop music when launcher closes")
+
     def _sync_volume(self, volume: int, muted: bool) -> None:
         self.volume_slider.blockSignals(True)
         self.volume_slider.setValue(volume)
@@ -2626,7 +2719,12 @@ class MusicManagerDialog(QDialog):
         if isinstance(side_layout, QVBoxLayout):
             side_layout.setContentsMargins(7 if self._sidebar_collapsed else 10, 10, 7 if self._sidebar_collapsed else 10, 10)
             side_layout.setAlignment(self.burger_button, Qt.AlignHCenter if self._sidebar_collapsed else Qt.AlignLeft)
-        self.add_playlist_button.setText("" if self._sidebar_collapsed else "Add Playlist")
+        self.side_header.setAlignment(Qt.AlignHCenter if self._sidebar_collapsed else Qt.AlignLeft)
+        self.playlist_list.setFixedWidth(52 if self._sidebar_collapsed else 204)
+        if not self._sidebar_collapsed:
+            self.playlist_list.setMaximumWidth(16777215)
+        self.add_playlist_button.setVisible(not self._sidebar_collapsed)
+        self.background_play_button.setVisible(not self._sidebar_collapsed)
         for index in range(self.playlist_list.count()):
             row = self.playlist_list.itemWidget(self.playlist_list.item(index))
             if isinstance(row, PlaylistRowWidget):
