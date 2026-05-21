@@ -1297,6 +1297,24 @@ class LauncherService:
         self._write_background_payload(payload)
         return str(payload["theme"])
 
+    def get_theme_adapt_to_music(self) -> bool:
+        return bool(self._read_background_payload().get("theme_adapt_to_music", False))
+
+    def set_theme_adapt_to_music(self, enabled: bool) -> bool:
+        payload = self._read_background_payload()
+        payload["theme_adapt_to_music"] = bool(enabled)
+        self._write_background_payload(payload)
+        return bool(payload["theme_adapt_to_music"])
+
+    def get_theme_accent_color(self) -> str:
+        return _normalize_hex_color(self._read_background_payload().get("theme_accent"), "#2E45FF")
+
+    def set_theme_accent_color(self, color: str) -> str:
+        payload = self._read_background_payload()
+        payload["theme_accent"] = _normalize_hex_color(color, "#2E45FF")
+        self._write_background_payload(payload)
+        return str(payload["theme_accent"])
+
     def music_folder(self) -> Path:
         return self.user_music_root
 
@@ -2785,6 +2803,8 @@ class LauncherService:
             "mode": "default",
             "close_ui_on_launch": True,
             "theme": "dark",
+            "theme_adapt_to_music": False,
+            "theme_accent": "#2E45FF",
         }
         if not self.background_settings_file.is_file():
             return payload
@@ -2800,12 +2820,16 @@ class LauncherService:
             payload = {"mode": mode, "file_name": file_name}
         payload["close_ui_on_launch"] = bool(loaded.get("close_ui_on_launch", True))
         payload["theme"] = "light" if str(loaded.get("theme", "dark")).strip().lower() == "light" else "dark"
+        payload["theme_adapt_to_music"] = bool(loaded.get("theme_adapt_to_music", False))
+        payload["theme_accent"] = _normalize_hex_color(loaded.get("theme_accent"), "#2E45FF")
         return payload
 
     def _write_background_payload(self, payload: dict[str, Any]) -> None:
         payload = dict(payload)
         payload["close_ui_on_launch"] = bool(payload.get("close_ui_on_launch", True))
         payload["theme"] = "light" if str(payload.get("theme", "dark")).strip().lower() == "light" else "dark"
+        payload["theme_adapt_to_music"] = bool(payload.get("theme_adapt_to_music", False))
+        payload["theme_accent"] = _normalize_hex_color(payload.get("theme_accent"), "#2E45FF")
         self.background_settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _base_music_payload(self) -> dict[str, Any]:
@@ -6017,6 +6041,17 @@ def _coerce_volume_percent(value: Any, default: int = 75) -> int:
     except (TypeError, ValueError):
         volume = int(default)
     return max(0, min(100, volume))
+
+
+def _normalize_hex_color(value: Any, fallback: str) -> str:
+    text = _optional_str(value)
+    if not text:
+        return fallback
+    if not text.startswith("#"):
+        text = f"#{text}"
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+        return text.lower()
+    return fallback
 
 
 def _system_memory_cap_mb() -> int:

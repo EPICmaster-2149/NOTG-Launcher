@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import re
+from pathlib import Path
 from typing import Any
 
 import requests
-from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, QThread, QTimer, Signal, QVariantAnimation
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -27,6 +30,9 @@ from ui.add_instance_dialog import AccentLineEdit
 from ui.app_icon import application_icon
 from ui.responsive import fitted_window_size, scaled_px
 from ui.topbar import ModernButton
+
+
+_ICON_BYTES_CACHE: dict[str, bytes] = {}
 
 
 class RemoteContentWorker(QThread):
@@ -67,7 +73,7 @@ class RemoteContentWorker(QThread):
                 )
                 installed = self._service.remote_content_installed_index(self._instance, self._content_type)
                 payload = {
-                    "projects": _attach_icon_payloads(projects),
+                    "projects": projects,
                     "installed": list(installed),
                 }
             elif self._job == "details":
@@ -86,6 +92,23 @@ class RemoteContentWorker(QThread):
 
         if not self.isInterruptionRequested():
             self.loaded.emit(self._job, payload)
+
+
+class RemoteIconWorker(QThread):
+    icon_loaded = Signal(str, object)
+
+    def __init__(self, targets: list[tuple[str, str]], cache_dir: Path, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._targets = list(targets)
+        self._cache_dir = cache_dir
+
+    def run(self) -> None:
+        for key, url in self._targets:
+            if self.isInterruptionRequested():
+                return
+            data = _icon_bytes_for_url(url, self._cache_dir)
+            if data:
+                self.icon_loaded.emit(key, data)
 
 
 class ProviderLogo(QLabel):
@@ -112,18 +135,26 @@ class ProviderLogo(QLabel):
 class ProjectIcon(QLabel):
     def __init__(self, project: dict[str, Any], parent: QWidget | None = None):
         super().__init__(parent)
-        self.setFixedSize(40, 40)
+        self._fallback: ProviderLogo | None = None
+        self.setFixedSize(44, 44)
         self.setAlignment(Qt.AlignCenter)
+        self.set_icon_data(project.get("icon_data"), str(project.get("provider") or ""))
+
+    def set_icon_data(self, icon_data: object, provider: str = "") -> None:
         pixmap = QPixmap()
-        icon_data = project.get("icon_data")
         if isinstance(icon_data, (bytes, bytearray)):
             pixmap.loadFromData(bytes(icon_data))
         if not pixmap.isNull():
-            self.setPixmap(pixmap.scaled(40, 40, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
+            if self._fallback is not None:
+                self._fallback.hide()
+                self._fallback.deleteLater()
+                self._fallback = None
+            self.setPixmap(pixmap.scaled(44, 44, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
             return
-        provider = str(project.get("provider") or "")
-        self._fallback = ProviderLogo("M" if provider == "modrinth" else "C", "#30B27B" if provider == "modrinth" else "#FF6432", self)
-        self._fallback.move(6, 6)
+        self.clear()
+        if self._fallback is None:
+            self._fallback = ProviderLogo("M" if provider == "modrinth" else "C", "#30B27B" if provider == "modrinth" else "#FF6432", self)
+            self._fallback.move(8, 8)
 
 
 def _provider_icon(text: str, color: str) -> QIcon:
@@ -144,39 +175,27 @@ def _provider_icon(text: str, color: str) -> QIcon:
     return QIcon(pixmap)
 
 
-def _attach_icon_payloads(projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    enriched: list[dict[str, Any]] = []
-    for project in projects:
-        copy = dict(project)
-        icon_url = str(copy.get("icon_url") or "")
-        if icon_url.startswith(("http://", "https://")):
-            try:
-                response = requests.get(icon_url, timeout=8)
-            except requests.RequestException:
-                response = None
-            if response is not None and response.ok and response.content:
-                copy["icon_data"] = response.content[:1_500_000]
-        enriched.append(copy)
-    return enriched
-
-
 class RemoteContentRow(QWidget):
     install_requested = Signal(object)
 
     def __init__(self, project: dict[str, Any], parent: QWidget | None = None):
         super().__init__(parent)
         self.project = project
+        self._hover = 0.0
+        self._active = 0.0
         self.setObjectName("remoteContentRow")
-        self.setMinimumHeight(76)
+        self.setMinimumHeight(86)
+        self.setMouseTracking(True)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(12)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(14)
 
-        layout.addWidget(ProjectIcon(project), 0, Qt.AlignVCenter)
+        self.icon = ProjectIcon(project)
+        layout.addWidget(self.icon, 0, Qt.AlignVCenter)
 
         text_column = QVBoxLayout()
-        text_column.setSpacing(4)
+        text_column.setSpacing(3)
         self.title = QLabel(str(project.get("title") or "Untitled"))
         self.title.setObjectName("musicTrackName")
         self.title.setWordWrap(False)
@@ -186,11 +205,28 @@ class RemoteContentRow(QWidget):
         self.description.setObjectName("editorStatusText")
         self.description.setWordWrap(False)
         text_column.addWidget(self.description)
+        provider = "Modrinth" if project.get("provider") == "modrinth" else "CurseForge"
+        downloads = int(project.get("downloads") or 0)
+        self.metadata = QLabel(f"{provider}  /  {downloads:,} downloads")
+        self.metadata.setObjectName("remoteContentMeta")
+        self.metadata.setWordWrap(False)
+        text_column.addWidget(self.metadata)
         layout.addLayout(text_column, 1)
 
         self.install_button = ModernButton("Install", role="accent", height=34, icon_size=0, minimum_width=98, horizontal_padding=18)
         self.install_button.clicked.connect(lambda: self.install_requested.emit(self.project))
         layout.addWidget(self.install_button)
+        self._hover_animation = QVariantAnimation(self, duration=150, easingCurve=QEasingCurve.OutCubic)
+        self._hover_animation.valueChanged.connect(lambda value: self._set_value("_hover", value))
+        self._active_animation = QVariantAnimation(self, duration=180, easingCurve=QEasingCurve.OutCubic)
+        self._active_animation.valueChanged.connect(lambda value: self._set_value("_active", value))
+
+    def set_icon_data(self, icon_data: bytes) -> None:
+        self.project["icon_data"] = icon_data
+        self.icon.set_icon_data(icon_data, str(self.project.get("provider") or ""))
+
+    def set_selected(self, selected: bool) -> None:
+        self._animate(self._active_animation, self._active, 1.0 if selected else 0.0)
 
     def set_state(self, state: str) -> None:
         if state == "installing":
@@ -206,6 +242,43 @@ class RemoteContentRow(QWidget):
             self.install_button.set_role("accent")
             self.install_button.setEnabled(True)
 
+    def enterEvent(self, event) -> None:
+        self._animate(self._hover_animation, self._hover, 1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._animate(self._hover_animation, self._hover, 0.0)
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        del event
+        accent = _provider_accent(str(self.project.get("provider") or ""))
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        base = QColor(9, 15, 25, 186)
+        hover = QColor(accent)
+        hover.setAlpha(38)
+        active = QColor(accent)
+        active.setAlpha(62)
+        bg = _blend(base, hover, self._hover)
+        bg = _blend(bg, active, self._active)
+        border = QColor(accent)
+        border.setAlpha(int(58 + (self._hover * 44) + (self._active * 70)))
+        painter.setPen(QPen(border, 1.0))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 8, 8)
+
+    def _animate(self, animation: QVariantAnimation, start: float, end: float) -> None:
+        animation.stop()
+        animation.setStartValue(float(start))
+        animation.setEndValue(float(end))
+        animation.start()
+
+    def _set_value(self, attribute: str, value) -> None:
+        setattr(self, attribute, float(value))
+        self.update()
+
 
 class InstallModsDialog(QDialog):
     def __init__(self, service: LauncherService, instance: InstanceRecord, parent: QWidget | None = None):
@@ -218,6 +291,7 @@ class InstallModsDialog(QDialog):
         self._rows: dict[str, RemoteContentRow] = {}
         self._installed: set[str] = set()
         self._worker: RemoteContentWorker | None = None
+        self._icon_worker: RemoteIconWorker | None = None
         self._active_job: str | None = None
         self._selected_project: dict[str, Any] | None = None
         self._installing_project_key: str | None = None
@@ -225,6 +299,7 @@ class InstallModsDialog(QDialog):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self._run_search)
+        self._icon_cache_dir = self.service.cache_root / "remote-content-icons"
 
         self.setObjectName("editInstanceDialog")
         self.setWindowTitle(f"Install Mods - {instance.name}")
@@ -246,6 +321,9 @@ class InstallModsDialog(QDialog):
         if self._worker is not None and self._worker.isRunning():
             self._worker.requestInterruption()
             self._worker.wait()
+        if self._icon_worker is not None and self._icon_worker.isRunning():
+            self._icon_worker.requestInterruption()
+            self._icon_worker.wait()
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
@@ -323,6 +401,8 @@ class InstallModsDialog(QDialog):
         self.result_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.result_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.result_list.setUniformItemSizes(True)
+        self.result_list.setLayoutMode(QListView.LayoutMode.Batched)
+        self.result_list.setBatchSize(10)
         self.result_list.currentItemChanged.connect(self._handle_current_item_changed)
         content_layout.addWidget(self.result_list, 2)
 
@@ -381,6 +461,8 @@ class InstallModsDialog(QDialog):
         self.filter_label.setText(f"Filtering {self._content_type_label()} for Minecraft {self.instance.vanilla_version} and {self.instance.loader_name}.")
         self.result_list.clear()
         self._rows.clear()
+        if self._icon_worker is not None and self._icon_worker.isRunning():
+            self._icon_worker.requestInterruption()
         self.details_title.setText("Loading...")
         self.details_text.setText("")
         self._start_worker("search", query=self.search_input.text())
@@ -465,7 +547,7 @@ class InstallModsDialog(QDialog):
         for project in self._projects:
             item = QListWidgetItem()
             item.setData(Qt.UserRole, project)
-            item.setSizeHint(QSize(0, 84))
+            item.setSizeHint(QSize(0, 94))
             self.result_list.addItem(item)
             row = RemoteContentRow(project)
             row.install_requested.connect(self._install_project)
@@ -474,6 +556,8 @@ class InstallModsDialog(QDialog):
             self.result_list.setItemWidget(item, row)
             self._rows[self._project_key(project)] = row
         self.result_list.setCurrentRow(0)
+        self._sync_row_selection()
+        self._start_icon_worker()
 
     def _handle_current_item_changed(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
         del previous
@@ -484,9 +568,43 @@ class InstallModsDialog(QDialog):
             return
         self._selected_project = project
         self._show_details(project)
+        self._sync_row_selection()
         if self._active_job == "install":
             return
         self._start_worker("details", project=project)
+
+    def _sync_row_selection(self) -> None:
+        current = self.result_list.currentItem()
+        for index in range(self.result_list.count()):
+            item = self.result_list.item(index)
+            row = self.result_list.itemWidget(item)
+            if isinstance(row, RemoteContentRow):
+                row.set_selected(item is current)
+
+    def _start_icon_worker(self) -> None:
+        targets: list[tuple[str, str]] = []
+        for project in self._projects:
+            url = str(project.get("icon_url") or "")
+            if url.startswith(("http://", "https://")):
+                targets.append((self._project_key(project), url))
+        if not targets:
+            return
+        worker = RemoteIconWorker(targets, self._icon_cache_dir, self)
+        worker.icon_loaded.connect(self._handle_icon_loaded)
+        worker.finished.connect(lambda worker=worker: self._handle_icon_worker_finished(worker))
+        self._icon_worker = worker
+        worker.start()
+
+    def _handle_icon_loaded(self, key: str, icon_data: object) -> None:
+        if not isinstance(icon_data, (bytes, bytearray)):
+            return
+        row = self._rows.get(key)
+        if row is not None:
+            row.set_icon_data(bytes(icon_data))
+
+    def _handle_icon_worker_finished(self, worker: RemoteIconWorker) -> None:
+        if self._icon_worker is worker:
+            self._icon_worker = None
 
     def _show_details(self, project: dict[str, Any]) -> None:
         self._selected_project = project
@@ -581,25 +699,48 @@ class InstallModsDialog(QDialog):
         }.get(self._content_type, self._content_type)
 
     def _apply_provider_theme(self) -> None:
-        accent = "#30B27B" if self._provider == "modrinth" else "#FF6432"
-        base = "#111216" if self._provider == "modrinth" else "#1C1C1C"
+        accent = _provider_accent(self._provider)
+        accent_hex = accent.name()
+        tint = f"rgba({accent.red()}, {accent.green()}, {accent.blue()}, 0.24)"
         self.setStyleSheet(
             f"""
             QDialog#editInstanceDialog {{
-                background-color: #070F1E;
+                background-color: qradialgradient(
+                    cx: 0.16,
+                    cy: 0.08,
+                    radius: 1.12,
+                    fx: 0.16,
+                    fy: 0.08,
+                    stop: 0 #14243a,
+                    stop: 0.42 #09111d,
+                    stop: 1 #050911
+                );
             }}
             QFrame#instanceEditorContent {{
-                background-color: {base};
-                border: 1px solid {accent};
+                background-color: rgba(7, 12, 20, 0.88);
+                border: 1px solid {accent_hex};
                 border-radius: 8px;
             }}
-            QWidget#remoteContentRow {{
-                background-color: rgba(255, 255, 255, 12);
-                border: 1px solid rgba(255, 255, 255, 34);
-                border-radius: 8px;
+            QFrame#instanceEditorNav {{
+                background-color: rgba(8, 15, 26, 0.90);
+                border: 1px solid rgba(88, 122, 174, 0.34);
+                border-top-left-radius: 12px;
+                border-bottom-left-radius: 12px;
+            }}
+            QListWidget#musicTrackList {{
+                background-color: rgba(5, 10, 18, 0.58);
+                border: 1px solid {tint};
+                border-radius: 12px;
+                padding: 8px;
             }}
             QLabel#editorStatusText {{
                 color: #B8C7DA;
+            }}
+            QLabel#remoteContentMeta {{
+                color: rgba(190, 207, 232, 0.72);
+                background: transparent;
+                font-size: 11px;
+                font-weight: 600;
             }}
             """
         )
@@ -608,3 +749,51 @@ class InstallModsDialog(QDialog):
 def _slug(value: str) -> str:
     text = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return text
+
+
+def _provider_accent(provider: str) -> QColor:
+    return QColor("#30D18A") if provider == "modrinth" else QColor("#FF7442")
+
+
+def _blend(start: QColor, end: QColor, factor: float) -> QColor:
+    factor = max(0.0, min(1.0, factor))
+    return QColor(
+        int(start.red() + (end.red() - start.red()) * factor),
+        int(start.green() + (end.green() - start.green()) * factor),
+        int(start.blue() + (end.blue() - start.blue()) * factor),
+        int(start.alpha() + (end.alpha() - start.alpha()) * factor),
+    )
+
+
+def _icon_bytes_for_url(url: str, cache_dir: Path) -> bytes | None:
+    cached = _ICON_BYTES_CACHE.get(url)
+    if cached:
+        return cached
+    target = _icon_cache_path(url, cache_dir)
+    if target.is_file():
+        try:
+            data = target.read_bytes()
+        except OSError:
+            data = b""
+        if data:
+            _ICON_BYTES_CACHE[url] = data
+            return data
+    try:
+        response = requests.get(url, timeout=8)
+    except requests.RequestException:
+        return None
+    if not response.ok or not response.content:
+        return None
+    data = response.content[:1_500_000]
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    except OSError:
+        pass
+    _ICON_BYTES_CACHE[url] = data
+    return data
+
+
+def _icon_cache_path(url: str, cache_dir: Path) -> Path:
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    return cache_dir / f"{digest}.img"

@@ -55,6 +55,9 @@ QLabel#instanceInfoName,
 QLabel#emptyStateTitle,
 QLabel#editorPageTitle,
 QLabel#editorCompactPageTitle,
+QLabel#settingsPageTitle,
+QLabel#settingsSidebarTitle,
+QLabel#settingsFieldTitle,
 QLabel#accountsTitle,
 QLabel#installProgressTitle,
 QLabel#installProgressSummary,
@@ -82,13 +85,13 @@ QStackedWidget#instanceContentStack {
 
 QFrame#sidePanel,
 QFrame#contentSurface {
-    background-color: rgba(247, 250, 255, 0.18);
-    border: 1px solid rgba(184, 201, 225, 0.56);
+    background-color: rgba(247, 250, 255, 0.06);
+    border: 1px solid rgba(184, 201, 225, 0.9);
 }
 
 QFrame#sidePreview {
-    background-color: rgba(252, 253, 255, 0.72);
-    border: 1px solid rgba(188, 203, 226, 0.76);
+    background-color: rgba(252, 253, 255, 0.07);
+    border: 1px solid rgba(188, 203, 226, 0.9);
 }
 
 QFrame#sideDivider,
@@ -103,10 +106,22 @@ QFrame#installProgressHeader,
 QFrame#accountsHeader,
 QFrame#settingsHeader,
 QFrame#settingsPreviewCard,
+QFrame#settingsSidebar,
+QFrame#settingsContent,
+QFrame#settingsSectionCard,
 QFrame#iconPresentationSurface {
     background-color: rgba(250, 252, 255, 0.9);
     border: 1px solid rgba(186, 203, 225, 0.84);
     border-radius: 14px;
+}
+
+QFrame#emptyStateCard {
+    background-color: rgba(250, 252, 255, 0.08);
+    border: 1px solid rgba(186, 203, 225, 0.9);
+}
+
+QFrame#settingsSectionCard {
+    border-radius: 8px;
 }
 
 QScrollArea#iconPresentationScroll,

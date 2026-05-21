@@ -5,7 +5,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPainterPath, QPixmap, QRadialGradient
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 try:
@@ -22,7 +22,7 @@ from ui.responsive import fitted_window_size, scaled_px
 from ui.sidebar import SideBar
 from ui.app_icon import application_icon
 from ui.music import MusicController, MusicManagerDialog, TopBarMusicWidget
-from ui.theme import theme_palette
+from ui.theme import current_theme_mode, set_theme_accent, theme_palette
 from ui.topbar import ActionPopup, PopupAction, TopBar
 from ui.version_display import format_launcher_version_label
 
@@ -92,6 +92,9 @@ class MainWindow(QWidget):
         self._background_is_video = False
         self._background_cache = QPixmap()
         self._background_cache_size = QSize()
+        self._atmosphere_cache = QPixmap()
+        self._atmosphere_cache_size = QSize()
+        self._atmosphere_cache_key: tuple[tuple[int, int], tuple[str, ...]] | None = None
         self._background_video_player = None
         self._background_audio_output = None
         self._background_video_sink = None
@@ -112,7 +115,10 @@ class MainWindow(QWidget):
         self._refresh_background()
         self._apply_responsive_layout()
         self.refresh_instances()
+        self.music_controller.current_track_changed.connect(lambda *_: self._sync_launcher_theme_accent())
+        self.music_controller.current_playlist_changed.connect(lambda *_: self._sync_launcher_theme_accent())
         QTimer.singleShot(0, self.music_controller.start)
+        QTimer.singleShot(0, self._sync_launcher_theme_accent)
 
         self.runtime_timer = QTimer(self)
         self.runtime_timer.setInterval(1000)
@@ -134,6 +140,7 @@ class MainWindow(QWidget):
     def resizeEvent(self, event) -> None:
         self._apply_responsive_layout()
         self._invalidate_background_cache()
+        self._invalidate_atmosphere_cache()
         super().resizeEvent(event)
 
     def closeEvent(self, event) -> None:
@@ -155,6 +162,9 @@ class MainWindow(QWidget):
             self._ensure_background_cache()
             if not self._background_cache.isNull():
                 painter.drawPixmap(0, 0, self._background_cache)
+            overlay = QColor(palette["overlay"])
+            if overlay.alpha() > 0:
+                painter.fillRect(self.rect(), overlay)
         else:
             gradient = QLinearGradient(0, 0, 0, self.height())
             top, middle, bottom = palette["gradient"]
@@ -162,6 +172,14 @@ class MainWindow(QWidget):
             gradient.setColorAt(0.35, QColor(middle))
             gradient.setColorAt(1.0, QColor(bottom))
             painter.fillRect(self.rect(), gradient)
+
+        self._ensure_atmosphere_cache()
+        if not self._atmosphere_cache.isNull():
+            painter.drawPixmap(0, 0, self._atmosphere_cache)
+
+    def refresh_theme(self) -> None:
+        self._invalidate_atmosphere_cache()
+        self.update()
 
     def handle_ipc_message(self, payload: dict[str, Any]) -> None:
         action = str(payload.get("action") or "")
@@ -644,6 +662,7 @@ class MainWindow(QWidget):
         if self._settings_dialog is None:
             self._settings_dialog = SettingsDialog(self.service, self)
             self._settings_dialog.background_changed.connect(lambda *_: self._refresh_background())
+            self._settings_dialog.theme_changed.connect(self._sync_launcher_theme_accent)
             self._settings_dialog.destroyed.connect(lambda *_: setattr(self, "_settings_dialog", None))
         self._settings_dialog.show()
         self._settings_dialog.raise_()
@@ -668,6 +687,16 @@ class MainWindow(QWidget):
             self._background_pixmap = QPixmap(self._background_path) if self._background_path else QPixmap()
         self._invalidate_background_cache()
         self.update()
+
+    def _sync_launcher_theme_accent(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        if self.service.get_theme_adapt_to_music():
+            accent = self.music_controller.adaptive_accent_color()
+        else:
+            accent = self.service.get_theme_accent_color()
+        set_theme_accent(app, accent)
 
     def _set_video_background(self, video_path: str) -> None:
         if QMediaPlayer is None or QVideoSink is None:
@@ -980,6 +1009,104 @@ class MainWindow(QWidget):
     def _invalidate_background_cache(self) -> None:
         self._background_cache = QPixmap()
         self._background_cache_size = QSize()
+
+    def _ensure_atmosphere_cache(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            self._atmosphere_cache = QPixmap()
+            self._atmosphere_cache_size = QSize()
+            self._atmosphere_cache_key = None
+            return
+
+        palette = theme_palette(self)
+        roles = palette["roles"]
+        ambient = palette["window"]["ambient"]
+        def color_key_part(color: QColor) -> str:
+            target = QColor(color)
+            return f"{target.red()}:{target.green()}:{target.blue()}:{target.alpha()}"
+
+        color_key = (
+            color_key_part(roles["background"]),
+            color_key_part(roles["accent"]),
+            color_key_part(roles["accent_bright"]),
+            color_key_part(ambient["primary"]),
+            color_key_part(ambient["secondary"]),
+            color_key_part(ambient["tertiary"]),
+        )
+        cache_key = ((self.width(), self.height()), color_key)
+        if self._atmosphere_cache_key == cache_key and not self._atmosphere_cache.isNull():
+            return
+
+        pixmap = QPixmap(self.size())
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        self._paint_radial_zone(
+            painter,
+            center_x=self.width() * 0.18,
+            center_y=self.height() * 0.08,
+            radius=max(self.width(), self.height()) * 0.58,
+            inner=ambient["primary"],
+        )
+        self._paint_radial_zone(
+            painter,
+            center_x=self.width() * 0.84,
+            center_y=self.height() * 0.32,
+            radius=max(self.width(), self.height()) * 0.48,
+            inner=ambient["secondary"],
+        )
+        self._paint_radial_zone(
+            painter,
+            center_x=self.width() * 0.52,
+            center_y=self.height() * 1.05,
+            radius=max(self.width(), self.height()) * 0.56,
+            inner=ambient["tertiary"],
+        )
+
+        accent_line = QColor(roles["accent_bright"])
+        accent_line.setAlpha(18 if current_theme_mode(self) == "dark" else 28)
+        painter.setPen(accent_line)
+        painter.setBrush(Qt.NoBrush)
+        arc_path = QPainterPath()
+        arc_path.addEllipse(
+            -self.width() * 0.10,
+            self.height() * 0.18,
+            self.width() * 0.72,
+            self.height() * 0.58,
+        )
+        painter.drawPath(arc_path)
+
+        vignette = QColor(ambient["vignette"])
+        if vignette.alpha() > 0:
+            vertical = QLinearGradient(0, 0, 0, self.height())
+            vertical.setColorAt(0.0, QColor(0, 0, 0, 0))
+            vertical.setColorAt(0.62, QColor(0, 0, 0, 0))
+            vertical.setColorAt(1.0, vignette)
+            painter.fillRect(self.rect(), vertical)
+
+        painter.end()
+        self._atmosphere_cache = pixmap
+        self._atmosphere_cache_size = QSize(self.size())
+        self._atmosphere_cache_key = cache_key
+
+    def _paint_radial_zone(self, painter: QPainter, *, center_x: float, center_y: float, radius: float, inner: QColor) -> None:
+        color = QColor(inner)
+        if color.alpha() <= 0:
+            return
+        gradient = QRadialGradient(center_x, center_y, radius)
+        gradient.setColorAt(0.0, color)
+        color_mid = QColor(color)
+        color_mid.setAlpha(int(color.alpha() * 0.38))
+        gradient.setColorAt(0.48, color_mid)
+        color_end = QColor(color)
+        color_end.setAlpha(0)
+        gradient.setColorAt(1.0, color_end)
+        painter.fillRect(self.rect(), gradient)
+
+    def _invalidate_atmosphere_cache(self) -> None:
+        self._atmosphere_cache = QPixmap()
+        self._atmosphere_cache_size = QSize()
+        self._atmosphere_cache_key = None
 
 
 def _format_duration(total_seconds: int) -> str:

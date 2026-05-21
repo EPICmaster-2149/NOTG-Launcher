@@ -65,7 +65,7 @@ from ui.topbar import ModernButton, blend_colors
 
 
 MUSIC_MIME = "application/x-notg-music-track"
-DEFAULT_ACCENT = QColor("#5da8ff")
+DEFAULT_ACCENT = QColor("#2E45FF")
 UNSET_ICON = object()
 PLAYLIST_ICON_PREFIX = "assets/Playlist-Default-Icons"
 MUSIC_ICON_PREFIX = "assets/Music-Icons"
@@ -582,6 +582,14 @@ class MusicController(QObject):
     def current_track(self) -> MusicRecord | None:
         return self._track_by_id(self._current_music_id)
 
+    def adaptive_accent_color(self) -> QColor:
+        track = self.current_track()
+        if track is not None:
+            pixmap = _track_pixmap(track, self.service, 64)
+        else:
+            pixmap = _playlist_pixmap(self.current_playlist(), self.service, 64)
+        return _dominant_color(pixmap)
+
     def playable_tracks(self) -> list[MusicRecord]:
         return [track for track in self.tracks() if track.enabled]
 
@@ -625,11 +633,13 @@ class MusicController(QObject):
             self.play_playlist()
             return
         self._player.play()
+        self.playback_changed.emit(True)
 
     def pause(self) -> None:
         if self._player is not None:
             self._player.pause()
         self._paused = self.service.set_music_paused(True)
+        self.playback_changed.emit(False)
 
     def toggle_playback(self) -> None:
         if self.is_playing:
@@ -703,6 +713,7 @@ class MusicController(QObject):
             self.duration_changed.emit(self.duration)
             self.position_changed.emit(self.position)
         self._player.play()
+        self.playback_changed.emit(True)
         self._apply_pending_checkpoint()
         return True
 
@@ -1541,7 +1552,8 @@ class MarqueeLabel(QLabel):
         self._direction = 1
         self._hold_ticks = 0
         self._timer = QTimer(self)
-        self._timer.setInterval(70)
+        # smoother marquee: shorter interval and slightly larger step
+        self._timer.setInterval(30)
         self._timer.timeout.connect(self._tick)
         self.setMinimumHeight(28)
 
@@ -1580,7 +1592,8 @@ class MarqueeLabel(QLabel):
         if self._hold_ticks > 0:
             self._hold_ticks -= 1
             return
-        self._offset += self._direction
+        # move faster per tick for smoother appearance
+        self._offset += self._direction * 2
         if self._offset >= overflow:
             self._offset = overflow
             self._direction = -1
@@ -1612,6 +1625,7 @@ class TrackRowWidget(QFrame):
         self.service = service
         self._editor = editor
         self._active = False
+        self._playing = False
         self._hover = 0.0
         self._flash = 0.0
         self.setObjectName("musicTrackRow")
@@ -1680,13 +1694,14 @@ class TrackRowWidget(QFrame):
     def drag_handle_contains(self, point: QPoint) -> bool:
         return self.drag_handle.geometry().contains(point)
 
-    def set_active(self, active: bool) -> None:
+    def set_active(self, active: bool, *, playing: bool = True) -> None:
         self._active = active
+        self._playing = active and playing
         font = QFont(self.name_label.font())
         font.setWeight(QFont.Bold if active else QFont.DemiBold)
         self.name_label.setFont(font)
         if self._editor and hasattr(self, "preview_button"):
-            self.preview_button.set_icon_kind("pause" if active else "play")
+            self.preview_button.set_icon_kind("pause" if self._playing else "play")
         self.update()
 
     def set_dragging(self, dragging: bool) -> None:
@@ -1793,7 +1808,7 @@ class AnimatedTrackList(QListWidget):
                 row.setProperty("accentColor", self._accent)
                 row.update()
 
-    def set_tracks(self, records: list[MusicRecord], current_music_id: str | None = None) -> None:
+    def set_tracks(self, records: list[MusicRecord], current_music_id: str | None = None, *, current_playing: bool = True) -> None:
         selected_id = self.selected_music_id()
         scroll_value = self.verticalScrollBar().value()
         self.clear()
@@ -1808,7 +1823,7 @@ class AnimatedTrackList(QListWidget):
             row.enabled_changed.connect(self.track_enabled_changed)
             row.preview_requested.connect(self.track_activated)
             row.delete_requested.connect(self.delete_requested)
-            row.set_active(record.music_id == current_music_id)
+            row.set_active(record.music_id == current_music_id, playing=current_playing)
             self.setItemWidget(item, row)
 
         restore_id = selected_id if self._item_for_id(selected_id) is not None else current_music_id
@@ -1828,12 +1843,12 @@ class AnimatedTrackList(QListWidget):
         record = item.data(Qt.UserRole + 1)
         return record if isinstance(record, MusicRecord) else None
 
-    def set_current_track_id(self, music_id: str | None) -> None:
+    def set_current_track_id(self, music_id: str | None, *, playing: bool = True) -> None:
         for index in range(self.count()):
             item = self.item(index)
             row = self.itemWidget(item)
             if isinstance(row, TrackRowWidget):
-                row.set_active(item.data(Qt.UserRole) == music_id)
+                row.set_active(item.data(Qt.UserRole) == music_id, playing=playing)
 
     def mousePressEvent(self, event) -> None:
         self._drag_allowed = False
@@ -1988,19 +2003,24 @@ class PlaylistRowWidget(QFrame):
         self._selected = selected
         self.update()
 
-    def set_compact(self, compact: bool) -> None:
+    def set_compact(self, compact: bool, *, width: int | None = None) -> None:
         self._compact = compact
         self.name_label.setVisible(not compact)
         self.setFixedHeight(48)
         if compact:
             self._layout.setContentsMargins(0, 6, 0, 6)
             self._layout.setAlignment(self.icon_label, Qt.AlignCenter)
-            self.setFixedWidth(48)
+            self.setFixedWidth(width or 48)
         else:
             self._layout.setContentsMargins(8, 6, 8, 6)
             self._layout.setAlignment(self.icon_label, Qt.Alignment())
             self.setMinimumWidth(0)
             self.setMaximumWidth(16777215)
+            if width is not None:
+                self.setFixedWidth(width)
+            self.name_label.updateGeometry()
+        self.updateGeometry()
+        self.update()
 
     def paintEvent(self, event) -> None:
         del event
@@ -2271,6 +2291,7 @@ class MusicPlaylistEditorDialog(QDialog):
         self.controller.playlists_changed.connect(self._sync_playlist)
         self.controller.tracks_changed.connect(self._sync_playlist)
         self.controller.current_track_changed.connect(self._sync_current_track)
+        self.controller.playback_changed.connect(self._sync_playback)
         self.controller.resolving_changed.connect(self._sync_resolving)
         self.controller.resolve_progress.connect(self._sync_resolve_progress)
         self.controller.resolve_failed.connect(lambda message: QMessageBox.warning(self, "Music", message))
@@ -2283,12 +2304,16 @@ class MusicPlaylistEditorDialog(QDialog):
             self._syncing_name = False
         self._set_icon_preview(_playlist_pixmap(self.playlist, self.controller.service, 96))
         current = self.controller.current_track()
-        self.track_list.set_tracks(self.playlist.tracks, current.music_id if current else None)
+        self.track_list.set_tracks(self.playlist.tracks, current.music_id if current else None, current_playing=self.controller.is_playing)
         pixmap = _playlist_pixmap(self.playlist, self.controller.service, 64)
         self._apply_style(_dominant_color(pixmap))
 
     def _sync_current_track(self, track: MusicRecord | None) -> None:
-        self.track_list.set_current_track_id(track.music_id if track else None)
+        self.track_list.set_current_track_id(track.music_id if track else None, playing=self.controller.is_playing)
+
+    def _sync_playback(self, playing: bool) -> None:
+        current = self.controller.current_track()
+        self.track_list.set_current_track_id(current.music_id if current else None, playing=playing)
 
     def _sync_resolving(self, resolving: bool, url: str) -> None:
         del url
@@ -2632,11 +2657,12 @@ class MusicManagerDialog(QDialog):
             self.playlist_list.addItem(item)
             row = PlaylistRowWidget(playlist, self.controller.service)
             row.setProperty("accentColor", self._accent)
-            row.set_compact(self._sidebar_collapsed)
+            row.set_compact(self._sidebar_collapsed, width=48 if self._sidebar_collapsed else 196)
             row.set_selected(playlist.playlist_id == current_id)
             self.playlist_list.setItemWidget(item, row)
             if playlist.playlist_id == current_id:
                 self.playlist_list.setCurrentItem(item)
+        self._refresh_sidebar_layout_state(animated=False)
 
     def _sync_playlist(self, playlist: MusicPlaylistRecord | None) -> None:
         playlist = playlist or self.controller.current_playlist()
@@ -2648,14 +2674,14 @@ class MusicManagerDialog(QDialog):
 
     def _sync_tracks(self) -> None:
         current = self.controller.current_track()
-        self.track_list.set_tracks(self.controller.tracks(), current.music_id if current is not None else None)
+        self.track_list.set_tracks(self.controller.tracks(), current.music_id if current is not None else None, current_playing=self.controller.is_playing)
 
     def _sync_current_track(self, track: MusicRecord | None) -> None:
         name = track.name if track is not None else "No track"
         self.now_title.setText(name)
         self.now_title.setToolTip(name)
         self.now_art.set_artwork(_track_pixmap(track, self.controller.service, 48))
-        self.track_list.set_current_track_id(track.music_id if track is not None else None)
+        self.track_list.set_current_track_id(track.music_id if track is not None else None, playing=self.controller.is_playing)
         source_pixmap = _track_pixmap(track, self.controller.service, 96) if track is not None else _playlist_pixmap(self.controller.current_playlist(), self.controller.service, 96)
         self._apply_accent(_dominant_color(source_pixmap))
         QTimer.singleShot(0, self._sync_player_timeline)
@@ -2666,6 +2692,8 @@ class MusicManagerDialog(QDialog):
 
     def _sync_playback(self, playing: bool) -> None:
         self.play_button.set_icon_kind("pause" if playing else "play")
+        current = self.controller.current_track()
+        self.track_list.set_current_track_id(current.music_id if current else None, playing=playing)
 
     def _sync_position(self, position: int) -> None:
         if not self._seek_dragging:
@@ -2707,28 +2735,53 @@ class MusicManagerDialog(QDialog):
         self._sidebar_collapsed = not self._sidebar_collapsed
         start = self.sidebar.maximumWidth()
         end = 66 if self._sidebar_collapsed else 224
-        self.sidebar.setMinimumWidth(66 if self._sidebar_collapsed else 160)
+        if self._sidebar_collapsed:
+            self._refresh_sidebar_layout_state(animated=True)
+        else:
+            self.add_playlist_button.setVisible(False)
+            self.background_play_button.setVisible(False)
+            self.playlist_list.setFixedWidth(52)
+        self.sidebar.setMinimumWidth(min(start, end))
         animation = QPropertyAnimation(self.sidebar, b"maximumWidth", self)
         animation.setDuration(220)
         animation.setEasingCurve(QEasingCurve.OutCubic)
         animation.setStartValue(start)
         animation.setEndValue(end)
+        animation.valueChanged.connect(lambda *_: self.sidebar.updateGeometry())
+        animation.finished.connect(lambda: self._refresh_sidebar_layout_state(animated=False))
         animation.start()
         self._sidebar_animation = animation
+
+    def _refresh_sidebar_layout_state(self, *, animated: bool) -> None:
+        compact = self._sidebar_collapsed
         side_layout = self.sidebar.layout()
         if isinstance(side_layout, QVBoxLayout):
-            side_layout.setContentsMargins(7 if self._sidebar_collapsed else 10, 10, 7 if self._sidebar_collapsed else 10, 10)
-            side_layout.setAlignment(self.burger_button, Qt.AlignHCenter if self._sidebar_collapsed else Qt.AlignLeft)
-        self.side_header.setAlignment(Qt.AlignHCenter if self._sidebar_collapsed else Qt.AlignLeft)
-        self.playlist_list.setFixedWidth(52 if self._sidebar_collapsed else 204)
-        if not self._sidebar_collapsed:
-            self.playlist_list.setMaximumWidth(16777215)
-        self.add_playlist_button.setVisible(not self._sidebar_collapsed)
-        self.background_play_button.setVisible(not self._sidebar_collapsed)
+            side_layout.setContentsMargins(7 if compact else 10, 10, 7 if compact else 10, 10)
+            side_layout.setAlignment(self.burger_button, Qt.AlignHCenter if compact else Qt.AlignLeft)
+        self.side_header.setContentsMargins(9 if compact else 0, 0, 9 if compact else 0, 0)
+        self.side_header.setSpacing(0 if compact else 8)
+        self.side_header.setAlignment(self.burger_button, Qt.AlignCenter if compact else Qt.AlignLeft | Qt.AlignVCenter)
+        self.playlist_list.setFixedWidth(52 if compact else 204)
+        self.add_playlist_button.setVisible(not compact)
+        self.background_play_button.setVisible(not compact)
+        if not animated:
+            self.sidebar.setMinimumWidth(66 if compact else 160)
+            self.sidebar.setMaximumWidth(66 if compact else 224)
+        row_width = 48 if compact else 196
         for index in range(self.playlist_list.count()):
-            row = self.playlist_list.itemWidget(self.playlist_list.item(index))
+            item = self.playlist_list.item(index)
+            item.setSizeHint(QSize(52 if compact else 100, 48))
+            row = self.playlist_list.itemWidget(item)
             if isinstance(row, PlaylistRowWidget):
-                row.set_compact(self._sidebar_collapsed)
+                row.set_compact(compact, width=row_width)
+                row.updateGeometry()
+                row.update()
+        self.playlist_list.doItemsLayout()
+        self.playlist_list.viewport().update()
+        self.sidebar.updateGeometry()
+        self.sidebar.update()
+        if not animated:
+            QTimer.singleShot(0, self.playlist_list.viewport().update)
 
     def _open_add_playlist(self) -> None:
         self._open_editor(None)
@@ -2799,6 +2852,21 @@ class MusicManagerDialog(QDialog):
 
 
 def _manager_stylesheet(accent: str) -> str:
+    accent_color = QColor(accent)
+    if not accent_color.isValid():
+        accent_color = DEFAULT_ACCENT
+    palette = theme_palette()
+    roles = palette["roles"]
+
+    def rgba(color: QColor, alpha: int | None = None) -> str:
+        target = QColor(color)
+        if alpha is not None:
+            target.setAlpha(max(0, min(255, int(alpha))))
+        return f"rgba({target.red()}, {target.green()}, {target.blue()}, {target.alpha()})"
+
+    def text_color(color: QColor) -> str:
+        return QColor(color).name()
+
     return f"""
 QDialog#musicManagerDialog {{
     background: transparent;
@@ -2914,6 +2982,65 @@ QLabel#musicTimeBubble {{
     font-size: 12px;
     font-weight: 700;
 }}
+
+QDialog#musicPlaylistEditorDialog {{
+    background-color: {rgba(roles["background"], 252)};
+}}
+QFrame#musicSidebar, QFrame#musicMain, QFrame#musicPlaybackDock {{
+    background-color: {rgba(roles["surface_glass"])};
+    border: 1px solid {rgba(roles["outline_variant"])};
+}}
+QLabel#musicCategoryLabel, QLabel#musicTableHeader, QLabel#musicTrackMeta, QLabel#musicTimeLabel {{
+    color: {rgba(roles["text_muted"], 178)};
+}}
+QLabel#musicPlaylistTitle,
+QLabel#musicPlaylistName,
+QLabel#musicTrackName,
+QLabel#musicNowTitle {{
+    color: {text_color(roles["text"])};
+}}
+QLabel#musicTrackNumber {{
+    color: {rgba(accent_color, 204)};
+}}
+QPushButton#musicAddPlaylistButton,
+QPushButton#musicIconPicker {{
+    background-color: {rgba(roles["surface_2"], 214)};
+    border: 1px solid {rgba(roles["outline_variant"])};
+    color: {text_color(roles["text"])};
+}}
+QPushButton#musicAddPlaylistButton:hover,
+QPushButton#musicIconPicker:hover {{
+    background-color: {rgba(roles["card_hover"])};
+    border-color: {rgba(accent_color, 190)};
+}}
+QPushButton#musicIconPicker:checked {{
+    background-color: {rgba(accent_color, 54)};
+    border: 2px solid {rgba(accent_color, 230)};
+}}
+QLineEdit#musicUrlInput, QLineEdit#musicEditorNameInput {{
+    background-color: {rgba(roles["surface_1"], 232)};
+    border: 1px solid {rgba(roles["outline_variant"])};
+    color: {text_color(roles["text"])};
+    selection-background-color: {rgba(accent_color, 86)};
+}}
+QLineEdit#musicUrlInput:focus, QLineEdit#musicEditorNameInput:focus {{
+    border-color: {rgba(accent_color, 226)};
+}}
+QSlider#musicVolumeSlider::groove:horizontal, QSlider#musicSeekSlider::groove:horizontal {{
+    background-color: {rgba(roles["surface_3"], 174)};
+}}
+QSlider#musicVolumeSlider::sub-page:horizontal, QSlider#musicSeekSlider::sub-page:horizontal {{
+    background-color: {rgba(accent_color, 238)};
+}}
+QSlider#musicVolumeSlider::handle:horizontal, QSlider#musicSeekSlider::handle:horizontal {{
+    background-color: {text_color(roles["on_accent"])};
+    border: 1px solid {rgba(accent_color, 232)};
+}}
+QLabel#musicTimeBubble {{
+    color: {text_color(roles["text"])};
+    background-color: {rgba(roles["surface_3"], 244)};
+    border: 1px solid {rgba(accent_color, 214)};
+}}
 """
 
 
@@ -3003,26 +3130,53 @@ def _settings_icon_path(service: LauncherService) -> str | None:
 def _dominant_color(pixmap: QPixmap) -> QColor:
     if pixmap.isNull():
         return DEFAULT_ACCENT
-    image = pixmap.toImage().scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    red = green = blue = count = 0
+    image = pixmap.toImage().scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    weighted_red = weighted_green = weighted_blue = total_weight = 0.0
+    fallback_red = fallback_green = fallback_blue = fallback_count = 0
     for x in range(image.width()):
         for y in range(image.height()):
             color = QColor(image.pixel(x, y))
             if color.alpha() < 32:
                 continue
-            if color.lightness() < 28:
+            lightness = color.lightness()
+            saturation = color.saturation()
+            if lightness < 18 or lightness > 242:
                 continue
-            red += color.red()
-            green += color.green()
-            blue += color.blue()
-            count += 1
-    if count <= 0:
+            fallback_red += color.red()
+            fallback_green += color.green()
+            fallback_blue += color.blue()
+            fallback_count += 1
+            if saturation < 36:
+                continue
+            mid_lightness_weight = 1.0 - min(1.0, abs(lightness - 150) / 150)
+            weight = 0.55 + (saturation / 255.0) + (mid_lightness_weight * 0.55)
+            weighted_red += color.red() * weight
+            weighted_green += color.green() * weight
+            weighted_blue += color.blue() * weight
+            total_weight += weight
+    if total_weight > 0:
+        color = QColor(
+            int(weighted_red / total_weight),
+            int(weighted_green / total_weight),
+            int(weighted_blue / total_weight),
+        )
+    elif fallback_count > 0:
+        color = QColor(
+            int(fallback_red / fallback_count),
+            int(fallback_green / fallback_count),
+            int(fallback_blue / fallback_count),
+        )
+    else:
         return DEFAULT_ACCENT
-    color = QColor(int(red / count), int(green / count), int(blue / count))
-    if color.lightness() < 95:
-        color = color.lighter(150)
-    if color.saturation() < 70:
-        color.setHsv(color.hue() if color.hue() >= 0 else 208, 120, max(color.value(), 180))
+
+    hue = color.hsvHue()
+    if hue < 0:
+        hue = DEFAULT_ACCENT.hsvHue()
+    saturation = max(88, min(184, color.saturation() + 18))
+    value = max(150, min(222, color.value()))
+    if color.lightness() < 82:
+        value = max(value, 178)
+    color.setHsv(hue, saturation, value)
     return color
 
 

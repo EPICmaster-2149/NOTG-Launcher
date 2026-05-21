@@ -101,14 +101,14 @@ QWidget#sideBar {
 }
 
 QFrame#sidePanel {
-    background-color: rgba(10, 19, 34, 0.16);
-    border: 2px solid rgba(110, 148, 205, 0.34);
+    background-color: rgba(10, 19, 34, 0.06);
+    border: 1px solid rgba(180, 210, 255, 0.86);
     border-radius: 24px;
 }
 
 QFrame#sidePreview {
-    background-color: rgba(18, 30, 50, 0.18);
-    border: 2px solid rgba(126, 164, 224, 0.28);
+    background-color: rgba(18, 30, 50, 0.07);
+    border: 1px solid rgba(180, 210, 255, 0.82);
     border-radius: 22px;
 }
 
@@ -140,8 +140,8 @@ QFrame#sideDivider {
 }
 
 QFrame#contentSurface {
-    background-color: rgba(10, 19, 34, 0.08);
-    border: 2px solid rgba(110, 148, 205, 0.22);
+    background-color: rgba(10, 19, 34, 0.05);
+    border: 1px solid rgba(180, 210, 255, 0.86);
     border-radius: 28px;
 }
 
@@ -198,8 +198,8 @@ QStackedWidget#instanceContentStack {
 QFrame#emptyStateCard {
     min-width: 600px;
     max-width: 520px;
-    background-color: rgba(16, 26, 43, 0.92);
-    border: 1px solid rgba(92, 133, 191, 0.28);
+    background-color: rgba(16, 26, 43, 0.08);
+    border: 1px solid rgba(180, 210, 255, 0.82);
     border-radius: 26px;
 }
 
@@ -970,6 +970,50 @@ QFrame#settingsPreviewCard {
     background-color: rgba(11, 18, 31, 0.84);
     border: 1px solid rgba(84, 122, 177, 0.28);
     border-radius: 18px;
+}
+
+QFrame#settingsSidebar,
+QFrame#settingsContent,
+QFrame#settingsSectionCard {
+    background-color: rgba(8, 13, 22, 0.74);
+    border: 1px solid rgba(180, 210, 255, 0.18);
+    border-radius: 10px;
+}
+
+QFrame#settingsContent {
+    background-color: rgba(7, 12, 20, 0.70);
+}
+
+QFrame#settingsSectionCard {
+    background-color: rgba(8, 15, 26, 0.68);
+    border-radius: 8px;
+}
+
+QStackedWidget#settingsStack {
+    background: transparent;
+    border: none;
+}
+
+QLabel#settingsSidebarTitle {
+    color: #f5f9ff;
+    font-size: 17px;
+    font-weight: 800;
+    background: transparent;
+    padding: 0 4px 6px 4px;
+}
+
+QLabel#settingsPageTitle {
+    color: #f7fbff;
+    font-size: 28px;
+    font-weight: 800;
+    background: transparent;
+}
+
+QLabel#settingsFieldTitle {
+    color: #edf4ff;
+    font-size: 14px;
+    font-weight: 700;
+    background: transparent;
 }
 
 QFrame#releaseNotesPreview {
