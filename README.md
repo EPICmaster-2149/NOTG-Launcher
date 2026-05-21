@@ -325,19 +325,26 @@ NOTG-Launcher.exe
 _internal/
 ```
 
-During update, the BAT updater:
+During update, the Python updater:
 
 1. Downloads the release ZIP to the user cache.
-2. Extracts the ZIP.
-3. Finds the package root containing an `.exe` and `_internal`.
-4. Renames `NOTG-Launcher.exe` to `NOTG Launcher.exe` if needed.
-5. Renames the old install folder to `NOTG Launcher.old`.
-6. Moves the new package root into the original install path.
-7. Starts the updated launcher.
-8. Deletes `.old`, extracted files, the ZIP, the BAT, and the log on success.
+2. Writes an update manifest into the cache.
+3. Starts a detached no-console updater process from the cache.
+4. Shows the custom NOTG startup/update screen instead of a terminal.
+5. Extracts the ZIP with Python's `zipfile` module.
+6. Finds the package root containing an `.exe` and `_internal`.
+7. Renames `NOTG-Launcher.exe` to `NOTG Launcher.exe` if needed.
+8. Renames the old install folder to `NOTG Launcher.old`.
+9. Copies the new package into the original install path.
+10. Starts the updated launcher.
+11. Deletes `.old`, extracted files, the ZIP, and update manifest on success.
 
-If update fails, the updater leaves the ZIP, BAT, and `updater.log` in cache for
-diagnosis.
+Release builds include `NOTG Updater.exe`, which is built with PyInstaller
+`--noconsole`. The launcher copies that updater into AppData cache before
+running it so the updater is not locked inside the folder it replaces.
+
+If update fails, the updater leaves the ZIP, manifest, and `updater-python.log`
+in cache for diagnosis.
 
 ## Discord Rich Presence
 
@@ -374,11 +381,12 @@ C:\Users\<you>\AppData\Local\NOTG Launcher\Cache\
 Look for:
 
 - `NOTG Launcher-update.zip`
-- `updater.bat`
-- `updater.log`
+- `update_manifest.json`
+- `updater-python.log`
 - `extracted/`
+- `updater-runtime/`
 
-If `updater.log` exists, the update failed before cleanup. The most common
+If `updater-python.log` exists, the update failed before cleanup. The most common
 causes are:
 
 - the ZIP does not contain an `.exe` and `_internal` in the same package root

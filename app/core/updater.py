@@ -4,12 +4,19 @@ Checks GitHub releases and manages updates.
 """
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Optional, Tuple, Dict, Any
 import requests
+
+
+UPDATER_EXE_NAME = "NOTG Updater.exe"
+UPDATER_RUNTIME_DIR_NAME = "updater-runtime"
+UPDATE_MANIFEST_NAME = "update_manifest.json"
 
 
 class UpdateChecker:
@@ -202,137 +209,83 @@ class UpdateInstaller:
         
         return self._inspect_release_zip(zip_path) is not None
     
-    def create_updater_script(self, zip_path: Path) -> Path:
-        """
-        Create a detached batch updater that mirrors the original working flow:
-        extract the release, rename the current install to .old, move the new
-        root folder into place, launch it, then clean up.
-        """
+    def create_update_manifest(self, zip_path: Path) -> Path:
+        """Write the update handoff manifest consumed by the Python updater."""
         layout = self._inspect_release_zip(zip_path)
         if layout is None:
             raise RuntimeError("Update ZIP does not contain a launcher executable and _internal folder.")
 
         package_root, package_exe_name = layout
-        package_root_parts = [part for part in package_root.parts if part not in {"", "."}]
-        package_relative = "\\".join(package_root_parts)
+        manifest = self.cache_dir / UPDATE_MANIFEST_NAME
+        payload = {
+            "zip_path": str(zip_path.resolve()),
+            "cache_dir": str(self.cache_dir),
+            "install_dir": str(self.installation_dir),
+            "current_exe": str(self.current_exe),
+            "expected_exe_name": self.expected_exe_name,
+            "expected_install_dir_name": self.expected_install_dir_name,
+            "package_root": [part for part in package_root.parts if part not in {"", "."}],
+            "package_exe_name": package_exe_name,
+            "launcher_pid": os.getpid(),
+            "schema_version": 1,
+        }
+        manifest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return manifest
 
-        script = self.cache_dir / "updater.bat"
-        extract_dir = self.cache_dir / "extracted"
-        log_path = self.cache_dir / "updater.log"
-        backup_dir = self.installation_dir.with_name(self.installation_dir.name + ".old")
-        backup_name = backup_dir.name
+    def _stage_updater_process(self, manifest_path: Path) -> tuple[list[str], Path]:
+        """
+        Stage a silent updater runtime outside the install directory.
 
-        if package_relative:
-            package_set_line = f'set "PACKAGE=%EXTRACT%\\{package_relative}"'
-        else:
-            package_set_line = 'set "PACKAGE=%EXTRACT%"'
+        Windows keeps running executables locked, so the updater cannot execute
+        from the folder it is about to replace.
+        """
+        runtime_dir = self.cache_dir / UPDATER_RUNTIME_DIR_NAME
+        if runtime_dir.exists():
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
 
-        batch_content = f"""@echo off
-chcp 65001 >nul
-setlocal
+        bundled_updater = self.installation_dir / UPDATER_EXE_NAME
+        if bundled_updater.is_file():
+            staged_updater = runtime_dir / UPDATER_EXE_NAME
+            shutil.copy2(bundled_updater, staged_updater)
+            return [str(staged_updater), "--manifest", str(manifest_path)], runtime_dir
 
-set "ZIP={zip_path}"
-set "CACHE={self.cache_dir}"
-set "EXTRACT={extract_dir}"
-set "INSTALL={self.installation_dir}"
-set "EXE={self.current_exe}"
-set "BACKUP={backup_dir}"
-set "BACKUP_NAME={backup_name}"
-set "EXPECTED_EXE={self.expected_exe_name}"
-set "PACKAGE_EXE={package_exe_name}"
-set "LOG={log_path}"
-{package_set_line}
+        if getattr(sys, "frozen", False):
+            staged_exe = runtime_dir / self.current_exe.name
+            shutil.copy2(self.current_exe, staged_exe)
+            internal_dir = self.installation_dir / "_internal"
+            if internal_dir.is_dir():
+                shutil.copytree(internal_dir, runtime_dir / "_internal", dirs_exist_ok=True)
+            return [str(staged_exe), "--run-updater", str(manifest_path)], runtime_dir
 
-break > "%LOG%"
-call :log Updater started.
-cd /d "%CACHE%"
+        project_root = Path(__file__).resolve().parents[2]
+        python = Path(sys.executable)
+        if sys.platform == "win32":
+            pythonw = python.with_name("pythonw.exe")
+            if pythonw.is_file():
+                python = pythonw
+        return [str(python), str(project_root / "app" / "main.py"), "--run-updater", str(manifest_path)], project_root
 
-ping 127.0.0.1 -n 4 >nul
-
-call :log Extracting update archive.
-if exist "%EXTRACT%" rmdir /s /q "%EXTRACT%" >>"%LOG%" 2>&1
-mkdir "%EXTRACT%" >>"%LOG%" 2>&1
-if errorlevel 1 goto fail
-
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:ZIP -DestinationPath $env:EXTRACT -Force" >>"%LOG%" 2>&1
-if errorlevel 1 (
-    call :log PowerShell extraction failed. Trying tar fallback.
-    tar -xf "%ZIP%" -C "%EXTRACT%" >>"%LOG%" 2>&1
-    if errorlevel 1 goto fail_extract
-)
-
-if not exist "%PACKAGE%\\%PACKAGE_EXE%" goto fail_layout
-if not exist "%PACKAGE%\\_internal" goto fail_layout
-
-if /I not "%PACKAGE_EXE%"=="%EXPECTED_EXE%" (
-    call :log Renaming executable to installed launcher name.
-    ren "%PACKAGE%\\%PACKAGE_EXE%" "%EXPECTED_EXE%" >>"%LOG%" 2>&1
-    if errorlevel 1 goto fail
-)
-
-call :log Backing up current installation.
-if exist "%BACKUP%" rmdir /s /q "%BACKUP%" >>"%LOG%" 2>&1
-if exist "%INSTALL%" (
-    ren "%INSTALL%" "%BACKUP_NAME%" >>"%LOG%" 2>&1
-    if errorlevel 1 goto fail
-)
-
-call :log Moving updated launcher into place.
-move /Y "%PACKAGE%" "%INSTALL%" >>"%LOG%" 2>&1
-if errorlevel 1 goto rollback
-
-if not exist "%EXE%" goto rollback
-
-call :log Launching updated launcher.
-start "" /D "%INSTALL%" "%EXE%"
-
-call :log Cleaning old install and updater files.
-call :retry_rmdir "%BACKUP%"
-if exist "%EXTRACT%" rmdir /s /q "%EXTRACT%" >>"%LOG%" 2>&1
-if exist "%ZIP%" del /f /q "%ZIP%" >>"%LOG%" 2>&1
-
-call :log Updater completed successfully.
-if exist "%LOG%" del /f /q "%LOG%" >nul 2>&1
-set "SELF=%~f0"
-start "" /min powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 2; Remove-Item -LiteralPath $env:SELF -Force -ErrorAction SilentlyContinue"
-exit /b 0
-
-:rollback
-call :log Update failed after backup. Restoring previous install.
-if exist "%INSTALL%" rmdir /s /q "%INSTALL%" >>"%LOG%" 2>&1
-if exist "%BACKUP%" ren "%BACKUP%" "{self.installation_dir.name}" >>"%LOG%" 2>&1
-goto fail
-
-:fail_extract
-call :log Extraction failed.
-goto fail
-
-:fail_layout
-call :log Extracted update layout was not valid.
-call :log Expected package path: %PACKAGE%
-goto fail
-
-:fail
-call :log Updater failed. Leaving ZIP, BAT, and log for diagnosis.
-exit /b 1
-
-:retry_rmdir
-set "TARGET=%~1"
-for /L %%I in (1,1,20) do (
-    if not exist "%TARGET%" exit /b 0
-    rmdir /s /q "%TARGET%" >>"%LOG%" 2>&1
-    if not exist "%TARGET%" exit /b 0
-    ping 127.0.0.1 -n 2 >nul
-)
-exit /b 0
-
-:log
-echo %date% %time% %*>>"%LOG%"
-exit /b 0
-"""
-
-        script.write_text(batch_content, encoding="utf-8")
-        return script
+    @staticmethod
+    def _hidden_popen(command: list[str], *, cwd: Path) -> subprocess.Popen[Any]:
+        kwargs: dict[str, Any] = {
+            "cwd": str(cwd),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        creationflags = 0
+        for flag_name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
+            creationflags |= int(getattr(subprocess, flag_name, 0))
+        if creationflags:
+            kwargs["creationflags"] = creationflags
+        if sys.platform == "win32" and hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
+            startupinfo.wShowWindow = subprocess.SW_HIDE  # type: ignore[attr-defined]
+            kwargs["startupinfo"] = startupinfo
+        return subprocess.Popen(command, **kwargs)
     
     def extract_update_zip(self, zip_path: Path) -> Optional[Path]:
         """
@@ -362,7 +315,7 @@ exit /b 0
     
     def apply_update(self, zip_path: Path) -> bool:
         """
-        Start update process by launching a detached batch updater.
+        Start update process by launching a detached Python updater.
         Returns True if update started successfully.
         """
         try:
@@ -374,21 +327,9 @@ exit /b 0
                 print(f"Invalid or corrupted update file: {zip_path}")
                 return False
             
-            script = self.create_updater_script(zip_path)
-            creationflags = 0
-            for flag_name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"):
-                creationflags |= int(getattr(subprocess, flag_name, 0))
-
-            subprocess.Popen(
-                [
-                    "cmd.exe",
-                    "/c",
-                    str(script),
-                ],
-                close_fds=True,
-                creationflags=creationflags,
-                cwd=str(self.cache_dir),
-            )
+            manifest = self.create_update_manifest(zip_path)
+            command, cwd = self._stage_updater_process(manifest)
+            self._hidden_popen(command, cwd=cwd)
             return True
         except Exception as e:
             print(f"Failed to apply update: {e}")
@@ -402,7 +343,7 @@ exit /b 0
         the next manual launch should keep those files available for retry and
         diagnosis instead of silently discarding them.
         """
-        for path in (self.cache_dir / "extracted", self.cache_dir / "staged"):
+        for path in (self.cache_dir / "extracted", self.cache_dir / "staged", self.cache_dir / UPDATER_RUNTIME_DIR_NAME):
             try:
                 if path.exists():
                     shutil.rmtree(path, ignore_errors=True)
@@ -432,12 +373,21 @@ exit /b 0
                 file.unlink()
             for file in self.cache_dir.glob("updater*.log"):
                 file.unlink()
+            python_log = self.cache_dir / "updater-python.log"
+            if python_log.exists():
+                python_log.unlink()
+            manifest = self.cache_dir / UPDATE_MANIFEST_NAME
+            if manifest.exists():
+                manifest.unlink()
             extracted = self.cache_dir / "extracted"
             if extracted.exists():
                 shutil.rmtree(extracted, ignore_errors=True)
             staged = self.cache_dir / "staged"
             if staged.exists():
                 shutil.rmtree(staged, ignore_errors=True)
+            updater_runtime = self.cache_dir / UPDATER_RUNTIME_DIR_NAME
+            if updater_runtime.exists():
+                shutil.rmtree(updater_runtime, ignore_errors=True)
         except Exception as e:
             print(f"Cleanup error: {e}")
 

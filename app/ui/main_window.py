@@ -5,7 +5,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPainterPath, QPixmap, QRadialGradient
+from PySide6.QtGui import QColor, QDesktopServices, QKeyEvent, QLinearGradient, QPainter, QPainterPath, QPixmap, QRadialGradient
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 try:
@@ -24,6 +24,8 @@ from ui.app_icon import application_icon
 from ui.music import MusicController, MusicManagerDialog, TopBarMusicWidget
 from ui.theme import current_theme_mode, set_theme_accent, theme_palette
 from ui.topbar import ActionPopup, PopupAction, TopBar
+from ui.startup_screen import DEVELOPER_ACCOUNT_NAME, run_startup_intro
+from ui.update_settings import CheckUpdateWorker
 from ui.version_display import format_launcher_version_label
 
 if TYPE_CHECKING:
@@ -104,6 +106,10 @@ class MainWindow(QWidget):
         self._screen_connected = False
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._runtime_session_snapshot: tuple[tuple[str, str, int | None, int | None, bool], ...] = ()
+        self._f3_pressed = False
+        self._developer_mode_active = self.service.get_player_name() == DEVELOPER_ACCOUNT_NAME
+        self._startup_update_worker: CheckUpdateWorker | None = None
+        self._startup_update_check_started = False
 
         self.setObjectName("appRoot")
         self.setWindowTitle("NOTG Launcher")
@@ -131,6 +137,7 @@ class MainWindow(QWidget):
             app.aboutToQuit.connect(self.music_controller.stop_with_checkpoint)
 
         QTimer.singleShot(0, self._apply_initial_restore_request)
+        QTimer.singleShot(1200, self._check_for_updates_on_startup)
 
     def showEvent(self, event) -> None:
         self._ensure_screen_tracking()
@@ -142,6 +149,35 @@ class MainWindow(QWidget):
         self._invalidate_background_cache()
         self._invalidate_atmosphere_cache()
         super().resizeEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.isAutoRepeat():
+            super().keyPressEvent(event)
+            return
+        if event.key() == Qt.Key_F3:
+            self._f3_pressed = True
+            event.accept()
+            return
+        if self._f3_pressed and event.key() == Qt.Key_Escape:
+            if self.service.get_player_name() == DEVELOPER_ACCOUNT_NAME:
+                event.accept()
+                self._f3_pressed = False
+                self._replay_startup_intro()
+                return
+        if self._f3_pressed and event.key() == Qt.Key_M:
+            if self.service.get_f3_kill_enabled():
+                event.accept()
+                self._f3_pressed = False
+                self._kill_all_running_instances()
+                return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:
+        if not event.isAutoRepeat() and event.key() == Qt.Key_F3:
+            self._f3_pressed = False
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def closeEvent(self, event) -> None:
         if self._should_keep_music_for_active_session():
@@ -543,6 +579,19 @@ class MainWindow(QWidget):
         self._set_instance_status(instance.instance_id, "Quit")
         self._sync_runtime_sessions(force_refresh=True)
 
+    def _kill_all_running_instances(self) -> None:
+        sessions = self.service.list_runtime_sessions()
+        stopped = 0
+        for instance_id in list(sessions):
+            if not self.service.runtime_session_is_active(instance_id):
+                continue
+            if self.service.terminate_runtime_session(instance_id):
+                stopped += 1
+                self._set_instance_status(instance_id, "Quit")
+        self._sync_runtime_sessions(force_refresh=True)
+        if stopped:
+            QMessageBox.information(self, "Instances Stopped", f"Stopped {stopped} running instance{'s' if stopped != 1 else ''}.")
+
     def _copy_selected_instance(self) -> None:
         if self._selected_item is None:
             return
@@ -647,16 +696,28 @@ class MainWindow(QWidget):
             break
 
     def _sync_accounts_ui(self) -> None:
-        self.topbar.set_accounts(self.service.list_accounts(), self.service.get_player_name())
+        player_name = self.service.get_player_name()
+        developer_mode = player_name == DEVELOPER_ACCOUNT_NAME
+        self.topbar.set_accounts(self.service.list_accounts(), player_name)
+        if developer_mode and not self._developer_mode_active:
+            QMessageBox.information(self, "Developer Mode", "Welcome Developer")
+        self._developer_mode_active = developer_mode
 
     def _open_manage_accounts_dialog(self) -> None:
         from ui.accounts_dialog import AccountsDialog
 
         dialog = AccountsDialog(self.service, self)
+        dialog.accounts_changed.connect(self._sync_accounts_ui)
         dialog.exec()
         self._sync_accounts_ui()
 
-    def _open_settings_dialog(self) -> None:
+    def _open_settings_dialog(
+        self,
+        *,
+        updates_page: bool = False,
+        checked_update: tuple[bool, str, str, str] | None = None,
+        prompt_on_update: bool = False,
+    ) -> None:
         from ui.settings_dialog import SettingsDialog
 
         if self._settings_dialog is None:
@@ -664,9 +725,20 @@ class MainWindow(QWidget):
             self._settings_dialog.background_changed.connect(lambda *_: self._refresh_background())
             self._settings_dialog.theme_changed.connect(self._sync_launcher_theme_accent)
             self._settings_dialog.destroyed.connect(lambda *_: setattr(self, "_settings_dialog", None))
+        if updates_page:
+            self._settings_dialog.show_updates_page()
         self._settings_dialog.show()
         self._settings_dialog.raise_()
         self._settings_dialog.activateWindow()
+        if checked_update is not None:
+            has_update, version, notes, download_url = checked_update
+            self._settings_dialog.update_settings.apply_check_result(
+                has_update,
+                version,
+                notes,
+                download_url,
+                prompt_on_update=prompt_on_update,
+            )
 
     def _open_music_manager(self) -> None:
         if self._music_dialog is None:
@@ -697,6 +769,29 @@ class MainWindow(QWidget):
         else:
             accent = self.service.get_theme_accent_color()
         set_theme_accent(app, accent)
+
+    def _replay_startup_intro(self) -> None:
+        run_startup_intro(self.service, developer_mode=True)
+        self._activate_window()
+
+    def _check_for_updates_on_startup(self) -> None:
+        if self._startup_update_check_started:
+            return
+        self._startup_update_check_started = True
+        self._startup_update_worker = CheckUpdateWorker("EPICmaster-2149", "NOTG-Launcher")
+        self._startup_update_worker.check_complete.connect(self._handle_startup_update_check_complete)
+        self._startup_update_worker.error.connect(lambda *_: None)
+        self._startup_update_worker.finished.connect(lambda: setattr(self, "_startup_update_worker", None))
+        self._startup_update_worker.start()
+
+    def _handle_startup_update_check_complete(self, has_update: bool, version: str, notes: str, download_url: str) -> None:
+        if not has_update:
+            return
+        self._open_settings_dialog(
+            updates_page=True,
+            checked_update=(has_update, version, notes, download_url),
+            prompt_on_update=True,
+        )
 
     def _set_video_background(self, video_path: str) -> None:
         if QMediaPlayer is None or QVideoSink is None:

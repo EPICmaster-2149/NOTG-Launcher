@@ -8,9 +8,13 @@ $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
 
 $appName = "NOTG Launcher"
+$updaterName = "NOTG Updater"
 $entryPoint = "app/main.py"
+$updaterEntryPoint = "app/updater_entry.py"
 $iconPath = "Minecraft-Launcher.ico"
 $distExe = Join-Path $PSScriptRoot "dist\$appName\$appName.exe"
+$distUpdaterExe = Join-Path $PSScriptRoot "dist\$appName\$updaterName.exe"
+$updaterBuildDist = Join-Path $PSScriptRoot "dist\_updater"
 $venvPython = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 
 if (Test-Path -LiteralPath $venvPython) {
@@ -63,10 +67,43 @@ if (-not (Test-Path -LiteralPath $distExe)) {
     throw "Build finished, but the expected executable was not found: $distExe"
 }
 
+$updaterArguments = @(
+    "-m", "PyInstaller",
+    "--onefile",
+    "--noconsole",
+    "--noconfirm",
+    "--clean",
+    "--name", $updaterName,
+    "--distpath", $updaterBuildDist,
+    "--workpath", "build\updater",
+    "--icon", $iconPath,
+    "--hidden-import", "PySide6.QtCore",
+    "--hidden-import", "PySide6.QtGui",
+    "--hidden-import", "PySide6.QtWidgets",
+    "--collect-all", "PySide6",
+    $updaterEntryPoint
+)
+
+Write-Host "Building $updaterName..."
+& $python @updaterArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller updater build failed with exit code $LASTEXITCODE."
+}
+
+$builtUpdaterExe = Join-Path $updaterBuildDist "$updaterName.exe"
+if (-not (Test-Path -LiteralPath $builtUpdaterExe)) {
+    throw "Updater build finished, but the expected executable was not found: $builtUpdaterExe"
+}
+
+Copy-Item -LiteralPath $builtUpdaterExe -Destination $distUpdaterExe -Force
+Remove-Item -LiteralPath $updaterBuildDist -Recurse -Force -ErrorAction SilentlyContinue
+
 if (-not $KeepSpec) {
     Remove-Item -LiteralPath "$appName.spec" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$updaterName.spec" -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host ""
 Write-Host "Build complete:"
 Write-Host $distExe
+Write-Host $distUpdaterExe

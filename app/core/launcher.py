@@ -1287,6 +1287,24 @@ class LauncherService:
         self._write_background_payload(payload)
         return bool(payload["close_ui_on_launch"])
 
+    def get_f3_kill_enabled(self) -> bool:
+        return bool(self._read_background_payload().get("f3_kill_enabled", True))
+
+    def set_f3_kill_enabled(self, enabled: bool) -> bool:
+        payload = self._read_background_payload()
+        payload["f3_kill_enabled"] = bool(enabled)
+        self._write_background_payload(payload)
+        return bool(payload["f3_kill_enabled"])
+
+    def get_always_show_loading_screen(self) -> bool:
+        return bool(self._read_background_payload().get("always_show_loading_screen", True))
+
+    def set_always_show_loading_screen(self, enabled: bool) -> bool:
+        payload = self._read_background_payload()
+        payload["always_show_loading_screen"] = bool(enabled)
+        self._write_background_payload(payload)
+        return bool(payload["always_show_loading_screen"])
+
     def get_theme_mode(self) -> str:
         mode = str(self._read_background_payload().get("theme", "dark")).strip().lower()
         return "light" if mode == "light" else "dark"
@@ -2822,6 +2840,8 @@ class LauncherService:
         payload["theme"] = "light" if str(loaded.get("theme", "dark")).strip().lower() == "light" else "dark"
         payload["theme_adapt_to_music"] = bool(loaded.get("theme_adapt_to_music", False))
         payload["theme_accent"] = _normalize_hex_color(loaded.get("theme_accent"), "#2E45FF")
+        payload["f3_kill_enabled"] = bool(loaded.get("f3_kill_enabled", True))
+        payload["always_show_loading_screen"] = bool(loaded.get("always_show_loading_screen", True))
         return payload
 
     def _write_background_payload(self, payload: dict[str, Any]) -> None:
@@ -2830,6 +2850,8 @@ class LauncherService:
         payload["theme"] = "light" if str(payload.get("theme", "dark")).strip().lower() == "light" else "dark"
         payload["theme_adapt_to_music"] = bool(payload.get("theme_adapt_to_music", False))
         payload["theme_accent"] = _normalize_hex_color(payload.get("theme_accent"), "#2E45FF")
+        payload["f3_kill_enabled"] = bool(payload.get("f3_kill_enabled", True))
+        payload["always_show_loading_screen"] = bool(payload.get("always_show_loading_screen", True))
         self.background_settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _base_music_payload(self) -> dict[str, Any]:

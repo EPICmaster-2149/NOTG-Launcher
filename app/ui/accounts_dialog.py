@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -24,6 +24,8 @@ from ui.topbar import ModernButton
 
 
 class AccountsDialog(QDialog):
+    accounts_changed = Signal()
+
     def __init__(self, service: LauncherService, parent: QWidget | None = None):
         super().__init__(parent)
         self.service = service
@@ -160,6 +162,7 @@ class AccountsDialog(QDialog):
             QMessageBox.warning(self, "Accounts", str(exc))
             return False
         self.refresh()
+        self.accounts_changed.emit()
         return True
 
     def _add_account(self) -> None:

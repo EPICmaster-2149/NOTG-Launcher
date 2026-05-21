@@ -8,7 +8,6 @@ from PySide6.QtGui import QColor, QConicalGradient, QFont, QPainter, QPen, QPixm
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
-    QCheckBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -207,10 +206,14 @@ class SettingsNavButton(QAbstractButton):
             painter.drawEllipse(icon_rect.adjusted(1.5, 1.5, -1.5, -1.5))
             painter.drawEllipse(QRectF(icon_rect.center().x() - 3, icon_rect.center().y() - 3, 6, 6))
             painter.drawLine(icon_rect.center(), QPointF(icon_rect.right() - 3, icon_rect.top() + 5))
-        else:
+        elif self._icon_kind == "updates":
             painter.drawArc(icon_rect.adjusted(2, 3, -2, -3), 35 * 16, 270 * 16)
             painter.drawLine(QPointF(icon_rect.right() - 4, icon_rect.top() + 6), QPointF(icon_rect.right() - 1, icon_rect.top() + 12))
             painter.drawLine(QPointF(icon_rect.right() - 4, icon_rect.top() + 6), QPointF(icon_rect.right() - 10, icon_rect.top() + 5))
+        else:
+            painter.drawRoundedRect(icon_rect.adjusted(3, 3, -3, -3), 4, 4)
+            painter.drawLine(QPointF(icon_rect.left() + 7, icon_rect.center().y()), QPointF(icon_rect.right() - 7, icon_rect.center().y()))
+            painter.drawLine(QPointF(icon_rect.center().x(), icon_rect.top() + 7), QPointF(icon_rect.center().x(), icon_rect.bottom() - 7))
 
         if not self._compact:
             font = QFont(self.font())
@@ -236,31 +239,48 @@ class ThemeColorWheel(QWidget):
 
     def __init__(self, color: str, parent: QWidget | None = None):
         super().__init__(parent)
+
         self._color = QColor(color)
+
         if not self._color.isValid():
             self._color = current_theme_accent(self)
+
         self._adaptive = True
         self._hover_pin = False
         self._pulse = 0.0
+
         self.setCursor(Qt.ForbiddenCursor)
+
         self.setMinimumSize(220, 220)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self._pulse_animation = QVariantAnimation(self, duration=2400, easingCurve=QEasingCurve.InOutSine)
+
+        self._pulse_animation = QVariantAnimation(
+            self,
+            duration=2400,
+            easingCurve=QEasingCurve.InOutSine
+        )
+
         self._pulse_animation.setStartValue(0.0)
         self._pulse_animation.setEndValue(1.0)
+
         self._pulse_animation.valueChanged.connect(self._set_pulse)
         self._pulse_animation.setLoopCount(-1)
         self._pulse_animation.start()
 
     def set_color(self, color: str | QColor) -> None:
         next_color = QColor(color)
+
         if next_color.isValid() and next_color.name() != self._color.name():
             self._color = next_color
             self.update()
 
     def set_adaptive(self, adaptive: bool) -> None:
         self._adaptive = bool(adaptive)
-        self.setCursor(Qt.ForbiddenCursor if adaptive else Qt.CrossCursor)
+
+        self.setCursor(
+            Qt.ForbiddenCursor if adaptive else Qt.CrossCursor
+        )
+
         self.update()
 
     def color_hex(self) -> str:
@@ -268,108 +288,244 @@ class ThemeColorWheel(QWidget):
 
     def paintEvent(self, event) -> None:
         del event
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
         side = min(self.width(), self.height()) - 8
-        rect = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
+
+        rect = QRectF(
+            (self.width() - side) / 2,
+            (self.height() - side) / 2,
+            side,
+            side
+        )
+
         center = rect.center()
+
         ring_width = max(12.0, side * 0.075)
 
-        # active color (consistent across wheel, preview, glow)
-        active_color = current_theme_accent(self) if self._adaptive else self._color
-        active = QColor(active_color)
-        accent_light = blend_colors(active, QColor("#ffffff"), 0.32)
+        active_color = (
+            current_theme_accent(self)
+            if self._adaptive
+            else self._color
+        )
 
-        # Ambient bloom behind the wheel (subtle, performance-friendly radial)
+        active = QColor(active_color)
+
+        # =========================
+        # Ambient glow
+        # =========================
+
         painter.save()
+
         bloom = QColor(active)
         bloom.setAlpha(28 if self._adaptive else 18)
-        rg_bloom = QRadialGradient(center.x(), center.y(), side * 0.9)
+
+        rg_bloom = QRadialGradient(
+            center.x(),
+            center.y(),
+            side * 0.9
+        )
+
         rg_bloom.setColorAt(0.0, bloom)
-        tb = QColor(bloom)
-        tb.setAlpha(0)
-        rg_bloom.setColorAt(0.6, tb)
+
+        transparent_bloom = QColor(bloom)
+        transparent_bloom.setAlpha(0)
+
+        rg_bloom.setColorAt(0.6, transparent_bloom)
+
         painter.setPen(Qt.NoPen)
         painter.setBrush(rg_bloom)
-        painter.drawEllipse(QRectF(center.x() - side * 0.55, center.y() - side * 0.55, side * 1.1, side * 1.1))
 
-        # soft shadow to lift the wheel
-        shadow_grad = QRadialGradient(center.x(), center.y() + side * 0.06, side * 0.7)
-        shadow_grad.setColorAt(0.0, QColor(0, 0, 0, 64))
-        shadow_grad.setColorAt(0.6, QColor(0, 0, 0, 0))
-        painter.setBrush(shadow_grad)
-        painter.drawEllipse(QRectF(center.x() - side * 0.6, center.y() - side * 0.22, side * 1.2, side * 0.7))
+        painter.drawEllipse(
+            QRectF(
+                center.x() - side * 0.55,
+                center.y() - side * 0.55,
+                side * 1.1,
+                side * 1.1
+            )
+        )
+
         painter.restore()
 
-        # Wheel ring (conical gradient) - keep efficient step count but connected palette
+        # =========================
+        # Shadow
+        # =========================
+
+        shadow_grad = QRadialGradient(
+            center.x(),
+            center.y() + side * 0.06,
+            side * 0.7
+        )
+
+        shadow_grad.setColorAt(0.0, QColor(0, 0, 0, 64))
+        shadow_grad.setColorAt(0.6, QColor(0, 0, 0, 0))
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(shadow_grad)
+
+        painter.drawEllipse(
+            QRectF(
+                center.x() - side * 0.6,
+                center.y() - side * 0.22,
+                side * 1.2,
+                side * 0.7
+            )
+        )
+
+        # =========================
+        # Wheel
+        # =========================
+
         painter.setOpacity(0.68 if self._adaptive else 1.0)
-        gradient = QConicalGradient(center, -90)
+
+        gradient = QConicalGradient(center, -180)
+
         for step in range(13):
-            hue = step / 12
-            display_hue = (1.0 - hue) % 1.0
-            color = QColor.fromHsvF(display_hue if display_hue < 1.0 else 0.0, 0.88, 1.0)
+            hue = 1.0 - (step / 12)
+
+            color = QColor.fromHsvF(
+                hue % 1.0,
+                0.88,
+                1.0
+            )
+
             if self._adaptive:
-                color = blend_colors(color, QColor("#d7e7ff"), 0.38)
+                color = blend_colors(
+                    color,
+                    QColor("#d7e7ff"),
+                    0.38
+                )
+
             gradient.setColorAt(step / 12, color)
 
         pen = QPen()
         pen.setWidthF(ring_width)
         pen.setBrush(gradient)
         pen.setCapStyle(Qt.RoundCap)
+
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(rect.adjusted(ring_width / 2, ring_width / 2, -ring_width / 2, -ring_width / 2))
+
+        painter.drawEllipse(
+            rect.adjusted(
+                ring_width / 2,
+                ring_width / 2,
+                -ring_width / 2,
+                -ring_width / 2
+            )
+        )
 
         painter.setOpacity(1.0)
-        active_color = current_theme_accent(self) if self._adaptive else self._color
-        pulse_alpha = 70 + int(45 * math.sin(self._pulse * math.tau))
-        glow = QColor(active_color)
-        glow.setAlpha(pulse_alpha if self._adaptive else 82)
+
+        # =========================
+        # Center preview
+        # =========================
+
         preview_radius = side * 0.255
-        preview = QRectF(center.x() - preview_radius, center.y() - preview_radius, preview_radius * 2, preview_radius * 2)
-        painter.setPen(QPen(glow, 2.0))
-        fill = blend_colors(QColor("#07101d"), QColor(active_color), 0.34 if self._adaptive else 0.48)
-        fill.setAlpha(238)
+
+        preview = QRectF(
+            center.x() - preview_radius,
+            center.y() - preview_radius,
+            preview_radius * 2,
+            preview_radius * 2
+        )
+
+        border = QColor(active_color)
+        border.setAlpha(150)
+
+        painter.setPen(QPen(border, 1.4))
+
+        fill = blend_colors(
+            QColor("#070a10"),
+            QColor(active_color),
+            0.16 if self._adaptive else 0.22
+        )
+
+        fill.setAlpha(246)
+
         painter.setBrush(fill)
         painter.drawEllipse(preview)
 
         font = QFont(self.font())
+
         font.setPointSize(10)
         font.setWeight(QFont.Bold)
+
         painter.setFont(font)
-        painter.setPen(QColor("#f7fbff"))
-        painter.drawText(preview.adjusted(0, -10, 0, 0), Qt.AlignCenter, active_color.name().upper())
+        painter.setPen(QColor("#edf2ff"))
+
+        painter.drawText(
+            preview.adjusted(0, -8, 0, 0),
+            Qt.AlignCenter,
+            active_color.name().upper()
+        )
+
         font.setPointSize(8)
         font.setWeight(QFont.DemiBold)
+
         painter.setFont(font)
-        painter.setPen(QColor(210, 225, 245, 180))
-        painter.drawText(preview.adjusted(0, 18, 0, 0), Qt.AlignCenter, _color_name(active_color))
+
+        painter.setPen(QColor(190, 203, 224, 190))
+
+        painter.drawText(
+            preview.adjusted(0, 18, 0, 0),
+            Qt.AlignCenter,
+            "Accent"
+        )
 
         if self._adaptive:
             return
 
+        # =========================
+        # Pin
+        # =========================
+
         pin = self._pin_position(rect, ring_width)
+
         pin_radius = 7.5 if self._hover_pin else 6.0
+
         pin_glow = QColor(self._color)
         pin_glow.setAlpha(110)
+
         painter.setPen(QPen(pin_glow, 5.0))
         painter.setBrush(QColor("#f8fbff"))
-        painter.drawEllipse(QRectF(pin.x() - pin_radius, pin.y() - pin_radius, pin_radius * 2, pin_radius * 2))
+
+        painter.drawEllipse(
+            QRectF(
+                pin.x() - pin_radius,
+                pin.y() - pin_radius,
+                pin_radius * 2,
+                pin_radius * 2
+            )
+        )
+
         painter.setPen(QPen(QColor("#ffffff"), 1.0))
-        painter.drawEllipse(QRectF(pin.x() - pin_radius, pin.y() - pin_radius, pin_radius * 2, pin_radius * 2))
+
+        painter.drawEllipse(
+            QRectF(
+                pin.x() - pin_radius,
+                pin.y() - pin_radius,
+                pin_radius * 2,
+                pin_radius * 2
+            )
+        )
 
     def mousePressEvent(self, event) -> None:
         if self._adaptive or event.button() != Qt.LeftButton:
             super().mousePressEvent(event)
             return
+
         self._set_color_from_point(event.position())
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._adaptive:
             return
+
         self._hover_pin = self._pin_hit(event.position())
+
         if event.buttons() & Qt.LeftButton:
             self._set_color_from_point(event.position())
         else:
@@ -378,33 +534,77 @@ class ThemeColorWheel(QWidget):
     def leaveEvent(self, event) -> None:
         self._hover_pin = False
         self.update()
+
         super().leaveEvent(event)
 
     def _set_color_from_point(self, point: QPointF) -> None:
-        center = QPointF(self.width() / 2, self.height() / 2)
-        angle = math.degrees(math.atan2(point.y() - center.y(), point.x() - center.x()))
-        hue = ((angle + 90.0) % 360.0) / 360.0
-        self._color = QColor.fromHsvF(hue, 0.82, 1.0)
+        center = QPointF(
+            self.width() / 2,
+            self.height() / 2
+        )
+
+        dx = point.x() - center.x()
+        dy = point.y() - center.y()
+
+        angle = math.degrees(math.atan2(dy, dx))
+
+        hue = ((angle + 180.0) % 360.0) / 360.0
+
+        self._color = QColor.fromHsvF(
+            hue,
+            0.82,
+            1.0
+        )
+
         self.color_changed.emit(self._color.name())
+
         self.update()
 
     def _pin_hit(self, point: QPointF) -> bool:
         side = min(self.width(), self.height()) - 8
-        rect = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
-        pin = self._pin_position(rect, max(12.0, side * 0.075))
-        return (point.x() - pin.x()) ** 2 + (point.y() - pin.y()) ** 2 <= 16 ** 2
 
-    def _pin_position(self, rect: QRectF, ring_width: float) -> QPointF:
+        rect = QRectF(
+            (self.width() - side) / 2,
+            (self.height() - side) / 2,
+            side,
+            side
+        )
+
+        pin = self._pin_position(
+            rect,
+            max(12.0, side * 0.075)
+        )
+
+        return (
+            (point.x() - pin.x()) ** 2 +
+            (point.y() - pin.y()) ** 2
+        ) <= 16 ** 2
+
+    def _pin_position(
+        self,
+        rect: QRectF,
+        ring_width: float
+    ) -> QPointF:
+
         hue = self._color.hsvHueF()
+
         if hue < 0:
-            hue = 0.58
-        angle = math.radians((hue * 360.0) - 90.0)
+            hue = 0.0
+
+        angle = math.radians((hue * 360.0) - 180.0)
+
         radius = (rect.width() - ring_width) / 2
+
         center = rect.center()
-        return QPointF(center.x() + math.cos(angle) * radius, center.y() + math.sin(angle) * radius)
+
+        return QPointF(
+            center.x() + math.cos(angle) * radius,
+            center.y() + math.sin(angle) * radius
+        )
 
     def _set_pulse(self, value: float) -> None:
         self._pulse = float(value)
+
         if self._adaptive:
             self.update()
 
@@ -447,6 +647,11 @@ class SettingsDialog(QDialog):
         for button in self.nav_buttons:
             button.update()
 
+    def show_updates_page(self, *, check_now: bool = False, prompt_on_update: bool = False) -> None:
+        self._select_page(2)
+        if check_now:
+            self.update_settings.check_for_updates(prompt_on_update=prompt_on_update)
+
     def _build_ui(self) -> None:
         root_layout = QHBoxLayout(self)
         root_layout.setContentsMargins(14, 14, 14, 14)
@@ -461,11 +666,14 @@ class SettingsDialog(QDialog):
         self.sidebar_title.setObjectName("settingsSidebarTitle")
         sidebar_layout.addWidget(self.sidebar_title)
 
+        self.general_nav = SettingsNavButton("General", "general")
         self.appearance_nav = SettingsNavButton("Appearance", "appearance")
         self.updates_nav = SettingsNavButton("Updates", "updates")
-        self.nav_buttons = [self.appearance_nav, self.updates_nav]
-        self.appearance_nav.clicked.connect(lambda: self._select_page(0))
-        self.updates_nav.clicked.connect(lambda: self._select_page(1))
+        self.nav_buttons = [self.general_nav, self.appearance_nav, self.updates_nav]
+        self.general_nav.clicked.connect(lambda: self._select_page(0))
+        self.appearance_nav.clicked.connect(lambda: self._select_page(1))
+        self.updates_nav.clicked.connect(lambda: self._select_page(2))
+        sidebar_layout.addWidget(self.general_nav)
         sidebar_layout.addWidget(self.appearance_nav)
         sidebar_layout.addWidget(self.updates_nav)
         sidebar_layout.addStretch()
@@ -479,6 +687,7 @@ class SettingsDialog(QDialog):
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("settingsStack")
+        self.stack.addWidget(self._build_general_page())
         self.stack.addWidget(self._build_appearance_page())
         self.stack.addWidget(self._build_updates_page())
         content_layout.addWidget(self.stack, 1)
@@ -491,6 +700,38 @@ class SettingsDialog(QDialog):
         footer.addWidget(self.ok_button)
         content_layout.addLayout(footer)
         root_layout.addWidget(self.content, 1)
+
+    def _build_general_page(self) -> QWidget:
+        page, page_layout = self._page_shell("General", "Launcher behaviour, startup, and developer shortcuts.")
+
+        launch_card, launch_layout = self._section_card("Launcher")
+        self.close_on_launch_switch = self._add_toggle_row(
+            launch_layout,
+            "Close the launcher after game launch",
+            self.service.get_close_ui_on_launch(),
+            self._set_close_on_launch,
+        )
+        page_layout.addWidget(launch_card)
+
+        startup_card, startup_layout = self._section_card("Startup")
+        self.always_loading_switch = self._add_toggle_row(
+            startup_layout,
+            "Always show loading screen",
+            self.service.get_always_show_loading_screen(),
+            self._set_always_show_loading_screen,
+        )
+        page_layout.addWidget(startup_card)
+
+        shortcuts_card, shortcuts_layout = self._section_card("Shortcuts")
+        self.f3_kill_switch = self._add_toggle_row(
+            shortcuts_layout,
+            "Enable F3 + M instance crash shortcut",
+            self.service.get_f3_kill_enabled(),
+            self._set_f3_kill_enabled,
+        )
+        page_layout.addWidget(shortcuts_card)
+        page_layout.addStretch()
+        return page
 
     def _build_appearance_page(self) -> QWidget:
         page, page_layout = self._page_shell("Appearance", "Visuals, background, and launcher theme.")
@@ -556,13 +797,6 @@ class SettingsDialog(QDialog):
         theme_layout.addLayout(wheel_row)
         page_layout.addWidget(theme_card)
 
-        general_card, general_layout = self._section_card("General")
-        self.close_on_launch_checkbox = QCheckBox("Close the launcher after game launch")
-        self.close_on_launch_checkbox.setObjectName("editorFilterCheck")
-        self.close_on_launch_checkbox.setChecked(self.service.get_close_ui_on_launch())
-        self.close_on_launch_checkbox.toggled.connect(self._set_close_on_launch)
-        general_layout.addWidget(self.close_on_launch_checkbox)
-        page_layout.addWidget(general_card)
         page_layout.addStretch()
         return page
 
@@ -573,6 +807,7 @@ class SettingsDialog(QDialog):
             parent=self,
             github_owner="EPICmaster-2149",
             github_repo="NOTG-Launcher",
+            service=self.service,
         )
         updates_layout.addWidget(self.update_settings, 1)
         page_layout.addWidget(updates_card, 1)
@@ -614,6 +849,19 @@ class SettingsDialog(QDialog):
         label.setObjectName("editorSectionTitle")
         layout.addWidget(label)
         return card, layout
+
+    def _add_toggle_row(self, layout: QVBoxLayout, text: str, checked: bool, handler) -> ToggleSwitch:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+        switch = ToggleSwitch(checked=checked)
+        switch.toggled.connect(handler)
+        row.addWidget(switch, alignment=Qt.AlignLeft | Qt.AlignVCenter)
+        label = QLabel(text)
+        label.setObjectName("settingsFieldTitle")
+        row.addWidget(label, 1, alignment=Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addLayout(row)
+        return switch
 
     def _select_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
@@ -669,10 +917,28 @@ class SettingsDialog(QDialog):
         try:
             self.service.set_close_ui_on_launch(checked)
         except Exception as exc:  # noqa: BLE001
-            self.close_on_launch_checkbox.blockSignals(True)
-            self.close_on_launch_checkbox.setChecked(not checked)
-            self.close_on_launch_checkbox.blockSignals(False)
+            self.close_on_launch_switch.blockSignals(True)
+            self.close_on_launch_switch.setChecked(not checked)
+            self.close_on_launch_switch.blockSignals(False)
             QMessageBox.warning(self, "Gameplay behaviour", str(exc))
+
+    def _set_f3_kill_enabled(self, checked: bool) -> None:
+        try:
+            self.service.set_f3_kill_enabled(checked)
+        except Exception as exc:  # noqa: BLE001
+            self.f3_kill_switch.blockSignals(True)
+            self.f3_kill_switch.setChecked(not checked)
+            self.f3_kill_switch.blockSignals(False)
+            QMessageBox.warning(self, "Shortcuts", str(exc))
+
+    def _set_always_show_loading_screen(self, checked: bool) -> None:
+        try:
+            self.service.set_always_show_loading_screen(checked)
+        except Exception as exc:  # noqa: BLE001
+            self.always_loading_switch.blockSignals(True)
+            self.always_loading_switch.setChecked(not checked)
+            self.always_loading_switch.blockSignals(False)
+            QMessageBox.warning(self, "Startup", str(exc))
 
     def _set_light_theme(self, checked: bool) -> None:
         try:
@@ -719,26 +985,3 @@ class SettingsDialog(QDialog):
             if app is not None:
                 set_theme_accent(app, saved)
         self.theme_changed.emit()
-
-
-def _color_name(color: QColor) -> str:
-    hue = color.hsvHue()
-    if hue < 0:
-        return "Soft White"
-    if hue < 18 or hue >= 344:
-        return "Crimson"
-    if hue < 42:
-        return "Sunset Orange"
-    if hue < 72:
-        return "Gold"
-    if hue < 155:
-        return "Emerald"
-    if hue < 190:
-        return "Aqua"
-    if hue < 235:
-        return "Sky Blue"
-    if hue < 275:
-        return "Violet"
-    if hue < 320:
-        return "Magenta"
-    return "Rose"

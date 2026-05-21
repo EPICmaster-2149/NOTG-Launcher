@@ -15,7 +15,6 @@ from PySide6.QtCore import (
     QEasingCurve,
     QMimeData,
     QPoint,
-    QPropertyAnimation,
     QRectF,
     QSize,
     Qt,
@@ -2732,6 +2731,9 @@ class MusicManagerDialog(QDialog):
         self.controller.select_playlist(playlist_id)
 
     def _toggle_sidebar(self) -> None:
+        existing = getattr(self, "_sidebar_animation", None)
+        if existing is not None:
+            existing.stop()
         self._sidebar_collapsed = not self._sidebar_collapsed
         start = self.sidebar.maximumWidth()
         end = 66 if self._sidebar_collapsed else 224
@@ -2741,16 +2743,25 @@ class MusicManagerDialog(QDialog):
             self.add_playlist_button.setVisible(False)
             self.background_play_button.setVisible(False)
             self.playlist_list.setFixedWidth(52)
-        self.sidebar.setMinimumWidth(min(start, end))
-        animation = QPropertyAnimation(self.sidebar, b"maximumWidth", self)
-        animation.setDuration(220)
-        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation = QVariantAnimation(self, duration=320, easingCurve=QEasingCurve.OutCubic)
         animation.setStartValue(start)
         animation.setEndValue(end)
-        animation.valueChanged.connect(lambda *_: self.sidebar.updateGeometry())
+        animation.valueChanged.connect(self._set_sidebar_width_for_animation)
         animation.finished.connect(lambda: self._refresh_sidebar_layout_state(animated=False))
         animation.start()
         self._sidebar_animation = animation
+
+    def _set_sidebar_width_for_animation(self, value) -> None:
+        width = int(round(float(value)))
+        self.sidebar.setMinimumWidth(width)
+        self.sidebar.setMaximumWidth(width)
+        if self._sidebar_collapsed:
+            list_width = 52
+        else:
+            progress = (width - 66) / max(1, 224 - 66)
+            list_width = int(round(52 + ((204 - 52) * max(0.0, min(1.0, progress)))))
+        self.playlist_list.setFixedWidth(list_width)
+        self.sidebar.updateGeometry()
 
     def _refresh_sidebar_layout_state(self, *, animated: bool) -> None:
         compact = self._sidebar_collapsed

@@ -264,7 +264,13 @@ class ReleaseNotesPreview(QFrame):
 class UpdateSettingsPanel(QWidget):
     """Update settings panel for settings dialog."""
     
-    def __init__(self, parent=None, github_owner: str = "YourUsername", github_repo: str = "NOTG-Launcher"):
+    def __init__(
+        self,
+        parent=None,
+        github_owner: str = "YourUsername",
+        github_repo: str = "NOTG-Launcher",
+        service=None,
+    ):
         super().__init__(parent)
         self.github_owner = github_owner
         self.github_repo = github_repo
@@ -272,9 +278,11 @@ class UpdateSettingsPanel(QWidget):
         self.download_worker = None
         self.downloaded_exe = None
         self.download_url = None
+        self._prompt_on_update = False
         
-        from core.launcher import LauncherService
-        service = LauncherService()
+        if service is None:
+            from core.launcher import LauncherService
+            service = LauncherService()
         self.cache_dir = str(service.cache_root)
         
         if getattr(sys, "frozen", False):
@@ -352,10 +360,15 @@ class UpdateSettingsPanel(QWidget):
     
     def _on_check_updates(self):
         """Handle check updates button click."""
+        self.check_for_updates(prompt_on_update=False)
+
+    def check_for_updates(self, *, prompt_on_update: bool = False):
+        """Check for updates, optionally asking to install when one is found."""
         if self.check_worker and self.check_worker.isRunning():
             self.status_label.setText("Already checking...")
             return
-        
+
+        self._prompt_on_update = bool(prompt_on_update)
         self.status_label.setText("Checking for updates...")
         self.check_button.setEnabled(False)
         self.install_button.setEnabled(False)
@@ -368,6 +381,18 @@ class UpdateSettingsPanel(QWidget):
     
     def _on_check_complete(self, has_update: bool, version: str, notes: str, download_url: str):
         """Called when check completes."""
+        self.apply_check_result(has_update, version, notes, download_url, prompt_on_update=self._prompt_on_update)
+
+    def apply_check_result(
+        self,
+        has_update: bool,
+        version: str,
+        notes: str,
+        download_url: str,
+        *,
+        prompt_on_update: bool = False,
+    ) -> None:
+        """Apply a completed update check to this panel."""
         self.check_button.setEnabled(True)
         self.download_url = download_url
         
@@ -383,10 +408,24 @@ class UpdateSettingsPanel(QWidget):
         else:
             self.status_label.setText("You have the latest version")
             self.install_button.setEnabled(False)
+            self._prompt_on_update = False
         self.preview.set_content(notes, release_ref=version)
+
+        if has_update and prompt_on_update:
+            self._prompt_on_update = False
+            answer = QMessageBox.question(
+                self,
+                "Update Available",
+                f"{version} is available. Install this update now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer == QMessageBox.Yes:
+                self._on_install_update()
     
     def _on_check_error(self, error: str):
         """Called on check error."""
+        self._prompt_on_update = False
         self.check_button.setEnabled(True)
         self.status_label.setText("Check failed")
         self.preview.set_content(f"Error: {error}")

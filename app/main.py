@@ -1,6 +1,7 @@
 import argparse
 import multiprocessing
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
@@ -16,6 +17,7 @@ from ui.theme import apply_theme
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--monitor-session")
+    parser.add_argument("--run-updater")
     parser.add_argument("--pid", type=int)
     parser.add_argument("--player-name", default="")
     parser.add_argument("--restore-instance")
@@ -31,6 +33,13 @@ def main():
         return run_session_monitor(args.monitor_session, args.pid, args.player_name)
 
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    if args.run_updater:
+        app = QApplication([])
+        app.setApplicationName("NOTG Launcher Updater")
+        from ui.startup_screen import run_update_manifest
+
+        return run_update_manifest(Path(args.run_updater))
+
     service = LauncherService()
     if getattr(sys, "frozen", False):
         from core.updater import UpdateInstaller
@@ -53,6 +62,12 @@ def main():
     app.setApplicationName("NOTG Launcher")
     app.setWindowIcon(application_icon(service.project_root))
     apply_theme(app, service.get_theme_mode())
+
+    from ui.startup_screen import DEVELOPER_ACCOUNT_NAME, run_startup_intro, should_show_startup_intro
+
+    developer_mode = service.get_player_name() == DEVELOPER_ACCOUNT_NAME
+    if should_show_startup_intro(service, developer_mode):
+        run_startup_intro(service, developer_mode=developer_mode)
 
     from ui.main_window import MainWindow
 
