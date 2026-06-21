@@ -22,6 +22,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--player-name", default="")
     parser.add_argument("--restore-instance")
     parser.add_argument("--restore-page")
+    parser.add_argument("--skip-startup-intro", action="store_true")
     return parser.parse_args()
 
 
@@ -32,6 +33,10 @@ def main():
             return 1
         return run_session_monitor(args.monitor_session, args.pid, args.player_name)
 
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    except AttributeError:
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     if args.run_updater:
         app = QApplication([])
@@ -63,15 +68,20 @@ def main():
     app.setWindowIcon(application_icon(service.project_root))
     apply_theme(app, service.get_theme_mode())
 
-    from ui.startup_screen import DEVELOPER_ACCOUNT_NAME, run_startup_intro, should_show_startup_intro
+    from ui.startup_screen import DEVELOPER_ACCOUNT_NAME, run_startup_intro_with_preload, should_show_startup_intro
 
     developer_mode = service.get_player_name() == DEVELOPER_ACCOUNT_NAME
-    if should_show_startup_intro(service, developer_mode):
-        run_startup_intro(service, developer_mode=developer_mode)
+    restore_payload = restore_request if args.restore_instance or args.restore_page else None
 
-    from ui.main_window import MainWindow
+    def build_main_window():
+        from ui.main_window import MainWindow
 
-    window = MainWindow(service=service, restore_request=restore_request if args.restore_instance or args.restore_page else None)
+        return MainWindow(service=service, restore_request=restore_payload)
+
+    if not args.skip_startup_intro and should_show_startup_intro(service, developer_mode):
+        run_startup_intro_with_preload(service, developer_mode=developer_mode, preload=lambda: True)
+    window = build_main_window()
+
     ipc_server = LauncherIpcServer(service.launcher_ipc_file, window)
     ipc_server.message_received.connect(window.handle_ipc_message)
     ipc_server.start()

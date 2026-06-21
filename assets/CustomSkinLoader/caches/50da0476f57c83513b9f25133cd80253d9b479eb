@@ -1,0 +1,9 @@
+{
+  "id" : "2601de8755184ee3bd9d936660775c03",
+  "name" : "S338",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzgzNjA3NSwKICAicHJvZmlsZUlkIiA6ICIyNjAxZGU4NzU1MTg0ZWUzYmQ5ZDkzNjY2MDc3NWMwMyIsCiAgInByb2ZpbGVOYW1lIiA6ICJTMzM4IiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2YzOGY3ZmIxMzg4ZGMwNmY3ZmY1MWZjOTY5MjBjNTZlNmM1YzBiYWRkMWEzYWZkOWMwOWQ4NzJlN2FkMGI1OGQiCiAgICB9CiAgfQp9"
+  } ],
+  "profileActions" : [ ]
+}

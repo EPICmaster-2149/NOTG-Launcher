@@ -1,0 +1,9 @@
+{
+  "id" : "e2cab3fb87b841a99c1fb8877c5ce883",
+  "name" : "djiscool",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzg4NDQ3NiwKICAicHJvZmlsZUlkIiA6ICJlMmNhYjNmYjg3Yjg0MWE5OWMxZmI4ODc3YzVjZTg4MyIsCiAgInByb2ZpbGVOYW1lIiA6ICJkamlzY29vbCIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS8xYTRhZjcxODQ1NWQ0YWFiNTI4ZTdhNjFmODZmYTI1ZTZhMzY5ZDE3NjhkY2IxM2Y3ZGYzMTlhNzEzZWI4MTBiIgogICAgfQogIH0KfQ=="
+  } ],
+  "profileActions" : [ ]
+}

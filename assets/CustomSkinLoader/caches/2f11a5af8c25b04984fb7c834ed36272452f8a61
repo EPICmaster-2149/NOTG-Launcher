@@ -1,0 +1,9 @@
+{
+  "id" : "d15b35c537c84eb7bfcd2f8567c4d437",
+  "name" : "SmilingApple",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NjA4MTA1OCwKICAicHJvZmlsZUlkIiA6ICJkMTViMzVjNTM3Yzg0ZWI3YmZjZDJmODU2N2M0ZDQzNyIsCiAgInByb2ZpbGVOYW1lIiA6ICJTbWlsaW5nQXBwbGUiLAogICJ0ZXh0dXJlcyIgOiB7CiAgICAiU0tJTiIgOiB7CiAgICAgICJ1cmwiIDogImh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvNjU2YTliYzllNzg4MGFmOTliZDRhMWMwMTVmNDExNTgzY2EwZmVkMDYyZTc3ZDdhM2I1MjNkMzhjZDFiNTMxYSIsCiAgICAgICJtZXRhZGF0YSIgOiB7CiAgICAgICAgIm1vZGVsIiA6ICJzbGltIgogICAgICB9CiAgICB9CiAgfQp9"
+  } ],
+  "profileActions" : [ ]
+}

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 import multiprocessing
+from collections import deque
 from queue import Empty
+from time import monotonic
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -41,6 +43,8 @@ class InstallProgressDialog(QDialog):
         self._aborting = False
         self._last_status = ""
         self._display_percent = 0
+        self._eta_samples: deque[tuple[float, int]] = deque(maxlen=60)
+        self._eta_started_at = monotonic()
 
         self.setObjectName("installProgressDialog")
         self.setWindowTitle(_operation_window_title(request.operation))
@@ -78,7 +82,7 @@ class InstallProgressDialog(QDialog):
         text_column.addWidget(self.status_label)
         header_layout.addLayout(text_column, 1)
 
-        self.progress_summary_label = QLabel("approx. 3 min")
+        self.progress_summary_label = QLabel("calculating...")
         self.progress_summary_label.setObjectName("installProgressSummary")
         self.progress_summary_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.progress_summary_label.setMinimumWidth(180)
@@ -123,12 +127,18 @@ class InstallProgressDialog(QDialog):
 
     def _poll_events(self) -> None:
         if self._queue is not None:
-            while True:
+            processed = 0
+            while processed < 180:
                 try:
                     event = self._queue.get_nowait()
                 except Empty:
                     break
                 self._handle_event(event)
+                processed += 1
+                if self._completed:
+                    break
+            if processed >= 180:
+                QTimer.singleShot(0, self._poll_events)
 
         if self._process is None or self._completed:
             return
@@ -243,8 +253,43 @@ class InstallProgressDialog(QDialog):
         else:
             self._display_percent = max(0, min(100, int(force_percent)))
 
-        remaining_seconds = round(180 * max(0, 100 - self._display_percent) / 100)
-        self.progress_summary_label.setText(f"approx. {_format_duration(remaining_seconds)}")
+        if self._display_percent >= 100:
+            self.progress_summary_label.setText("Done")
+            return
+
+        now = monotonic()
+        if not self._eta_samples or self._display_percent > self._eta_samples[-1][1]:
+            self._eta_samples.append((now, self._display_percent))
+
+        eta_seconds = self._estimate_remaining_seconds(now)
+        if eta_seconds is None:
+            self.progress_summary_label.setText("calculating...")
+            return
+        self.progress_summary_label.setText(f"about {_format_duration(eta_seconds)} remaining")
+
+    def _estimate_remaining_seconds(self, now: float) -> float | None:
+        if self._display_percent <= 0 or now - self._eta_started_at < 2.0 or not self._eta_samples:
+            return None
+        current_percent = self._eta_samples[-1][1]
+        baseline: tuple[float, int] | None = None
+        for sample in self._eta_samples:
+            if now - sample[0] <= 90 and current_percent - sample[1] >= 2:
+                baseline = sample
+                break
+        if baseline is None:
+            first = self._eta_samples[0]
+            if current_percent - first[1] >= 1:
+                baseline = first
+        if baseline is None:
+            return None
+        elapsed = max(0.1, now - baseline[0])
+        progress_delta = max(0.0, current_percent - baseline[1])
+        if progress_delta <= 0:
+            return None
+        percent_per_second = progress_delta / elapsed
+        if percent_per_second <= 0:
+            return None
+        return max(0.0, (100 - current_percent) / percent_per_second)
 
     def _terminate_process(self) -> None:
         if self._process is None:
@@ -288,12 +333,10 @@ def _operation_window_title(operation: str) -> str:
 
 def _format_duration(seconds: float) -> str:
     total_seconds = max(0, int(math.ceil(seconds)))
-    minutes, remaining_seconds = divmod(total_seconds, 60)
-    if minutes <= 0:
-        return f"{remaining_seconds} sec"
-    if remaining_seconds == 0:
-        return f"{minutes} min"
-    return f"{minutes} min {remaining_seconds} sec"
+    if total_seconds < 60:
+        return "less than 1 min"
+    minutes = max(1, int(math.ceil(total_seconds / 60)))
+    return f"{minutes} min"
 
 
 def _operation_title_prefix(operation: str) -> str:

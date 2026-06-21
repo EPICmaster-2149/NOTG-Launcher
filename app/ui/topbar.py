@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+from typing import Callable
 
 from PySide6.QtCore import QEasingCurve, QPoint, QRectF, QSize, Qt, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from ui.responsive import scaled_px
@@ -308,6 +309,97 @@ class PopupAction:
     role: str = "sidebar"
     bold: bool = False
     active: bool = False
+    account_type: str | None = None
+    avatar_path: str | None = None
+
+
+def _provider_badge(account_type: str | None, size: int = 18) -> QPixmap:
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    if account_type == "microsoft":
+        gap = max(1, size // 10)
+        block = (size - gap) // 2
+        for rect, color in [
+            (QRectF(0, 0, block, block), QColor("#f25022")),
+            (QRectF(block + gap, 0, block, block), QColor("#7fba00")),
+            (QRectF(0, block + gap, block, block), QColor("#00a4ef")),
+            (QRectF(block + gap, block + gap, block, block), QColor("#ffb900")),
+        ]:
+            painter.fillRect(rect, color)
+    elif account_type == "ely":
+        painter.setBrush(QColor("#1f7f59"))
+        painter.setPen(QPen(QColor("#14583e"), 1))
+        painter.drawRoundedRect(QRectF(1, 1, size - 2, size - 2), 3, 3)
+        painter.setPen(QColor("#ffffff"))
+        painter.setFont(QFont("Segoe UI Semibold", max(7, size // 3)))
+        painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, "E")
+    painter.end()
+    return pixmap
+
+
+class AccountPopupRow(ClickableFrame):
+    def __init__(self, action: PopupAction, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.action = action
+        self.setObjectName("accountPopupRow")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(42)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(8)
+
+        self.avatar = QLabel((action.label[:1] or "?").upper())
+        self.avatar.setObjectName("accountAvatar")
+        self.avatar.setAlignment(Qt.AlignCenter)
+        self.avatar.setFixedSize(26, 26)
+        avatar = QPixmap(action.avatar_path or "")
+        if not avatar.isNull():
+            self.avatar.setText("")
+            self.avatar.setPixmap(avatar.scaled(26, 26, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        layout.addWidget(self.avatar)
+
+        self.name = QLabel(action.label)
+        self.name.setObjectName("accountName")
+        self.name.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(self.name, 1)
+
+        if action.account_type in {"microsoft", "ely"}:
+            badge = QLabel()
+            badge.setFixedSize(18, 18)
+            badge.setPixmap(_provider_badge(action.account_type, 18))
+            layout.addWidget(badge)
+
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        roles = theme_palette(self)["roles"]
+        bg = roles["selected"] if self.action.active else roles["surface_2"]
+        border = roles["accent_bright"] if self.action.active else roles["outline_variant"]
+        self.setStyleSheet(
+            f"""
+            QFrame#accountPopupRow {{
+                background-color: rgba({bg.red()}, {bg.green()}, {bg.blue()}, {bg.alpha()});
+                border: 1px solid rgba({border.red()}, {border.green()}, {border.blue()}, {border.alpha()});
+                border-radius: 8px;
+            }}
+            QLabel#accountName {{
+                color: {roles['text'].name()};
+                background: transparent;
+                font-weight: 500;
+            }}
+            QLabel#accountAvatar {{
+                color: {roles['text'].name()};
+                background: transparent;
+                border: none;
+                border-radius: 0px;
+                font-weight: 700;
+            }}
+            """
+        )
 
 
 class ActionPopup(QWidget):
@@ -319,7 +411,7 @@ class ActionPopup(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(8, 8, 8, 8)
         self._layout.setSpacing(4)
-        self._buttons: list[ModernButton] = []
+        self._buttons: list[QWidget] = []
         self._minimum_popup_width = 184
 
     def set_actions(self, actions: list[PopupAction]) -> None:
@@ -331,6 +423,12 @@ class ActionPopup(QWidget):
 
         self._buttons.clear()
         for action in actions:
+            if action.account_type is not None:
+                row = AccountPopupRow(action, self)
+                row.clicked.connect(lambda action_id=action.action_id: self._emit_action(action_id))
+                self._layout.addWidget(row)
+                self._buttons.append(row)
+                continue
             button = ModernButton(
                 action.label,
                 role=action.role,
@@ -503,6 +601,45 @@ class TopBar(QWidget):
             )
             for account_name in accounts
         ]
+        actions.append(PopupAction("Manage Accounts", "Manage Accounts", bold=True))
+        self.account_popup.set_actions(actions)
+
+    def set_account_records(
+        self,
+        accounts: list[object],
+        active_account_id: str,
+        avatar_resolver: Callable[[str], str | None] | None = None,
+    ) -> None:
+        active = next((account for account in accounts if getattr(account, "account_id", "") == active_account_id), None)
+        active_name = str(getattr(active, "username", "") or "player1")
+        self.account_name.setText(active_name)
+        active_avatar = None
+        if active is not None and avatar_resolver is not None:
+            active_avatar = avatar_resolver(str(getattr(active, "account_id", "")))
+        pixmap = QPixmap(active_avatar or "")
+        if pixmap.isNull():
+            self.account_avatar.setPixmap(QPixmap())
+            self.account_avatar.setText(active_name[:1].upper())
+        else:
+            self.account_avatar.setText("")
+            self.account_avatar.setPixmap(pixmap.scaled(self.account_avatar.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        actions: list[PopupAction] = []
+        for account in accounts:
+            account_id = str(getattr(account, "account_id", ""))
+            username = str(getattr(account, "username", "") or account_id)
+            account_type = str(getattr(account, "account_type", "") or "")
+            avatar_path = avatar_resolver(account_id) if avatar_resolver is not None else None
+            actions.append(
+                PopupAction(
+                    action_id=f"AccountId:{account_id}",
+                    label=username,
+                    role="sidebar",
+                    active=account_id == active_account_id,
+                    account_type=account_type,
+                    avatar_path=avatar_path,
+                )
+            )
         actions.append(PopupAction("Manage Accounts", "Manage Accounts", bold=True))
         self.account_popup.set_actions(actions)
 

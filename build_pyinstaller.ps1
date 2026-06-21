@@ -25,6 +25,19 @@ if (Test-Path -LiteralPath $venvPython) {
 
 Write-Host "Using Python: $python"
 
+$localSecretFiles = @(
+    ".env",
+    "curseforge_config.json",
+    "curseforge-api-key.txt",
+    "spotify_token_cache",
+    ".spotify_token_cache"
+)
+foreach ($secretFile in $localSecretFiles) {
+    if (Test-Path -LiteralPath $secretFile) {
+        Write-Warning "Local secret file '$secretFile' exists and is intentionally excluded from the PyInstaller bundle."
+    }
+}
+
 & $python -c "import PyInstaller" 2>$null
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller is not installed for '$python'. Run: $python -m pip install -r requirements.txt"
@@ -51,9 +64,19 @@ $arguments = @(
     "--hidden-import", "PySide6.QtWidgets",
     "--hidden-import", "PySide6.QtMultimedia",
     "--hidden-import", "PySide6.QtMultimediaWidgets",
-    "--collect-all", "PySide6",
-    "--collect-all", "minecraft_launcher_lib",
-    "--collect-all", "pypresence",
+    "--hidden-import", "spotipy.oauth2",
+    "--hidden-import", "dotenv",
+    "--collect-data", "minecraft_launcher_lib",
+    "--copy-metadata", "minecraft-launcher-lib",
+    "--exclude-module", "PySide6.QtWebEngineCore",
+    "--exclude-module", "PySide6.QtWebEngineWidgets",
+    "--exclude-module", "PySide6.QtWebEngineQuick",
+    "--exclude-module", "PySide6.QtDesigner",
+    "--exclude-module", "PySide6.QtQml",
+    "--exclude-module", "PySide6.QtQuick",
+    "--exclude-module", "PySide6.QtPdf",
+    "--exclude-module", "PySide6.QtCharts",
+    "--exclude-module", "PySide6.QtGraphs",
     $entryPoint
 )
 
@@ -80,7 +103,15 @@ $updaterArguments = @(
     "--hidden-import", "PySide6.QtCore",
     "--hidden-import", "PySide6.QtGui",
     "--hidden-import", "PySide6.QtWidgets",
-    "--collect-all", "PySide6",
+    "--exclude-module", "PySide6.QtWebEngineCore",
+    "--exclude-module", "PySide6.QtWebEngineWidgets",
+    "--exclude-module", "PySide6.QtWebEngineQuick",
+    "--exclude-module", "PySide6.QtDesigner",
+    "--exclude-module", "PySide6.QtQml",
+    "--exclude-module", "PySide6.QtQuick",
+    "--exclude-module", "PySide6.QtPdf",
+    "--exclude-module", "PySide6.QtCharts",
+    "--exclude-module", "PySide6.QtGraphs",
     $updaterEntryPoint
 )
 

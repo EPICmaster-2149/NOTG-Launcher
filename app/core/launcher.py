@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import configparser
+import base64
 import gzip
 import hashlib
 import ipaddress
@@ -20,14 +21,20 @@ import traceback
 import uuid
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
+from time import monotonic
+import time
 from typing import Any, Callable
 from urllib.parse import urlparse
 
 import psutil
 import requests
 from platformdirs import PlatformDirs
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from core.config import get_env_value, load_local_env
 
 try:
     from mutagen import File as MutagenFile
@@ -40,6 +47,7 @@ except ImportError:  # pragma: no cover - defensive for isolated imports
     APP_VERSION = "0.0.0"
 
 logger = logging.getLogger(__name__)
+_AUTH_LOG_HANDLER_PATH: Path | None = None
 
 EXPERIMENT_TYPES = {
     "experiment",
@@ -125,6 +133,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".avi", ".mkv", ".webm", ".wmv"}
 BACKGROUND_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES
 MUSIC_SUFFIXES = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".wma"}
+COPY_BUFFER_SIZE = 1024 * 1024
 REMOTE_CONTENT_TYPES = {
     "mods": "Mods",
     "resourcepacks": "Resource Packs",
@@ -150,7 +159,24 @@ CURSEFORGE_LOADER_TYPES = {
 }
 MODRINTH_API_BASE = "https://api.modrinth.com/v2"
 CURSEFORGE_API_BASE = "https://api.curseforge.com"
+MICROSOFT_AUTHORITY = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
+MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+MICROSOFT_SCOPE = "XboxLive.signin offline_access"
+MICROSOFT_DEVICE_CODE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
+MICROSOFT_DEVICE_TOKEN_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+MICROSOFT_CLIENT_ID = "88381242-e209-40ca-9fdb-7fb3e37a60f5"
+MICROSOFT_CLIENT_SECRET = None
+MICROSOFT_REDIRECT_URI = "https://login.microsoftonline.com/common/oauth2/nativeclient"
+MICROSOFT_MINECRAFT_TOKEN_TTL_SECONDS = 23 * 60 * 60
+MINECRAFT_SERVICES_API = "https://api.minecraftservices.com"
+MINECRAFT_JAVA_ENTITLEMENTS = {"game_minecraft", "product_minecraft"}
+ELY_ACCOUNT_INFO_URL = "https://account.ely.by/api/account/v1/info"
+ELY_AUTH_SERVER = "https://authserver.ely.by"
+ELY_SKIN_SYSTEM = "https://skinsystem.ely.by"
+CUSTOM_SKIN_LOADER_PROJECT = "customskinloader"
+CUSTOM_SKIN_LOADER_SUPPORTED_LOADERS = {"fabric", "forge", "neoforge"}
 REMOTE_USER_AGENT = f"NOTG-Launcher/{APP_NAME.replace(' ', '-')}"
+CURSEFORGE_API_KEY_REQUIRED_MESSAGE = "Set CURSEFORGE_API_KEY or add curseforge-api-key.txt next to the launcher to use CurseForge content."
 BACKGROUND_FILE_NAME = "active-background"
 MUSIC_FILE_NAME = "music"
 CURSEFORGE_API_KEY_FILE_NAME = "curseforge-api-key.txt"
@@ -181,6 +207,148 @@ class _LazyModuleProxy:
 
 
 minecraft_launcher_lib = _LazyModuleProxy("minecraft_launcher_lib")
+
+
+@dataclass(slots=True)
+class SkinInfo:
+    source: str | None = None
+    url: str | None = None
+    model: str | None = None
+    texture_id: str | None = None
+    alias: str | None = None
+    state: str | None = None
+    width: int | None = None
+    height: int | None = None
+    local_path: str | None = None
+    updated_at: str | None = None
+    raw: dict[str, Any] | None = None
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> "SkinInfo":
+        if not isinstance(payload, dict):
+            return cls()
+        return cls(
+            source=_optional_str(payload.get("source")),
+            url=_optional_str(payload.get("url")),
+            model=_optional_str(payload.get("model")),
+            texture_id=_optional_str(payload.get("texture_id")),
+            alias=_optional_str(payload.get("alias")),
+            state=_optional_str(payload.get("state")),
+            width=_coerce_optional_int(payload.get("width")),
+            height=_coerce_optional_int(payload.get("height")),
+            local_path=_optional_str(payload.get("local_path")),
+            updated_at=_optional_str(payload.get("updated_at")),
+            raw=payload.get("raw") if isinstance(payload.get("raw"), dict) else None,
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key in ("source", "url", "model", "texture_id", "alias", "state", "width", "height", "local_path", "updated_at", "raw"):
+            value = getattr(self, key)
+            if value is not None:
+                payload[key] = value
+        return payload
+
+
+@dataclass(slots=True)
+class AccountRecord:
+    account_id: str
+    username: str
+    account_type: str
+    uuid: str | None = None
+    email: str | None = None
+    access_token: str | None = None
+    refresh_token: str | None = None
+    expires_at: str | None = None
+    client_token: str | None = None
+    profile: dict[str, Any] | None = None
+    skin: SkinInfo | None = None
+    cape: SkinInfo | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @property
+    def display_type(self) -> str:
+        return {
+            "offline": "Offline Account",
+            "microsoft": "Microsoft Account",
+            "ely": "Ely.by Account",
+        }.get(self.account_type, self.account_type.title())
+
+    @property
+    def launch_uuid(self) -> str:
+        if self.uuid:
+            return _compact_uuid(self.uuid)
+        return _compact_uuid(_offline_uuid(self.username))
+
+    @property
+    def launch_token(self) -> str:
+        return self.access_token or "offline-token"
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> "AccountRecord":
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid account entry.")
+        account_type = _normalize_account_type(payload.get("type") or payload.get("account_type") or "offline")
+        username = _required_str(payload.get("username") or payload.get("name"), "Account username")
+        account_id = _optional_str(payload.get("id") or payload.get("account_id")) or _account_id(account_type, payload.get("uuid"), username)
+        return cls(
+            account_id=account_id,
+            username=username,
+            account_type=account_type,
+            uuid=_optional_str(payload.get("uuid")),
+            email=_optional_str(payload.get("email")),
+            access_token=_optional_str(payload.get("access_token")),
+            refresh_token=_optional_str(payload.get("refresh_token")),
+            expires_at=_optional_str(payload.get("expires_at")),
+            client_token=_optional_str(payload.get("client_token")),
+            profile=payload.get("profile") if isinstance(payload.get("profile"), dict) else None,
+            skin=SkinInfo.from_payload(payload.get("skin")),
+            cape=SkinInfo.from_payload(payload.get("cape")),
+            created_at=_optional_str(payload.get("created_at")),
+            updated_at=_optional_str(payload.get("updated_at")),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.account_id,
+            "username": self.username,
+            "type": self.account_type,
+        }
+        for key in ("uuid", "email", "access_token", "refresh_token", "expires_at", "client_token", "profile", "created_at", "updated_at"):
+            value = getattr(self, key)
+            if value is not None:
+                payload[key] = value
+        if self.skin is not None:
+            skin_payload = self.skin.to_payload()
+            if skin_payload:
+                payload["skin"] = skin_payload
+        if self.cape is not None:
+            cape_payload = self.cape.to_payload()
+            if cape_payload:
+                payload["cape"] = cape_payload
+        return payload
+
+
+@dataclass(slots=True)
+class AccountLaunchSession:
+    account_id: str
+    username: str
+    uuid: str
+    access_token: str
+    account_type: str
+
+
+class AccountConfigurationError(RuntimeError):
+    pass
+
+
+class AccountAuthenticationError(RuntimeError):
+    pass
+
+
+class ElyTwoFactorRequired(AccountAuthenticationError):
+    pass
 
 
 @dataclass(slots=True)
@@ -243,6 +411,16 @@ class JavaRuntimeCandidate:
     label: str
 
 
+@dataclass(frozen=True, slots=True)
+class MinecraftOptimizationProfile:
+    total_memory_mb: int
+    cpu_threads: int
+    tier: str
+    initial_heap_mb: int
+    g1_pause_target_ms: int
+    use_string_deduplication: bool
+
+
 class JavaCompatibilityError(RuntimeError):
     """Raised when no installed Java runtime can launch the selected Minecraft version."""
 
@@ -268,6 +446,7 @@ class InstanceRecord:
     rich_presence_adaptive_details: bool = True
     custom_jvm_args: str | None = None
     java_executable: str | None = None
+    optimize_minecraft: bool = True
     status: str = "Quit"
     pid: int | None = None
 
@@ -304,6 +483,7 @@ class InstanceRecord:
             "rich_presence_adaptive_details": self.rich_presence_adaptive_details,
             "custom_jvm_args": self.custom_jvm_args,
             "java_executable": self.java_executable,
+            "optimize_minecraft": self.optimize_minecraft,
         }
 
     @classmethod
@@ -327,6 +507,7 @@ class InstanceRecord:
             rich_presence_adaptive_details=bool(metadata.get("rich_presence_adaptive_details", True)),
             custom_jvm_args=_optional_str(metadata.get("custom_jvm_args")),
             java_executable=_optional_str(metadata.get("java_executable")),
+            optimize_minecraft=bool(metadata.get("optimize_minecraft", True)),
             root_dir=root_dir,
             minecraft_dir=root_dir / ".minecraft",
         )
@@ -350,6 +531,7 @@ class InstallRequest:
     minecraft_import_entries: list[str] | None = None
     copy_source_instance_id: str | None = None
     copy_user_data: list[str] | None = None
+    optimize_minecraft: bool = True
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -369,6 +551,7 @@ class InstallRequest:
             "minecraft_import_entries": list(self.minecraft_import_entries or []),
             "copy_source_instance_id": self.copy_source_instance_id,
             "copy_user_data": list(self.copy_user_data or []),
+            "optimize_minecraft": self.optimize_minecraft,
         }
 
     @classmethod
@@ -390,6 +573,7 @@ class InstallRequest:
             minecraft_import_entries=_coerce_str_list(payload.get("minecraft_import_entries")),
             copy_source_instance_id=_optional_str(payload.get("copy_source_instance_id")),
             copy_user_data=_coerce_str_list(payload.get("copy_user_data")),
+            optimize_minecraft=bool(payload.get("optimize_minecraft", True)),
         )
 
 
@@ -435,6 +619,7 @@ class LauncherService:
         else:
             self.project_root = project_root or Path(__file__).resolve().parents[2]
             self.install_root = self.project_root
+        load_local_env(self.install_root, self.project_root)
         self.assets_root = self.project_root / "assets"
         self.default_icons_root = self.assets_root / "default-instance-icons"
         self.legacy_user_icons_root = self.project_root / "app" / "icons"
@@ -445,6 +630,10 @@ class LauncherService:
         self.config_root = Path(dirs.user_config_dir).resolve()
         self.cache_root = Path(dirs.user_cache_dir).resolve()
         self.accounts_file = self.config_root / "accounts.json"
+        self.account_assets_root = self.data_root / "accounts"
+        self.account_skins_root = self.account_assets_root / "skins"
+        self.account_skin_cache_root = self.cache_root / "account-skins"
+        self.account_avatars_root = self.cache_root / "account-avatars"
         self.background_settings_file = self.config_root / "background.json"
         self.legacy_music_settings_file = self.config_root / "music.json"
         self.music_settings_file = self.data_root / "music.json"
@@ -480,8 +669,12 @@ class LauncherService:
             self.sessions_root,
             self.logs_root,
             self.generated_icons_root,
+            self.account_skins_root,
+            self.account_skin_cache_root,
+            self.account_avatars_root,
         ):
             path.mkdir(parents=True, exist_ok=True)
+        _ensure_auth_log_handler(self.logs_root / "authentication.log")
 
         self._bootstrap_legacy_storage()
         self._migrate_music_settings_to_data_root()
@@ -494,44 +687,556 @@ class LauncherService:
         self._loader_versions_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     def get_player_name(self) -> str:
-        return self._read_accounts_payload()["active"]
+        return self.get_active_account().username
 
     def list_accounts(self) -> list[str]:
+        return [account.username for account in self.list_account_records()]
+
+    def list_account_records(self) -> list[AccountRecord]:
         return list(self._read_accounts_payload()["accounts"])
 
-    def set_active_account(self, player_name: str) -> str:
-        normalized = self._normalize_account_name(player_name)
+    def get_active_account(self) -> AccountRecord:
         payload = self._read_accounts_payload()
-        if normalized not in payload["accounts"]:
+        active_id = str(payload["active"])
+        for account in payload["accounts"]:
+            if account.account_id == active_id:
+                return account
+        return payload["accounts"][0]
+
+    def get_account_by_id(self, account_id: str) -> AccountRecord | None:
+        for account in self.list_account_records():
+            if account.account_id == account_id:
+                return account
+        return None
+
+    def get_account_launch_session(self, account_name: str | None = None) -> AccountLaunchSession:
+        account = self._resolve_account(account_name) if account_name else self.get_active_account()
+        account = self.refresh_account_session(account)
+        return AccountLaunchSession(
+            account_id=account.account_id,
+            username=account.username,
+            uuid=account.launch_uuid,
+            access_token=account.launch_token,
+            account_type=account.account_type,
+        )
+
+    def set_active_account(self, player_name: str) -> str:
+        account_ref = _required_str(player_name, "Account")
+        payload = self._read_accounts_payload()
+        account = self._find_account(payload["accounts"], account_ref)
+        if account is None:
             raise ValueError("That account does not exist.")
-        payload["active"] = normalized
+        payload["active"] = account.account_id
         self._write_accounts_payload(payload)
-        return normalized
+        return account.username
 
     def add_account(self, player_name: str) -> str:
-        normalized = self._normalize_account_name(player_name)
+        return self.add_offline_account(player_name).username
+
+    def add_offline_account(self, player_name: str) -> AccountRecord:
+        normalized = self._normalize_offline_username(player_name)
         payload = self._read_accounts_payload()
-        if normalized.lower() in {name.lower() for name in payload["accounts"]}:
-            raise ValueError("That account already exists.")
-        payload["accounts"].append(normalized)
-        payload["active"] = normalized
-        payload["accounts"].sort(key=str.lower)
+        if self._find_account(payload["accounts"], normalized, account_type="offline") is not None:
+            raise ValueError("That offline account already exists.")
+        now = _utc_now()
+        account = AccountRecord(
+            account_id=_account_id("offline", None, normalized),
+            username=normalized,
+            account_type="offline",
+            uuid=_offline_uuid(normalized),
+            skin=SkinInfo(source="offline"),
+            created_at=now,
+            updated_at=now,
+        )
+        payload["accounts"].append(account)
+        payload["active"] = account.account_id
+        payload["accounts"].sort(key=lambda item: (item.account_type, item.username.lower()))
         self._write_accounts_payload(payload)
-        return normalized
+        return account
 
     def delete_account(self, player_name: str) -> str:
-        normalized = self._normalize_account_name(player_name)
+        account_ref = _required_str(player_name, "Account")
         payload = self._read_accounts_payload()
-        if normalized not in payload["accounts"]:
+        account = self._find_account(payload["accounts"], account_ref)
+        if account is None:
             raise ValueError("That account does not exist.")
         if len(payload["accounts"]) == 1:
             raise ValueError("At least one account must remain.")
 
-        payload["accounts"] = [name for name in payload["accounts"] if name != normalized]
-        if payload["active"] == normalized:
-            payload["active"] = payload["accounts"][0]
+        payload["accounts"] = [item for item in payload["accounts"] if item.account_id != account.account_id]
+        if payload["active"] == account.account_id:
+            payload["active"] = payload["accounts"][0].account_id
         self._write_accounts_payload(payload)
-        return payload["active"]
+        return self.get_active_account().username
+
+    def oauth_redirect_uri(self, account_type: str) -> str:
+        normalized = _normalize_account_type(account_type)
+        if normalized == "microsoft":
+            return self._microsoft_redirect_uri()
+        raise ValueError(f"Unsupported OAuth account type: {account_type}")
+
+    def begin_microsoft_login(self, redirect_uri: str | None = None) -> dict[str, str]:
+        client_id = self._microsoft_client_id()
+        redirect_uri = redirect_uri or self._microsoft_redirect_uri()
+        microsoft_account = minecraft_launcher_lib.microsoft_account
+        url, state, code_verifier = microsoft_account.get_secure_login_data(client_id, redirect_uri)
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}prompt=select_account"
+        logger.info("Starting Microsoft OAuth login with redirect URI %s", redirect_uri)
+        return {"url": url, "state": state, "code_verifier": code_verifier, "redirect_uri": redirect_uri}
+
+    def begin_microsoft_device_login(self) -> dict[str, str]:
+        response = requests.post(
+            MICROSOFT_DEVICE_CODE_URL,
+            data={"client_id": self._microsoft_client_id(), "scope": MICROSOFT_SCOPE},
+            headers={"User-Agent": REMOTE_USER_AGENT, "Accept": "application/json"},
+            timeout=25,
+        )
+        payload = _response_json(response, "Microsoft device authorization")
+        device_code = _required_str(payload.get("device_code"), "Microsoft device code")
+        user_code = _required_str(payload.get("user_code"), "Microsoft user code")
+        verification_uri = _required_str(payload.get("verification_uri"), "Microsoft verification URL")
+        logger.info("Starting Microsoft device login through %s", verification_uri)
+        return {
+            "flow": "device",
+            "device_code": device_code,
+            "user_code": user_code,
+            "verification_uri": verification_uri,
+            "url": verification_uri,
+            "message": _optional_str(payload.get("message")) or "Sign in with Microsoft to continue.",
+            "interval": str(_coerce_non_negative_int(payload.get("interval"), 5) or 5),
+            "expires_in": str(_coerce_non_negative_int(payload.get("expires_in"), 900) or 900),
+        }
+
+    def complete_microsoft_device_login(self, device_code: str) -> AccountRecord:
+        token = self._poll_microsoft_device_token(device_code)
+        profile = self._minecraft_profile_from_microsoft_token_response(token)
+        account = self._store_authenticated_account("microsoft", profile)
+        logger.info("Microsoft device authentication completed for account %s", account.account_id)
+        return account
+
+    def complete_microsoft_login(self, callback_url: str, state: str, code_verifier: str, redirect_uri: str | None = None) -> AccountRecord:
+        client_id = self._microsoft_client_id()
+        redirect_uri = redirect_uri or self._microsoft_redirect_uri()
+        microsoft_account = minecraft_launcher_lib.microsoft_account
+        try:
+            auth_code = microsoft_account.parse_auth_code_url(callback_url, state)
+            profile = self._complete_microsoft_login(client_id, self._microsoft_client_secret(), redirect_uri, auth_code, code_verifier or None)
+        except Exception as exc:  # noqa: BLE001 - convert library/network failures to user-facing launcher errors
+            logger.warning("Microsoft authentication failed during completion: %s", exc)
+            raise AccountAuthenticationError(f"Microsoft authentication failed: {exc}") from exc
+        account = self._store_authenticated_account("microsoft", profile)
+        logger.info("Microsoft authentication completed for account %s", account.account_id)
+        return account
+
+    def authenticate_ely_account(self, username: str, password: str, totp_token: str | None = None) -> AccountRecord:
+        login = _required_str(username, "Ely.by username or email")
+        secret = _required_str(password, "Ely.by password")
+        token = _optional_str(totp_token)
+        if token:
+            secret = f"{secret}:{token}"
+        client_token = uuid.uuid4().hex
+        response = requests.post(
+            f"{ELY_AUTH_SERVER}/auth/authenticate",
+            json={
+                "username": login,
+                "password": secret,
+                "clientToken": client_token,
+                "requestUser": True,
+            },
+            headers={"User-Agent": REMOTE_USER_AGENT, "Accept": "application/json"},
+            timeout=25,
+        )
+        if response.status_code == 401 and not token:
+            try:
+                error_payload = response.json()
+            except ValueError:
+                error_payload = {}
+            error_message = str(error_payload.get("errorMessage", "")).lower() if isinstance(error_payload, dict) else ""
+            if "two factor" in error_message:
+                raise ElyTwoFactorRequired("Enter the verification code from your authenticator app.")
+        payload = _response_json(response, "Ely.by launcher login")
+        account = self._store_authenticated_account("ely", self._ely_authserver_account_payload(payload, client_token))
+        logger.info("Ely.by launcher authentication completed for account %s", account.account_id)
+        return account
+
+    def refresh_account_session(self, account: AccountRecord | None = None) -> AccountRecord:
+        account = account or self.get_active_account()
+        if account.account_type == "offline":
+            return account
+        if not _is_expired_or_stale(account.expires_at):
+            return account
+        if account.account_type == "microsoft":
+            return self._refresh_microsoft_account(account)
+        if account.account_type == "ely":
+            return self._refresh_ely_account(account)
+        return account
+
+    def refresh_account_profile(self, account_name: str | None = None) -> AccountRecord:
+        account = self._resolve_account(account_name) if account_name else self.get_active_account()
+        account = self.refresh_account_session(account)
+        if account.account_type == "microsoft":
+            profile = self._minecraft_profile(account.access_token or "")
+            account.profile = profile
+            account.username = _required_str(profile.get("name"), "Minecraft username")
+            account.uuid = _optional_str(profile.get("id"))
+            account.skin, account.cape = _skin_and_cape_from_minecraft_profile(profile)
+        elif account.account_type == "ely":
+            if not account.access_token:
+                return account
+            previous_profile = account.profile if isinstance(account.profile, dict) else {}
+            previous_user = previous_profile.get("user") if isinstance(previous_profile.get("user"), dict) else {}
+            previous_authserver = previous_profile.get("authserver") if isinstance(previous_profile.get("authserver"), dict) else {}
+            previous_authserver_user = previous_authserver.get("user") if isinstance(previous_authserver.get("user"), dict) else {}
+            account.profile = self._ely_account_info(account.access_token or "")
+            previous_ely_user_id = (
+                _optional_str(previous_profile.get("ely_user_id"))
+                or _optional_str(previous_profile.get("user_id"))
+                or _optional_str(previous_user.get("id"))
+                or _optional_str(previous_authserver_user.get("id"))
+            )
+            current_ely_user_id = _optional_str(account.profile.get("ely_user_id")) or _optional_str(account.profile.get("user_id")) or _optional_str(account.profile.get("id"))
+            if current_ely_user_id:
+                account.profile["ely_user_id"] = current_ely_user_id
+            elif previous_ely_user_id:
+                account.profile["ely_user_id"] = previous_ely_user_id
+            account.username = _required_str(account.profile.get("username"), "Ely.by username")
+            account.uuid = _optional_str(account.profile.get("uuid"))
+            account.email = _optional_str(account.profile.get("email"))
+            account.skin, account.cape = self._ely_texture_info(account.username)
+        self._upsert_account(account, make_active=False)
+        return account
+
+    def refresh_ely_account_appearance(self, account_name: str) -> AccountRecord:
+        account = self._resolve_account(account_name)
+        if account.account_type != "ely":
+            raise ValueError("Ely.by appearance sync is only available for Ely.by accounts.")
+        account.skin, account.cape = self._ely_texture_info(account.username)
+        self._upsert_account(account, make_active=False)
+        return account
+
+    def set_offline_account_skin(self, account_name: str, source_path: str | Path, model: str | None = None) -> AccountRecord:
+        account = self._resolve_account(account_name)
+        if account.account_type != "offline":
+            raise ValueError("Local skin upload is only available for offline accounts.")
+        source = Path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Skin file not found: {source}")
+        if source.suffix.lower() != ".png":
+            raise ValueError("Minecraft skins must be PNG files.")
+        width, height = _png_dimensions(source)
+        target = self.account_skins_root / f"{account.account_id}.png"
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+        account.skin = SkinInfo(
+            source="offline",
+            model=_normalize_skin_model(model),
+            width=width,
+            height=height,
+            local_path=str(target),
+            updated_at=_utc_now(),
+        )
+        self._upsert_account(account, make_active=False)
+        self.generate_account_avatar(account.account_id, refresh=True)
+        return account
+
+    def set_account_skin_model(self, account_name: str, model: str) -> AccountRecord:
+        account = self._resolve_account(account_name)
+        normalized = _normalize_skin_model(model)
+        if normalized not in {"classic", "slim"}:
+            raise ValueError("Skin model must be Classic or Slim.")
+        if account.skin is None:
+            account.skin = SkinInfo(source=account.account_type, updated_at=_utc_now())
+        account.skin.model = normalized
+        account.skin.updated_at = _utc_now()
+        self._upsert_account(account, make_active=False)
+        return account
+
+    def upload_microsoft_account_skin(self, account_name: str, source_path: str | Path, model: str | None = None) -> AccountRecord:
+        account = self._resolve_account(account_name)
+        if account.account_type != "microsoft":
+            raise ValueError("Official skin upload is only available for Microsoft accounts.")
+        account = self.refresh_account_session(account)
+        source = Path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Skin file not found: {source}")
+        if source.suffix.lower() != ".png":
+            raise ValueError("Minecraft skins must be PNG files.")
+        width, height = _png_dimensions(source)
+        if width not in {64, 128} or height not in {32, 64, 128}:
+            raise ValueError("Minecraft skin textures must use a standard 64x64, 64x32, or scaled equivalent PNG layout.")
+        variant = _normalize_skin_model(model or (account.skin.model if account.skin else None)) or "classic"
+        try:
+            with source.open("rb") as handle:
+                response = requests.put(
+                    "https://api.minecraftservices.com/minecraft/profile/skins",
+                    headers={
+                        "Authorization": f"Bearer {account.access_token}",
+                        "User-Agent": REMOTE_USER_AGENT,
+                        "Accept": "application/json",
+                    },
+                    data={"variant": "slim" if variant == "slim" else "classic"},
+                    files={"file": (source.name, handle, "image/png")},
+                    timeout=45,
+                )
+        except OSError as exc:
+            raise RuntimeError(f"Could not read skin file: {source}") from exc
+        if not response.ok:
+            _response_json(response, "Minecraft skin upload")
+        profile = response.json() if response.content else self._minecraft_profile(account.access_token or "")
+        if not isinstance(profile, dict):
+            profile = self._minecraft_profile(account.access_token or "")
+        account.profile = profile
+        account.username = _required_str(profile.get("name"), "Minecraft username")
+        account.uuid = _optional_str(profile.get("id"))
+        account.skin, account.cape = _skin_and_cape_from_minecraft_profile(profile)
+        if account.skin is not None and not account.skin.model:
+            account.skin.model = variant
+        self._upsert_account(account, make_active=False)
+        self.generate_account_avatar(account.account_id, refresh=True)
+        return account
+
+    def remove_microsoft_account_skin(self, account_name: str) -> AccountRecord:
+        account = self._resolve_account(account_name)
+        if account.account_type != "microsoft":
+            raise ValueError("Official skin removal is only available for Microsoft accounts.")
+        account = self.refresh_account_session(account)
+        response = requests.delete(
+            "https://api.minecraftservices.com/minecraft/profile/skins/active",
+            headers={
+                "Authorization": f"Bearer {account.access_token}",
+                "User-Agent": REMOTE_USER_AGENT,
+                "Accept": "application/json",
+            },
+            timeout=25,
+        )
+        if not response.ok:
+            _response_json(response, "Minecraft skin removal")
+        account = self.refresh_account_profile(account.account_id)
+        self.generate_account_avatar(account.account_id, refresh=True)
+        return account
+
+    def remove_offline_account_skin(self, account_name: str) -> AccountRecord:
+        account = self._resolve_account(account_name)
+        if account.account_type != "offline":
+            raise ValueError("Local skin removal is only available for offline accounts.")
+        local_path = Path(account.skin.local_path) if account.skin and account.skin.local_path else self.account_skins_root / f"{account.account_id}.png"
+        if local_path.is_file():
+            local_path.unlink()
+        account.skin = SkinInfo(source="offline", updated_at=_utc_now())
+        self._upsert_account(account, make_active=False)
+        self.generate_account_avatar(account.account_id, refresh=True)
+        return account
+
+    def cache_account_skin_texture(self, account_name: str, *, refresh: bool = False) -> str | None:
+        account = self._resolve_account(account_name)
+        if account.skin is None:
+            return None
+        if account.skin.local_path:
+            local_path = Path(account.skin.local_path)
+            if local_path.is_file():
+                return str(local_path)
+            if account.account_type == "offline" or account.skin.source == "offline":
+                raise FileNotFoundError(f"Stored skin file is missing: {local_path}")
+        if not account.skin.url:
+            return None
+        cache_name = f"{account.account_id}-{hashlib.sha1(account.skin.url.encode('utf-8')).hexdigest()}.png"
+        target = self.account_skin_cache_root / cache_name
+        if refresh and target.is_file():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        if not target.is_file() or target.stat().st_size <= 0:
+            response = requests.get(
+                account.skin.url,
+                headers={"User-Agent": REMOTE_USER_AGENT, "Accept": "image/png,*/*"},
+                timeout=25,
+            )
+            if not response.ok:
+                raise RuntimeError(f"Skin download failed ({response.status_code}) for {account.username}.")
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+            if "image" not in content_type and not account.skin.url.lower().endswith(".png"):
+                raise RuntimeError(f"Skin download for {account.username} did not return an image.")
+            target.write_bytes(response.content)
+        width, height = _png_dimensions(target)
+        if not width or not height:
+            raise RuntimeError(f"Skin texture for {account.username} is not a readable PNG.")
+        if account.skin.width != width or account.skin.height != height or account.skin.local_path != str(target):
+            account.skin.width = width
+            account.skin.height = height
+            account.skin.local_path = str(target)
+            account.skin.updated_at = account.skin.updated_at or _utc_now()
+            self._upsert_account(account, make_active=False)
+        return str(target)
+
+    def set_offline_account_cape(self, account_name: str, source_path: str | Path) -> AccountRecord:
+        account = self._resolve_account(account_name)
+        if account.account_type != "offline":
+            raise ValueError("Local cape upload is only available for offline accounts.")
+        source = Path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Cape file not found: {source}")
+        if source.suffix.lower() != ".png":
+            raise ValueError("Minecraft capes must be PNG files.")
+        width, height = _png_dimensions(source)
+        target = self.account_skins_root / f"{account.account_id}-cape.png"
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+        account.cape = SkinInfo(
+            source="offline",
+            width=width,
+            height=height,
+            local_path=str(target),
+            updated_at=_utc_now(),
+        )
+        self._upsert_account(account, make_active=False)
+        return account
+
+    def remove_offline_account_cape(self, account_name: str) -> AccountRecord:
+        account = self._resolve_account(account_name)
+        if account.account_type != "offline":
+            raise ValueError("Local cape removal is only available for offline accounts.")
+        local_path = Path(account.cape.local_path) if account.cape and account.cape.local_path else self.account_skins_root / f"{account.account_id}-cape.png"
+        if local_path.is_file():
+            local_path.unlink()
+        account.cape = SkinInfo(source="offline", updated_at=_utc_now())
+        self._upsert_account(account, make_active=False)
+        return account
+
+    def cache_account_cape_texture(self, account_name: str) -> str | None:
+        account = self._resolve_account(account_name)
+        if account.cape is None:
+            return None
+        if account.cape.local_path:
+            local_path = Path(account.cape.local_path)
+            if local_path.is_file():
+                return str(local_path)
+            if account.account_type == "offline" or account.cape.source == "offline":
+                raise FileNotFoundError(f"Stored cape file is missing: {local_path}")
+        if not account.cape.url:
+            return None
+        cache_name = f"{account.account_id}-cape-{hashlib.sha1(account.cape.url.encode('utf-8')).hexdigest()}.png"
+        target = self.account_skin_cache_root / cache_name
+        if not target.is_file() or target.stat().st_size <= 0:
+            response = requests.get(
+                account.cape.url,
+                headers={"User-Agent": REMOTE_USER_AGENT, "Accept": "image/png,*/*"},
+                timeout=25,
+            )
+            if not response.ok:
+                raise RuntimeError(f"Cape download failed ({response.status_code}) for {account.username}.")
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+            if "image" not in content_type and not account.cape.url.lower().endswith(".png"):
+                raise RuntimeError(f"Cape download for {account.username} did not return an image.")
+            target.write_bytes(response.content)
+        width, height = _png_dimensions(target)
+        if not width or not height:
+            raise RuntimeError(f"Cape texture for {account.username} is not a readable PNG.")
+        if account.cape.width != width or account.cape.height != height or account.cape.local_path != str(target):
+            account.cape.width = width
+            account.cape.height = height
+            account.cape.local_path = str(target)
+            account.cape.updated_at = account.cape.updated_at or _utc_now()
+            self._upsert_account(account, make_active=False)
+        return str(target)
+
+    def generate_account_avatar(self, account_name: str, *, refresh: bool = False) -> str:
+        account = self._resolve_account(account_name)
+        target = self.account_avatars_root / f"{account.account_id}.png"
+        if target.is_file() and not refresh:
+            return str(target)
+        skin_path = self.cache_account_skin_texture(account.account_id, refresh=refresh)
+        if skin_path:
+            _write_minecraft_head_avatar(Path(skin_path), target)
+            if target.is_file() and target.stat().st_size > 0:
+                return str(target)
+            raise RuntimeError(f"Could not generate avatar for {account.username}.")
+        fallback = Path(self.resolve_icon_path("assets/default-instance-icons/Grass Block.png"))
+        if not fallback.is_file():
+            raise FileNotFoundError("Default offline account avatar is missing.")
+        return str(fallback)
+
+    def account_avatar_path(self, account_name: str, *, refresh: bool = False) -> str:
+        try:
+            return self.generate_account_avatar(account_name, refresh=refresh)
+        except FileNotFoundError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Account avatar generation failed: %s", exc)
+            fallback = Path(self.resolve_icon_path("assets/default-instance-icons/Grass Block.png"))
+            if fallback.is_file():
+                return str(fallback)
+            raise
+
+    def ensure_custom_skin_loader(self, instance: InstanceRecord, account: AccountRecord | None = None) -> list[str]:
+        account = account or self.get_active_account()
+        if not instance.mod_loader_id:
+            return []
+        if instance.mod_loader_id not in CUSTOM_SKIN_LOADER_SUPPORTED_LOADERS:
+            return []
+        installed: list[str] = []
+        target_dir = _remote_content_target_dir(instance, "mods")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        version = _modrinth_pick_version(instance, "mods", CUSTOM_SKIN_LOADER_PROJECT)
+        file_info = _modrinth_primary_file(version)
+        expected_name = _required_str(file_info.get("filename"), "CustomSkinLoader file name")
+        expected_target = target_dir / (_slugify_filename(expected_name) or expected_name)
+        if expected_target.is_file() and expected_target.stat().st_size > 0:
+            _verify_downloaded_remote_file(expected_target, file_info)
+            self._install_custom_skin_loader_config(instance, account)
+            return []
+        self._remove_incompatible_custom_skin_loader(target_dir, expected_target.name)
+        _install_modrinth_project(
+            instance,
+            "mods",
+            {
+                "provider": "modrinth",
+                "content_type": "mods",
+                "project_id": CUSTOM_SKIN_LOADER_PROJECT,
+                "title": "CustomSkinLoader",
+            },
+            target_dir,
+            installed,
+            set(),
+            set(),
+            None,
+            version,
+        )
+        if not expected_target.is_file() or expected_target.stat().st_size <= 0:
+            raise RuntimeError("CustomSkinLoader installation verification failed: expected mod file was not created.")
+        _verify_downloaded_remote_file(expected_target, file_info)
+        self._install_custom_skin_loader_config(instance, account)
+        return installed
+
+    def ensure_custom_skin_loader_for_all_instances(self) -> dict[str, list[str]]:
+        account = self.get_active_account()
+        results: dict[str, list[str]] = {}
+        for instance in self.load_instances():
+            if not instance.mod_loader_id or instance.mod_loader_id not in CUSTOM_SKIN_LOADER_SUPPORTED_LOADERS:
+                continue
+            try:
+                installed = self.ensure_custom_skin_loader(instance, account)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("CustomSkinLoader check failed for %s: %s", instance.name, exc)
+                continue
+            if installed:
+                results[instance.instance_id] = installed
+        return results
+
+    def _remove_incompatible_custom_skin_loader(self, target_dir: Path, expected_name: str) -> None:
+        expected_lower = expected_name.lower()
+        for path in target_dir.glob("*.jar"):
+            if "customskinloader" not in path.name.lower():
+                continue
+            if path.name.lower() == expected_lower:
+                continue
+            disabled = path.with_name(f"{path.name}.disabled")
+            counter = 2
+            while disabled.exists():
+                disabled = path.with_name(f"{path.name}.disabled-{counter}")
+                counter += 1
+            path.rename(disabled)
 
     def get_default_icon_path(self) -> str:
         return str((self.project_root / self.default_icon).resolve())
@@ -727,6 +1432,7 @@ class LauncherService:
         rich_presence_adaptive_details: bool | None = None,
         custom_jvm_args: Any = UNSET,
         java_executable: Any = UNSET,
+        optimize_minecraft: bool | None = None,
     ) -> InstanceRecord:
         metadata_path = self.instance_metadata_path(instance)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -764,6 +1470,8 @@ class LauncherService:
             metadata["custom_jvm_args"] = _optional_str(custom_jvm_args)
         if java_executable is not UNSET:
             metadata["java_executable"] = _optional_str(java_executable)
+        if optimize_minecraft is not None:
+            metadata["optimize_minecraft"] = bool(optimize_minecraft)
 
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         refreshed = InstanceRecord.from_metadata(metadata, instance.root_dir)
@@ -785,11 +1493,13 @@ class LauncherService:
         *,
         custom_jvm_args: str | None,
         java_executable: str | None,
+        optimize_minecraft: bool | None = None,
     ) -> InstanceRecord:
         return self.update_instance(
             instance,
             custom_jvm_args=custom_jvm_args,
             java_executable=java_executable,
+            optimize_minecraft=optimize_minecraft,
         )
 
     def set_instance_rich_presence(
@@ -917,6 +1627,7 @@ class LauncherService:
             minecraft_import_dir=None,
             copy_source_instance_id=instance.instance_id,
             copy_user_data=None,
+            optimize_minecraft=instance.optimize_minecraft,
         )
 
     def prepare_reinstall_request(
@@ -946,6 +1657,7 @@ class LauncherService:
             minecraft_import_dir=None,
             copy_source_instance_id=instance.instance_id,
             copy_user_data=copy_entries,
+            optimize_minecraft=instance.optimize_minecraft,
         )
 
     def prepare_copy_userdata_request(
@@ -973,6 +1685,7 @@ class LauncherService:
             minecraft_import_dir=None,
             copy_source_instance_id=source_instance_id,
             copy_user_data=copy_user_data,
+            optimize_minecraft=instance.optimize_minecraft,
         )
 
     def get_instance_mods_dir(self, instance: InstanceRecord) -> Path:
@@ -999,10 +1712,11 @@ class LauncherService:
         return reports[0] if reports else None
 
     def curseforge_api_key_hint(self) -> str:
-        return f"Set CURSEFORGE_API_KEY or put curseforge_config.json next to the launcher executable ({self.install_root})"
+        return CURSEFORGE_API_KEY_REQUIRED_MESSAGE
 
     def get_curseforge_api_key(self) -> str | None:
-        env_key = _optional_str(os.environ.get("CURSEFORGE_API_KEY"))
+        load_local_env(self.install_root, self.project_root)
+        env_key = get_env_value("CURSEFORGE_API_KEY")
         if env_key:
             return env_key
 
@@ -1065,8 +1779,7 @@ class LauncherService:
         if provider_key == "curseforge":
             api_key = self.get_curseforge_api_key()
             if not api_key:
-                logger.debug("CurseForge API Auth Failure: Check x-api-key validation and local file path mapping.")
-                return []
+                raise RuntimeError(CURSEFORGE_API_KEY_REQUIRED_MESSAGE)
             return _search_curseforge_content(instance, content_type, query, limit, api_key)
         raise ValueError(f"Unsupported content provider: {provider}")
 
@@ -1082,7 +1795,7 @@ class LauncherService:
         if provider == "curseforge":
             api_key = self.get_curseforge_api_key()
             if not api_key:
-                raise RuntimeError(f"CurseForge requires an API key. {self.curseforge_api_key_hint()}.")
+                raise RuntimeError(CURSEFORGE_API_KEY_REQUIRED_MESSAGE)
             return _curseforge_content_details(instance, content_type, project, api_key)
         raise ValueError(f"Unsupported content provider: {provider}")
 
@@ -1113,7 +1826,7 @@ class LauncherService:
         elif provider == "curseforge":
             api_key = self.get_curseforge_api_key()
             if not api_key:
-                raise RuntimeError(f"CurseForge requires an API key. {self.curseforge_api_key_hint()}.")
+                raise RuntimeError(CURSEFORGE_API_KEY_REQUIRED_MESSAGE)
             _install_curseforge_project(
                 instance,
                 content_type,
@@ -1132,6 +1845,28 @@ class LauncherService:
     def remote_content_installed_index(self, instance: InstanceRecord, content_type: str = "mods") -> set[str]:
         content_type = _normalize_remote_content_type(content_type)
         return _local_remote_content_index(_remote_content_target_dir(instance, content_type))
+
+    def search_modrinth_modpacks(self, query: str, limit: int = 24, offset: int = 0) -> list[dict[str, Any]]:
+        return _search_modrinth_modpacks(query, limit, offset)
+
+    def get_modrinth_modpack_details(self, project_id: str) -> dict[str, Any]:
+        return _modrinth_modpack_details(project_id)
+
+    def get_modrinth_modpack_versions(self, project_id: str) -> list[dict[str, Any]]:
+        return _modrinth_modpack_versions(project_id)
+
+    def inspect_modrinth_modpack_version(self, version: dict[str, Any]) -> dict[str, Any]:
+        file_info = _modrinth_primary_file(version)
+        url = _required_str(file_info.get("url"), "Modrinth pack download URL")
+        filename = _required_str(file_info.get("filename"), "Modrinth pack file name")
+        archive = _download_remote_file(url, self.cache_root / "modrinth-modpacks", filename)
+        return _inspect_mrpack_archive(archive)
+
+    def download_modrinth_modpack_version(self, version: dict[str, Any]) -> Path:
+        file_info = _modrinth_primary_file(version)
+        url = _required_str(file_info.get("url"), "Modrinth pack download URL")
+        filename = _required_str(file_info.get("filename"), "Modrinth pack file name")
+        return _download_remote_file(url, self.cache_root / "modrinth-modpacks", filename)
 
     def preview_import_metadata(
         self,
@@ -1382,7 +2117,7 @@ class LauncherService:
         playlist = {
             "playlist_id": playlist_id,
             "name": _optional_str(name) or "New Playlist",
-            "icon_path": _optional_str(icon_path) or self._random_playlist_icon_reference(playlist_id),
+            "icon_path": _optional_str(icon_path) or self._default_playlist_icon_reference(playlist_id),
             "order": [],
             "created_at": now,
             "updated_at": now,
@@ -1428,7 +2163,7 @@ class LauncherService:
             if name is not None:
                 playlist["name"] = _optional_str(name) or "New Playlist"
             if icon_path is not UNSET:
-                playlist["icon_path"] = _optional_str(icon_path)
+                playlist["icon_path"] = _optional_str(icon_path) or self._default_playlist_icon_reference(playlist_id)
             if order is not None:
                 playlist["order"] = self._validated_music_order(payload, order)
             playlist["updated_at"] = _utc_now()
@@ -1623,34 +2358,45 @@ class LauncherService:
         return reference
 
     def add_remote_music_to_playlist(self, playlist_id: str, track_payload: dict[str, Any]) -> str:
+        added_ids = self.add_remote_music_batch_to_playlist(playlist_id, [track_payload])
+        if not added_ids:
+            raise RuntimeError("No remote music track was added.")
+        return added_ids[0]
+
+    def add_remote_music_batch_to_playlist(self, playlist_id: str, track_payloads: list[dict[str, Any]]) -> list[str]:
         payload = self._read_music_payload()
-        music_id = _optional_str(track_payload.get("music_id")) or f"remote/{uuid.uuid4().hex}"
         metadata = self._music_track_metadata_payload(payload)
         now = _utc_now()
-        metadata[music_id] = {
-            "name": _optional_str(track_payload.get("name")) or "Untitled Track",
-            "source_url": _optional_str(track_payload.get("source_url")) or _optional_str(track_payload.get("url")),
-            "stream_url": _optional_str(track_payload.get("stream_url")),
-            "artwork_url": _optional_str(track_payload.get("artwork_url")),
-            "artwork_path": _optional_str(track_payload.get("artwork_path")),
-            "date_added": _optional_str(track_payload.get("date_added")) or now,
-            "duration_ms": _coerce_non_negative_int(track_payload.get("duration_ms")),
-            "platform": _optional_str(track_payload.get("platform")) or "stream",
-            "artist": _optional_str(track_payload.get("artist")),
-            "album": _optional_str(track_payload.get("album")),
-            "error": _optional_str(track_payload.get("error")),
-            "remote": True,
-        }
-        payload["track_metadata"] = metadata
+        added_ids: list[str] = []
 
         playlists = self._music_playlist_payloads(payload)
+        order: list[str] = []
         updated = False
         for playlist in playlists:
             if playlist["playlist_id"] != playlist_id:
                 continue
             order = _coerce_str_list(playlist.get("order"))
-            if music_id not in order:
-                order.append(music_id)
+            for track_payload in track_payloads:
+                if not isinstance(track_payload, dict):
+                    continue
+                music_id = _optional_str(track_payload.get("music_id")) or f"remote/{uuid.uuid4().hex}"
+                metadata[music_id] = {
+                    "name": _optional_str(track_payload.get("name")) or "Untitled Track",
+                    "source_url": _optional_str(track_payload.get("source_url")) or _optional_str(track_payload.get("url")),
+                    "stream_url": _optional_str(track_payload.get("stream_url")),
+                    "artwork_url": _optional_str(track_payload.get("artwork_url")),
+                    "artwork_path": _optional_str(track_payload.get("artwork_path")),
+                    "date_added": _optional_str(track_payload.get("date_added")) or now,
+                    "duration_ms": _coerce_non_negative_int(track_payload.get("duration_ms")),
+                    "platform": _optional_str(track_payload.get("platform")) or "stream",
+                    "artist": _optional_str(track_payload.get("artist")),
+                    "album": _optional_str(track_payload.get("album")),
+                    "error": _optional_str(track_payload.get("error")),
+                    "remote": True,
+                }
+                added_ids.append(music_id)
+                if music_id not in order:
+                    order.append(music_id)
             playlist["order"] = order
             playlist["updated_at"] = now
             updated = True
@@ -1658,10 +2404,28 @@ class LauncherService:
         if not updated:
             raise FileNotFoundError(f"Playlist not found: {playlist_id}")
         payload["playlists"] = playlists
+        payload["track_metadata"] = metadata
         if payload.get("current_playlist_id") == playlist_id:
             payload["order"] = list(order)
         self._write_music_payload(payload)
-        return music_id
+        return added_ids
+
+    def flush_music_runtime_state(self) -> None:
+        payload = self._read_music_payload()
+        metadata = self._music_track_metadata_payload(payload)
+        changed = False
+        for entry in metadata.values():
+            if not bool(entry.get("remote")):
+                continue
+            if _optional_str(entry.get("stream_url")):
+                entry["stream_url"] = None
+                changed = True
+            if _optional_str(entry.get("error")) and _optional_str(entry.get("source_url")):
+                entry["error"] = None
+                changed = True
+        if changed:
+            payload["track_metadata"] = metadata
+            self._write_music_payload(payload)
 
     def update_music_track_metadata(self, music_id: str, metadata_updates: dict[str, Any]) -> MusicRecord | None:
         payload = self._read_music_payload()
@@ -1902,6 +2666,7 @@ class LauncherService:
         minecraft_import_entries: list[str] | None = None,
         copy_source_instance_id: str | None = None,
         copy_user_data: list[str] | None = None,
+        optimize_minecraft: bool = True,
     ) -> InstallRequest:
         normalized_name = name.strip()
         if operation == "create" and vanilla_version:
@@ -1935,6 +2700,7 @@ class LauncherService:
             minecraft_import_entries=_sanitize_import_entries(minecraft_import_entries),
             copy_source_instance_id=_optional_str(copy_source_instance_id),
             copy_user_data=_sanitize_copy_user_data(copy_user_data),
+            optimize_minecraft=bool(optimize_minecraft),
         )
 
     def finalize_install(self, request: InstallRequest, result: InstallResult) -> InstanceRecord:
@@ -1973,6 +2739,7 @@ class LauncherService:
             "rich_presence_adaptive_details": bool(existing_metadata.get("rich_presence_adaptive_details", True)),
             "custom_jvm_args": _optional_str(existing_metadata.get("custom_jvm_args")),
             "java_executable": _optional_str(existing_metadata.get("java_executable")),
+            "optimize_minecraft": bool(existing_metadata.get("optimize_minecraft", request.optimize_minecraft)),
         }
         (stage_dir / "instance.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         backup_dir: Path | None = None
@@ -2250,6 +3017,26 @@ class LauncherService:
         normalized = version_type.lower().replace("-", "_")
         return normalized not in KNOWN_VERSION_TYPES or normalized in EXPERIMENT_TYPES
 
+    def recommended_minecraft_memory_mb(self) -> int:
+        total_mb = _system_memory_cap_mb()
+        cpu_threads = _logical_cpu_count()
+        if total_mb <= 4096:
+            target = 1536
+        elif total_mb <= 6144 or cpu_threads <= 4:
+            target = 2048
+        elif total_mb <= 12288:
+            target = 3072
+        elif total_mb <= 24576:
+            target = 4096
+        elif total_mb <= 49152:
+            target = 6144
+        else:
+            target = 8192
+
+        os_headroom_mb = 2048 if total_mb <= 8192 else 4096 if total_mb <= 24576 else 6144
+        safe_cap = max(1024, min(12288, int(total_mb * 0.50), total_mb - os_headroom_mb))
+        return _round_memory_mb(max(1024, min(safe_cap, target)))
+
     def build_launch_options(
         self,
         player_name: str,
@@ -2257,20 +3044,36 @@ class LauncherService:
         memory_mb: int | None = None,
         java_executable: str | None = None,
         custom_jvm_args: str | None = None,
+        optimize_minecraft: bool = True,
+        java_major: int | None = None,
+        account_session: AccountLaunchSession | None = None,
     ) -> dict[str, Any]:
+        if account_session is None:
+            try:
+                account_session = self.get_account_launch_session(player_name)
+            except Exception:
+                account_session = AccountLaunchSession(
+                    account_id=_account_id("offline", None, player_name),
+                    username=player_name,
+                    uuid=_compact_uuid(_offline_uuid(player_name)),
+                    access_token="offline-token",
+                    account_type="offline",
+                )
         resolved_memory = _coerce_memory_mb(memory_mb)
         jvm_arguments = [
             f"-Xmx{resolved_memory}M",
-            "-Dminecraft.launcher.brand=vanilla",
-            "-Dminecraft.launcher.version=vanilla",
+            "-Dminecraft.launcher.brand=NOTG-Launcher",
+            f"-Dminecraft.launcher.version={APP_VERSION}",
         ]
+        if optimize_minecraft:
+            jvm_arguments.extend(_optimized_minecraft_jvm_args(resolved_memory, java_major, custom_jvm_args))
         jvm_arguments.extend(_split_custom_jvm_args(custom_jvm_args))
         options: dict[str, Any] = {
-            "username": player_name,
-            "uuid": _offline_uuid(player_name),
-            "token": "offline-token",
-            "launcherName": "vanilla",
-            "launcherVersion": "vanilla",
+            "username": account_session.username,
+            "uuid": account_session.uuid,
+            "token": account_session.access_token,
+            "launcherName": "NOTG Launcher",
+            "launcherVersion": APP_VERSION,
             "gameDirectory": str(game_directory),
             "jvmArguments": jvm_arguments,
             "enableLoggingConfig": True,
@@ -2283,15 +3086,22 @@ class LauncherService:
     def launch_instance(self, instance: InstanceRecord, player_name: str) -> subprocess.Popen[Any]:
         minecraft_directory = instance.minecraft_dir
         java_runtime = self.select_instance_java_runtime(instance)
+        account_session = self.get_account_launch_session(player_name)
+        active_account = self.get_account_by_id(account_session.account_id)
+        if active_account is not None:
+            self.ensure_custom_skin_loader(instance, active_account)
         command = minecraft_launcher_lib.command.get_minecraft_command(
             instance.installed_version,
             minecraft_directory,
             self.build_launch_options(
-                player_name,
+                account_session.username,
                 minecraft_directory,
                 instance.memory_mb,
                 java_runtime.executable_path,
                 instance.custom_jvm_args,
+                instance.optimize_minecraft,
+                java_runtime.major_version,
+                account_session,
             ),
         )
         _normalize_minecraft_version_argument(command, instance.vanilla_version)
@@ -2309,7 +3119,10 @@ class LauncherService:
         else:
             kwargs["start_new_session"] = True
 
-        return subprocess.Popen(command, **kwargs)
+        process = subprocess.Popen(command, **kwargs)
+        if instance.optimize_minecraft:
+            _apply_minecraft_process_optimizations(process.pid)
+        return process
 
     def build_launcher_command(self, *args: str) -> list[str]:
         if getattr(sys, "frozen", False):
@@ -2795,7 +3608,16 @@ class LauncherService:
             payload = self._read_accounts_payload()
             self._write_accounts_payload(payload)
             return
-        self._write_accounts_payload({"accounts": ["player1"], "active": "player1"})
+        account = AccountRecord(
+            account_id=_account_id("offline", None, "player1"),
+            username="player1",
+            account_type="offline",
+            uuid=_offline_uuid("player1"),
+            skin=SkinInfo(source="offline"),
+            created_at=_utc_now(),
+            updated_at=_utc_now(),
+        )
+        self._write_accounts_payload({"accounts": [account], "active": account.account_id})
 
     def _ensure_music_settings_store(self) -> None:
         if not self.music_settings_file.is_file():
@@ -2973,7 +3795,7 @@ class LauncherService:
             target = {
                 "playlist_id": APPDATA_MUSIC_PLAYLIST_ID,
                 "name": "AppData Music",
-                "icon_path": self._random_playlist_icon_reference(APPDATA_MUSIC_PLAYLIST_ID),
+                "icon_path": self._default_playlist_icon_reference(APPDATA_MUSIC_PLAYLIST_ID),
                 "order": [],
                 "created_at": now,
                 "updated_at": now,
@@ -3021,7 +3843,7 @@ class LauncherService:
                     {
                         "playlist_id": playlist_id,
                         "name": _optional_str(entry.get("name")) or "New Playlist",
-                        "icon_path": _optional_str(entry.get("icon_path")),
+                        "icon_path": _optional_str(entry.get("icon_path")) or self._default_playlist_icon_reference(playlist_id),
                         "order": _coerce_str_list(entry.get("order")),
                         "created_at": _optional_str(entry.get("created_at")),
                         "updated_at": _optional_str(entry.get("updated_at")),
@@ -3040,7 +3862,7 @@ class LauncherService:
             {
                 "playlist_id": "default",
                 "name": "Minecraft Music",
-                "icon_path": self._random_playlist_icon_reference("default"),
+                "icon_path": self._default_playlist_icon_reference("default"),
                 "order": order,
                 "created_at": now,
                 "updated_at": now,
@@ -3062,8 +3884,8 @@ class LauncherService:
                 playlists.append(
                     {
                         "playlist_id": playlist_id,
-                "name": _optional_str(entry.get("name")) or "New Playlist",
-                "icon_path": _optional_str(entry.get("icon_path")) or self._random_playlist_icon_reference(playlist_id),
+                        "name": _optional_str(entry.get("name")) or "New Playlist",
+                        "icon_path": _optional_str(entry.get("icon_path")) or self._default_playlist_icon_reference(playlist_id),
                         "order": _coerce_str_list(entry.get("order")),
                         "created_at": _optional_str(entry.get("created_at")),
                         "updated_at": _optional_str(entry.get("updated_at")),
@@ -3077,7 +3899,7 @@ class LauncherService:
             {
                 "playlist_id": "default",
                 "name": "Minecraft Music",
-                "icon_path": self._random_playlist_icon_reference("default"),
+                "icon_path": self._default_playlist_icon_reference("default"),
                 "order": _coerce_str_list(payload.get("order")),
                 "created_at": _utc_now(),
                 "updated_at": _utc_now(),
@@ -3150,7 +3972,7 @@ class LauncherService:
         normalized = self._merge_appdata_music_folder(normalized)
         self.music_settings_file.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
 
-    def _random_playlist_icon_reference(self, seed: str | None = None) -> str | None:
+    def _default_playlist_icon_reference(self, seed: str | None = None) -> str | None:
         folder = self.assets_root / "Playlist-Default-Icons"
         if not folder.is_dir():
             return None
@@ -3165,6 +3987,9 @@ class LauncherService:
             index = int(hashlib.sha1(seed.encode("utf-8")).hexdigest(), 16) % len(icons)
             return icons[index]
         return icons[uuid.uuid4().int % len(icons)]
+
+    def _random_playlist_icon_reference(self, seed: str | None = None) -> str | None:
+        return self._default_playlist_icon_reference(seed)
 
     def _read_runtime_session_payload(self, path: Path) -> dict[str, Any]:
         if not path.is_file():
@@ -3202,7 +4027,16 @@ class LauncherService:
         shutil.copytree(source, destination, dirs_exist_ok=True)
 
     def _read_accounts_payload(self) -> dict[str, Any]:
-        default_payload = {"accounts": ["player1"], "active": "player1"}
+        default_account = AccountRecord(
+            account_id=_account_id("offline", None, "player1"),
+            username="player1",
+            account_type="offline",
+            uuid=_offline_uuid("player1"),
+            skin=SkinInfo(source="offline"),
+            created_at=_utc_now(),
+            updated_at=_utc_now(),
+        )
+        default_payload = {"accounts": [default_account], "active": default_account.account_id}
         if not self.accounts_file.is_file():
             return default_payload
 
@@ -3212,34 +4046,55 @@ class LauncherService:
             return default_payload
 
         accounts = payload.get("accounts")
-        active = _optional_str(payload.get("active"))
+        active = _optional_str(payload.get("active") or payload.get("active_account_id"))
         if not isinstance(accounts, list):
             return default_payload
 
-        normalized_accounts: list[str] = []
+        normalized_accounts: list[AccountRecord] = []
         seen: set[str] = set()
         for value in accounts:
             try:
-                normalized = self._normalize_account_name(value)
+                if isinstance(value, str):
+                    username = self._normalize_account_name(value)
+                    account = AccountRecord(
+                        account_id=_account_id("offline", None, username),
+                        username=username,
+                        account_type="offline",
+                        uuid=_offline_uuid(username),
+                        skin=SkinInfo(source="offline"),
+                    )
+                else:
+                    account = AccountRecord.from_payload(value)
             except ValueError:
                 continue
-            lowered = normalized.lower()
-            if lowered in seen:
+            key = f"{account.account_type}:{account.uuid or account.username}".lower()
+            if key in seen:
                 continue
-            seen.add(lowered)
-            normalized_accounts.append(normalized)
+            seen.add(key)
+            normalized_accounts.append(account)
 
         if not normalized_accounts:
-            normalized_accounts = ["player1"]
+            normalized_accounts = [default_account]
 
-        if not active or active not in normalized_accounts:
-            active = normalized_accounts[0]
+        if active:
+            active_account = self._find_account(normalized_accounts, active)
+            if active_account is not None:
+                active = active_account.account_id
+        if not active or active not in {account.account_id for account in normalized_accounts}:
+            active = normalized_accounts[0].account_id
 
         return {"accounts": normalized_accounts, "active": active}
 
     def _write_accounts_payload(self, payload: dict[str, Any]) -> None:
+        accounts = payload.get("accounts")
+        if not isinstance(accounts, list):
+            raise ValueError("Invalid account payload.")
         normalized = {
-            "accounts": list(payload["accounts"]),
+            "version": 2,
+            "accounts": [
+                account.to_payload() if isinstance(account, AccountRecord) else AccountRecord.from_payload(account).to_payload()
+                for account in accounts
+            ],
             "active": str(payload["active"]),
         }
         self.accounts_file.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
@@ -3249,6 +4104,424 @@ class LauncherService:
         if len(text) > 32:
             raise ValueError("Account names must be 32 characters or fewer.")
         return text
+
+    def _normalize_offline_username(self, value: Any) -> str:
+        text = _required_str(value, "Offline username")
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", text):
+            raise ValueError("Offline usernames must be 3-16 characters and use only A-Z, 0-9, and underscore.")
+        return text
+
+    def _find_account(self, accounts: list[AccountRecord], value: str, *, account_type: str | None = None) -> AccountRecord | None:
+        needle = value.strip()
+        for account in accounts:
+            if account_type and account.account_type != account_type:
+                continue
+            if account.account_id == needle or account.username.lower() == needle.lower():
+                return account
+        return None
+
+    def _resolve_account(self, account_name: str) -> AccountRecord:
+        payload = self._read_accounts_payload()
+        account = self._find_account(payload["accounts"], account_name)
+        if account is None:
+            raise ValueError("That account does not exist.")
+        return account
+
+    def _upsert_account(self, account: AccountRecord, *, make_active: bool) -> AccountRecord:
+        payload = self._read_accounts_payload()
+        account.updated_at = _utc_now()
+        replaced = False
+        for index, existing in enumerate(payload["accounts"]):
+            if existing.account_id == account.account_id:
+                payload["accounts"][index] = account
+                replaced = True
+                break
+        if not replaced:
+            account.created_at = account.created_at or _utc_now()
+            payload["accounts"].append(account)
+        if make_active:
+            payload["active"] = account.account_id
+        payload["accounts"].sort(key=lambda item: (item.account_type, item.username.lower()))
+        self._write_accounts_payload(payload)
+        return account
+
+    def _store_authenticated_account(self, account_type: str, auth_payload: dict[str, Any]) -> AccountRecord:
+        now = _utc_now()
+        if account_type == "microsoft":
+            username = _required_str(auth_payload.get("name"), "Minecraft username")
+            uuid_value = _required_str(auth_payload.get("id"), "Minecraft UUID")
+            skin, cape = _skin_and_cape_from_minecraft_profile(auth_payload)
+            account = AccountRecord(
+                account_id=_account_id("microsoft", uuid_value, username),
+                username=username,
+                account_type="microsoft",
+                uuid=uuid_value,
+                access_token=_required_str(auth_payload.get("access_token"), "Minecraft access token"),
+                refresh_token=_required_str(auth_payload.get("refresh_token"), "Microsoft refresh token"),
+                expires_at=_future_timestamp(MICROSOFT_MINECRAFT_TOKEN_TTL_SECONDS),
+                profile=dict(auth_payload),
+                skin=skin,
+                cape=cape,
+                created_at=now,
+                updated_at=now,
+            )
+            return self._upsert_account(account, make_active=True)
+
+        if account_type == "ely":
+            access_token = _required_str(auth_payload.get("access_token"), "Ely.by access token")
+            info = auth_payload.get("profile") if isinstance(auth_payload.get("profile"), dict) else None
+            if not info:
+                info = self._ely_account_info(access_token)
+            username = _required_str(info.get("username"), "Ely.by username")
+            uuid_value = _required_str(info.get("uuid"), "Ely.by UUID")
+            skin, cape = self._ely_texture_info(username)
+            account = AccountRecord(
+                account_id=_account_id("ely", uuid_value, username),
+                username=username,
+                account_type="ely",
+                uuid=uuid_value,
+                email=_optional_str(info.get("email")),
+                access_token=access_token,
+                refresh_token=_optional_str(auth_payload.get("refresh_token")),
+                client_token=_optional_str(auth_payload.get("client_token")),
+                expires_at=_future_timestamp(_coerce_non_negative_int(auth_payload.get("expires_in")) or 86400),
+                profile=info,
+                skin=skin,
+                cape=cape,
+                created_at=now,
+                updated_at=now,
+            )
+            return self._upsert_account(account, make_active=True)
+
+        raise ValueError(f"Unsupported account type: {account_type}")
+
+    def _refresh_microsoft_account(self, account: AccountRecord) -> AccountRecord:
+        if not account.refresh_token:
+            raise AccountAuthenticationError("Microsoft session expired. Sign in again.")
+        try:
+            profile = self._refresh_microsoft_profile(account.refresh_token)
+        except Exception as exc:  # noqa: BLE001
+            raise AccountAuthenticationError(f"Microsoft token refresh failed: {exc}") from exc
+        refreshed = self._store_authenticated_account("microsoft", profile)
+        if refreshed.account_id != account.account_id:
+            self.delete_account(account.account_id)
+        return refreshed
+
+    def _refresh_ely_account(self, account: AccountRecord) -> AccountRecord:
+        if not account.refresh_token:
+            if account.client_token and account.access_token:
+                response = requests.post(
+                    f"{ELY_AUTH_SERVER}/auth/refresh",
+                    json={
+                        "accessToken": account.access_token,
+                        "clientToken": account.client_token,
+                        "requestUser": True,
+                    },
+                    headers={"User-Agent": REMOTE_USER_AGENT, "Accept": "application/json"},
+                    timeout=25,
+                )
+                payload = _response_json(response, "Ely.by launcher token refresh")
+                auth_payload = self._ely_authserver_account_payload(payload, account.client_token)
+                return self._store_authenticated_account("ely", auth_payload)
+            raise AccountAuthenticationError("Ely.by session expired. Sign in again.")
+        raise AccountAuthenticationError("Ely.by session expired. Sign in again.")
+
+    def _microsoft_client_id(self) -> str:
+        return get_env_value("MICROSOFT_CLIENT_ID") or get_env_value("NOTG_MICROSOFT_CLIENT_ID") or MICROSOFT_CLIENT_ID
+
+    def _microsoft_client_secret(self) -> str | None:
+        return get_env_value("MICROSOFT_CLIENT_SECRET") or get_env_value("NOTG_MICROSOFT_CLIENT_SECRET") or MICROSOFT_CLIENT_SECRET
+
+    def _microsoft_redirect_uri(self) -> str:
+        return get_env_value("MICROSOFT_REDIRECT_URI") or get_env_value("NOTG_MICROSOFT_REDIRECT_URI") or MICROSOFT_REDIRECT_URI
+
+    def _complete_microsoft_login(
+        self,
+        client_id: str,
+        client_secret: str | None,
+        redirect_uri: str,
+        auth_code: str,
+        code_verifier: str | None,
+    ) -> dict[str, Any]:
+        microsoft_account = minecraft_launcher_lib.microsoft_account
+        token_request = microsoft_account.get_authorization_token(
+            client_id,
+            client_secret,
+            redirect_uri,
+            auth_code,
+            code_verifier,
+        )
+        if isinstance(token_request, dict) and _microsoft_needs_spa_origin(token_request):
+            token_request = self._microsoft_authorization_token_with_origin(
+                client_id,
+                redirect_uri,
+                auth_code,
+                code_verifier,
+            )
+        return self._minecraft_profile_from_microsoft_token_response(token_request)
+
+    def _refresh_microsoft_profile(self, refresh_token: str) -> dict[str, Any]:
+        microsoft_account = minecraft_launcher_lib.microsoft_account
+        token_request = microsoft_account.refresh_authorization_token(
+            self._microsoft_client_id(),
+            self._microsoft_client_secret(),
+            self._microsoft_redirect_uri(),
+            refresh_token,
+        )
+        return self._minecraft_profile_from_microsoft_token_response(token_request)
+
+    def _poll_microsoft_device_token(self, device_code: str) -> dict[str, Any]:
+        response = requests.post(
+            MICROSOFT_TOKEN_URL,
+            data={
+                "grant_type": MICROSOFT_DEVICE_TOKEN_GRANT,
+                "client_id": self._microsoft_client_id(),
+                "device_code": device_code,
+            },
+            headers={"User-Agent": REMOTE_USER_AGENT, "Accept": "application/json"},
+            timeout=25,
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            logger.warning("Microsoft device token request returned invalid JSON (%s): %s", response.status_code, response.text[:300])
+            raise AccountAuthenticationError(f"Microsoft device token request returned invalid JSON ({response.status_code}).") from exc
+        if not isinstance(payload, dict):
+            raise AccountAuthenticationError("Microsoft device token request returned an unexpected response.")
+        if response.ok and "access_token" in payload:
+            return payload
+        error = _optional_str(payload.get("error"))
+        description = _optional_str(payload.get("error_description")) or error or response.reason
+        if error in {"authorization_pending", "slow_down"}:
+            raise AccountAuthenticationError(error)
+        logger.warning("Microsoft device token request failed (%s): %s", response.status_code, _redacted_auth_payload(payload))
+        if _microsoft_invalid_app_registration(payload):
+            raise AccountAuthenticationError(
+                "Microsoft approved the device code, but rejected the token exchange at "
+                f"{MICROSOFT_TOKEN_URL}. The failing step is device-code token redemption for client "
+                f"{self._microsoft_client_id()}. NOTG will use browser PKCE login by default because this "
+                "client cannot complete the device-code flow."
+            )
+        raise AccountAuthenticationError(f"Microsoft device authentication failed: {description}")
+
+    def _microsoft_authorization_token_with_origin(
+        self,
+        client_id: str,
+        redirect_uri: str,
+        auth_code: str,
+        code_verifier: str | None,
+    ) -> dict[str, Any]:
+        parsed = urlparse(redirect_uri)
+        origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://login.microsoftonline.com"
+        data: dict[str, Any] = {
+            "client_id": client_id,
+            "scope": MICROSOFT_SCOPE,
+            "code": auth_code,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }
+        if code_verifier:
+            data["code_verifier"] = code_verifier
+        response = requests.post(
+            MICROSOFT_TOKEN_URL,
+            data=data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": REMOTE_USER_AGENT,
+                "Accept": "application/json",
+                "Origin": origin,
+            },
+            timeout=25,
+        )
+        payload = _response_json(response, "Microsoft SPA token request")
+        logger.info("Microsoft token redemption used SPA Origin header for %s", origin)
+        return payload
+
+    def _minecraft_profile_from_microsoft_token_response(self, token_request: dict[str, Any]) -> dict[str, Any]:
+        microsoft_account = minecraft_launcher_lib.microsoft_account
+        if not isinstance(token_request, dict) or "access_token" not in token_request:
+            message = _optional_str(token_request.get("error_description") if isinstance(token_request, dict) else None)
+            message = message or _optional_str(token_request.get("error") if isinstance(token_request, dict) else None)
+            logger.warning("Microsoft OAuth token response did not contain an access token: %s", _redacted_auth_payload(token_request))
+            raise AccountAuthenticationError(message or "Microsoft did not return an OAuth access token.")
+        token = _required_str(token_request.get("access_token"), "Microsoft OAuth access token")
+        xbl_request = microsoft_account.authenticate_with_xbl(token)
+        if not isinstance(xbl_request, dict) or "Token" not in xbl_request:
+            logger.warning("Xbox Live authentication failed: %s", _redacted_auth_payload(xbl_request))
+            message = _optional_str(xbl_request.get("errorMessage") if isinstance(xbl_request, dict) else None)
+            raise AccountAuthenticationError(message or "Xbox Live did not return an authentication token.")
+        xbl_token = _required_str(xbl_request.get("Token"), "Xbox Live token")
+        display_claims = xbl_request.get("DisplayClaims") if isinstance(xbl_request.get("DisplayClaims"), dict) else {}
+        xui = display_claims.get("xui") if isinstance(display_claims.get("xui"), list) else []
+        userhash = _required_str(xui[0].get("uhs") if xui and isinstance(xui[0], dict) else None, "Xbox user hash")
+        xsts_request = microsoft_account.authenticate_with_xsts(xbl_token)
+        if not isinstance(xsts_request, dict) or "Token" not in xsts_request:
+            logger.warning("XSTS authentication failed: %s", _redacted_auth_payload(xsts_request))
+            raise AccountAuthenticationError(_microsoft_xsts_error_message(xsts_request if isinstance(xsts_request, dict) else {}))
+        xsts_token = _required_str(xsts_request.get("Token"), "XSTS token")
+        account_request = microsoft_account.authenticate_with_minecraft(userhash, xsts_token)
+        if not isinstance(account_request, dict) or "access_token" not in account_request:
+            logger.warning("Minecraft authentication failed: %s", _redacted_auth_payload(account_request))
+            message = (
+                _optional_str(account_request.get("errorMessage") if isinstance(account_request, dict) else None)
+                or _optional_str(account_request.get("error") if isinstance(account_request, dict) else None)
+            )
+            raise AccountAuthenticationError(message or "This Microsoft account is not permitted to use Minecraft services.")
+        access_token = _required_str(account_request.get("access_token"), "Minecraft access token")
+        entitlements = self._minecraft_entitlements(access_token)
+        if not _minecraft_entitlements_include_java(entitlements):
+            logger.warning("Minecraft account has no Java entitlement: %s", _redacted_auth_payload(entitlements))
+            raise AccountAuthenticationError("This Microsoft account does not own Minecraft: Java Edition.")
+        profile = self._minecraft_profile(access_token)
+        if isinstance(profile, dict) and profile.get("error") == "NOT_FOUND":
+            raise AccountAuthenticationError(
+                "This Microsoft account owns Minecraft: Java Edition, but no Java profile name exists yet. "
+                "Open minecraft.net with this account once, create a Java profile, then sign in again."
+            )
+        if not isinstance(profile, dict):
+            raise AccountAuthenticationError("Minecraft services returned an invalid profile response.")
+        if not _optional_str(profile.get("id")) or not _optional_str(profile.get("name")):
+            logger.warning("Minecraft profile response was incomplete: %s", _redacted_auth_payload(profile))
+            raise AccountAuthenticationError("Minecraft services returned an incomplete Java profile.")
+        profile["access_token"] = access_token
+        profile["refresh_token"] = _required_str(token_request.get("refresh_token"), "Microsoft refresh token")
+        return profile
+
+    def _minecraft_entitlements(self, access_token: str) -> dict[str, Any]:
+        response = requests.get(
+            f"{MINECRAFT_SERVICES_API}/entitlements/mcstore",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": REMOTE_USER_AGENT,
+                "Accept": "application/json",
+            },
+            timeout=25,
+        )
+        return _response_json(response, "Minecraft entitlements request")
+
+    def _minecraft_profile(self, access_token: str) -> dict[str, Any]:
+        response = requests.get(
+            f"{MINECRAFT_SERVICES_API}/minecraft/profile",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": REMOTE_USER_AGENT,
+                "Accept": "application/json",
+            },
+            timeout=25,
+        )
+        if response.status_code == 404:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {"error": "NOT_FOUND"}
+            return payload if isinstance(payload, dict) else {"error": "NOT_FOUND"}
+        return _response_json(response, "Minecraft profile request")
+
+    def _ely_authserver_account_payload(self, payload: dict[str, Any], client_token: str) -> dict[str, Any]:
+        selected = payload.get("selectedProfile") if isinstance(payload.get("selectedProfile"), dict) else {}
+        user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+        username = _optional_str(selected.get("name")) or _optional_str(user.get("username"))
+        uuid_value = _optional_str(selected.get("id"))
+        ely_user_id = _optional_str(user.get("id"))
+        if not username:
+            raise AccountAuthenticationError("Ely.by did not return a selected Minecraft profile.")
+        if not uuid_value:
+            raise AccountAuthenticationError("Ely.by did not return a Minecraft profile UUID.")
+        profile = {
+            "username": username,
+            "uuid": uuid_value,
+            "authserver": payload,
+        }
+        if ely_user_id:
+            profile["ely_user_id"] = ely_user_id
+        email = _optional_str(user.get("email"))
+        if email:
+            profile["email"] = email
+        return {
+            "access_token": _required_str(payload.get("accessToken"), "Ely.by access token"),
+            "refresh_token": None,
+            "expires_in": 86400,
+            "client_token": client_token,
+            "profile": profile,
+        }
+
+    def _ely_account_info(self, access_token: str) -> dict[str, Any]:
+        response = requests.get(
+            ELY_ACCOUNT_INFO_URL,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": REMOTE_USER_AGENT,
+                "Accept": "application/json",
+            },
+            timeout=25,
+        )
+        return _response_json(response, "Ely.by account info")
+
+    def _ely_skin_info(self, username: str) -> SkinInfo:
+        skin, _cape = self._ely_texture_info(username)
+        return skin
+
+    def _ely_cape_info(self, username: str) -> SkinInfo:
+        _skin, cape = self._ely_texture_info(username)
+        return cape
+
+    def _ely_texture_info(self, username: str) -> tuple[SkinInfo, SkinInfo]:
+        response = requests.get(
+            f"{ELY_SKIN_SYSTEM}/textures/{username}",
+            params={"version": "2"},
+            headers={"User-Agent": REMOTE_USER_AGENT, "Accept": "application/json"},
+            timeout=25,
+        )
+        if response.status_code == 204:
+            empty = SkinInfo(source="ely", updated_at=_utc_now())
+            return empty, SkinInfo(source="ely", updated_at=empty.updated_at)
+        payload = _response_json(response, "Ely.by skin request")
+        return _skin_from_textures_property(payload, source="ely"), _cape_from_textures_property(payload, source="ely")
+
+    def _minecraft_profile(self, access_token: str) -> dict[str, Any]:
+        response = requests.get(
+            "https://api.minecraftservices.com/minecraft/profile",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": REMOTE_USER_AGENT,
+                "Accept": "application/json",
+            },
+            timeout=25,
+        )
+        return _response_json(response, "Minecraft profile request")
+
+    def _install_custom_skin_loader_config(self, instance: InstanceRecord, account: AccountRecord) -> None:
+        source_root = self.assets_root / "CustomSkinLoader"
+        source = source_root / "CustomSkinLoader.json"
+        if not source_root.is_dir() or not source.is_file():
+            raise FileNotFoundError("Launcher-managed CustomSkinLoader.json is missing from assets.")
+        config_payload = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(config_payload.get("loadlist"), list):
+            raise RuntimeError("Launcher-managed CustomSkinLoader.json is invalid.")
+        target_root = instance.minecraft_dir / "CustomSkinLoader"
+        if not target_root.exists():
+            shutil.copytree(source_root, target_root, ignore=shutil.ignore_patterns("caches", "*.log"))
+        else:
+            target_root.mkdir(parents=True, exist_ok=True)
+        target_config = target_root / "CustomSkinLoader.json"
+        if not target_config.exists():
+            target_config.write_text(json.dumps(config_payload, indent=2), encoding="utf-8")
+        copied_payload = json.loads(target_config.read_text(encoding="utf-8"))
+        if not isinstance(copied_payload.get("loadlist"), list):
+            raise RuntimeError("CustomSkinLoader configuration is invalid.")
+
+        if account.account_type == "offline" and account.skin and account.skin.local_path:
+            source_skin = Path(account.skin.local_path)
+            if source_skin.is_file():
+                local_skin_dir = target_root / "LocalSkin" / "skins"
+                local_skin_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_skin, local_skin_dir / f"{account.username}.png")
+        if account.account_type == "offline" and account.cape and account.cape.local_path:
+            source_cape = Path(account.cape.local_path)
+            if source_cape.is_file():
+                local_cape_dir = target_root / "LocalSkin" / "capes"
+                local_cape_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_cape, local_cape_dir / f"{account.username}.png")
 
     def _allocate_duplicate_name(self, base_name: str) -> str:
         normalized_base = base_name.strip() or "Instance Copy"
@@ -3497,9 +4770,15 @@ def _run_reinstall(
         raise FileNotFoundError("The instance being reinstalled no longer exists.")
 
     vanilla_version = _required_str(request.vanilla_version, "Minecraft version")
+    if progress is not None:
+        progress.begin_phase(0.18)
+    _queue_event(event_queue, "status", text="Reusing existing install files")
+    _queue_event(event_queue, "log", text="Copying reusable Minecraft libraries, assets, runtimes, and version metadata")
+    _copy_existing_dependency_cache(existing_instance.minecraft_dir, Path(request.minecraft_dir), event_queue, progress)
+
     if request.copy_source_instance_id and request.copy_user_data:
         if progress is not None:
-            progress.begin_phase(0.20)
+            progress.begin_phase(0.24)
         _queue_event(event_queue, "status", text="Restoring instance data")
         _queue_event(event_queue, "log", text=f"Restoring saved data from {existing_instance.name}")
         _copy_selected_user_data(
@@ -3511,12 +4790,25 @@ def _run_reinstall(
         )
 
     if progress is not None:
-        progress.begin_phase(0.74 if request.copy_user_data else 0.94)
-    installed_version = _install_dependency_stack(
+        progress.begin_phase(0.49 if request.copy_user_data else 0.73)
+    if (
+        existing_instance.vanilla_version == vanilla_version
+        and existing_instance.mod_loader_id == request.mod_loader_id
+        and existing_instance.mod_loader_version == request.mod_loader_version
+    ):
+        target_installed_version = existing_instance.installed_version
+    else:
+        target_installed_version = _modpack_installed_version(
+            vanilla_version,
+            request.mod_loader_id,
+            request.mod_loader_version,
+        )
+    installed_version = _ensure_dependency_stack(
+        Path(request.minecraft_dir),
         vanilla_version,
+        target_installed_version,
         request.mod_loader_id,
         request.mod_loader_version,
-        Path(request.minecraft_dir),
         callback,
         event_queue,
     )
@@ -3787,13 +5079,13 @@ def _ensure_dependency_stack(
     event_queue: Any,
 ) -> str:
     if _installed_version_present(minecraft_dir, installed_version):
-        _queue_event(event_queue, "log", text="Imported files already contain launch metadata.")
+        _queue_event(event_queue, "log", text="Instance files already contain the required launch metadata.")
         return installed_version
 
     _queue_event(
         event_queue,
         "log",
-        text="Imported files are missing launch metadata; installing the required Minecraft files now.",
+        text="Instance files are missing required launch metadata; installing the required Minecraft files now.",
     )
     return _install_dependency_stack(
         vanilla_version,
@@ -3927,10 +5219,7 @@ def _import_curseforge_archive(
             service = LauncherService(Path(__file__).resolve().parents[2])
             curseforge_api_key = service.get_curseforge_api_key()
             if not curseforge_api_key:
-                raise RuntimeError(
-                    "This CurseForge export references external CurseForge-hosted files. "
-                    f"Add a CurseForge API key first: {service.curseforge_api_key_hint()}."
-                )
+                raise RuntimeError(CURSEFORGE_API_KEY_REQUIRED_MESSAGE)
 
         minecraft_block = manifest.get("minecraft") or {}
         vanilla_version = _required_str(minecraft_block.get("version"), "CurseForge Minecraft version")
@@ -4520,17 +5809,52 @@ def _copy_selected_import_entries(
     for directory in empty_dirs:
         directory.mkdir(parents=True, exist_ok=True)
 
-    _set_progress_max(event_queue, progress, max(1, len(files_to_copy)))
+    total_bytes = sum(_safe_file_size(source_path) for source_path, _ in files_to_copy)
+    _set_progress_max(event_queue, progress, max(1, total_bytes))
     if not files_to_copy:
         _set_progress_value(event_queue, progress, 1)
         return
 
-    for index, (source_path, target_path) in enumerate(files_to_copy, start=1):
+    progress_state = _new_byte_progress_state()
+    for source_path, target_path in files_to_copy:
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, target_path)
-        _set_progress_value(event_queue, progress, index)
+        _copy_file_with_progress(source_path, target_path, event_queue, progress, progress_state)
+    _set_progress_value(event_queue, progress, max(1, int(progress_state["copied"])))
 
     _queue_event(event_queue, "status", text=status_text)
+
+
+def _copy_existing_dependency_cache(
+    source_minecraft_dir: Path,
+    destination_minecraft_dir: Path,
+    event_queue: Any,
+    progress: "_InstallProgressReporter | None" = None,
+) -> None:
+    reusable_entries = ("versions", "libraries", "assets", "runtime", "bin", "natives")
+    files_to_copy: list[tuple[Path, Path]] = []
+    for entry_name in reusable_entries:
+        source_path = _safe_local_path_join(source_minecraft_dir, entry_name)
+        if not source_path.exists():
+            continue
+        target_root = _safe_local_path_join(destination_minecraft_dir, entry_name)
+        if source_path.is_file():
+            files_to_copy.append((source_path, target_root))
+            continue
+        for file_path in source_path.rglob("*"):
+            if file_path.is_file():
+                files_to_copy.append((file_path, target_root / file_path.relative_to(source_path)))
+
+    total_bytes = sum(_safe_file_size(source_path) for source_path, _ in files_to_copy)
+    _set_progress_max(event_queue, progress, max(1, total_bytes))
+    if not files_to_copy:
+        _set_progress_value(event_queue, progress, 1)
+        return
+
+    progress_state = _new_byte_progress_state()
+    for source_path, target_path in files_to_copy:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        _copy_file_with_progress(source_path, target_path, event_queue, progress, progress_state)
+    _set_progress_value(event_queue, progress, max(1, int(progress_state["copied"])))
 
 
 def _remove_launch_runtime_files(minecraft_dir: Path) -> None:
@@ -4561,17 +5885,19 @@ def _copy_tree_with_progress(
     progress: "_InstallProgressReporter | None" = None,
 ) -> None:
     files = [path for path in source.rglob("*") if path.is_file()]
-    _set_progress_max(event_queue, progress, max(1, len(files)))
+    total_bytes = sum(_safe_file_size(path) for path in files)
+    _set_progress_max(event_queue, progress, max(1, total_bytes))
     if not files:
         _set_progress_value(event_queue, progress, 1)
         return
 
-    for index, file_path in enumerate(files, start=1):
+    progress_state = _new_byte_progress_state()
+    for file_path in files:
         relative_path = file_path.relative_to(source)
         target = destination / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file_path, target)
-        _set_progress_value(event_queue, progress, index)
+        _copy_file_with_progress(file_path, target, event_queue, progress, progress_state)
+    _set_progress_value(event_queue, progress, max(1, int(progress_state["copied"])))
 
     _queue_event(event_queue, "status", text=status_text)
 
@@ -4589,17 +5915,66 @@ def _extract_archive_mappings(
         _set_progress_value(event_queue, progress, 1)
         return
 
-    _set_progress_max(event_queue, progress, len(mappings))
-    for index, (archive_name, destination_name) in enumerate(mappings, start=1):
+    info_by_name = {info.filename: info for info in zf.infolist()}
+    total_bytes = sum(max(0, info_by_name[archive_name].file_size) for archive_name, _ in mappings if archive_name in info_by_name)
+    _set_progress_max(event_queue, progress, max(1, total_bytes))
+    progress_state = _new_byte_progress_state()
+    for archive_name, destination_name in mappings:
         if not destination_name:
             continue
         target_path = _safe_path_join(destination_root, destination_name)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(archive_name, "r") as source_handle:
             with target_path.open("wb") as target_handle:
-                shutil.copyfileobj(source_handle, target_handle)
-        _set_progress_value(event_queue, progress, index)
+                _copy_stream_with_progress(source_handle, target_handle, event_queue, progress, progress_state)
+    _set_progress_value(event_queue, progress, max(1, int(progress_state["copied"])))
     _queue_event(event_queue, "status", text=status_text)
+
+
+def _safe_file_size(path: Path) -> int:
+    try:
+        return max(0, path.stat().st_size)
+    except OSError:
+        return 0
+
+
+def _new_byte_progress_state() -> dict[str, float | int]:
+    return {"copied": 0, "last_emit": 0.0}
+
+
+def _copy_file_with_progress(
+    source_path: Path,
+    target_path: Path,
+    event_queue: Any,
+    progress: "_InstallProgressReporter | None",
+    progress_state: dict[str, float | int],
+) -> None:
+    with source_path.open("rb") as source_handle:
+        with target_path.open("wb") as target_handle:
+            _copy_stream_with_progress(source_handle, target_handle, event_queue, progress, progress_state)
+    try:
+        shutil.copystat(source_path, target_path)
+    except OSError:
+        pass
+
+
+def _copy_stream_with_progress(
+    source_handle: Any,
+    target_handle: Any,
+    event_queue: Any,
+    progress: "_InstallProgressReporter | None",
+    progress_state: dict[str, float | int],
+) -> None:
+    while True:
+        chunk = source_handle.read(COPY_BUFFER_SIZE)
+        if not chunk:
+            break
+        target_handle.write(chunk)
+        progress_state["copied"] = int(progress_state["copied"]) + len(chunk)
+        now = monotonic()
+        if now - float(progress_state["last_emit"]) >= 0.08:
+            progress_state["last_emit"] = now
+            _set_progress_value(event_queue, progress, int(progress_state["copied"]))
 
 
 def _safe_path_join(root: Path, relative_name: str) -> Path:
@@ -4656,7 +6031,7 @@ def _request_json(url: str, *, params: dict[str, Any] | None = None, headers: di
     }
     if headers:
         request_headers.update(headers)
-    response = requests.get(url, params=params, headers=request_headers, timeout=25)
+    response = _request_with_retries("get", url, params=params, headers=request_headers, timeout=25)
     if not response.ok:
         if response.status_code in {401, 403} and "curseforge" in url.lower():
             logger.debug("CurseForge API Auth Failure: Check x-api-key validation and local file path mapping.")
@@ -4673,17 +6048,136 @@ def _download_remote_file(url: str, target_dir: Path, filename: str, progress_ca
         return target
     if progress_callback:
         progress_callback(f"Downloading {safe_name}")
-    response = requests.get(url, headers={"User-Agent": REMOTE_USER_AGENT}, timeout=45, stream=True)
-    if not response.ok:
-        raise RuntimeError(f"Download failed ({response.status_code}): {safe_name}")
     target_dir.mkdir(parents=True, exist_ok=True)
     temp_target = target.with_suffix(target.suffix + ".part")
-    with temp_target.open("wb") as handle:
-        for chunk in response.iter_content(chunk_size=1024 * 256):
-            if chunk:
-                handle.write(chunk)
-    temp_target.replace(target)
-    return target
+    last_error: Exception | None = None
+    max_attempts = 3
+    backoff = 1.0
+    session = requests.Session()
+    # Configure retries on connection/start; streaming errors will be retried by the loop
+    retry_total = 2
+    retry = Retry(
+        total=retry_total,
+        connect=retry_total,
+        read=retry_total,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"]),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    for attempt in range(max_attempts):
+        try:
+            headers = {"User-Agent": REMOTE_USER_AGENT}
+            start_pos = 0
+            if temp_target.exists():
+                try:
+                    start_pos = temp_target.stat().st_size
+                except OSError:
+                    start_pos = 0
+            if start_pos > 0:
+                headers["Range"] = f"bytes={start_pos}-"
+                mode = "ab"
+            else:
+                mode = "wb"
+
+            response = session.get(url, headers=headers, timeout=45, stream=True)
+            if not response.ok and response.status_code not in (200, 206):
+                raise RuntimeError(f"Download failed ({response.status_code}): {safe_name}")
+
+            # If server ignored Range and returned full content (200) while we have a partial file,
+            # restart from scratch.
+            if start_pos > 0 and response.status_code == 200:
+                start_pos = 0
+                mode = "wb"
+
+            with temp_target.open(mode) as handle:
+                bytes_written = start_pos
+                for chunk in response.iter_content(chunk_size=1024 * 256):
+                    if chunk:
+                        handle.write(chunk)
+                        bytes_written += len(chunk)
+
+            # Verify content-length when provided
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                expected = int(content_length)
+                actual = temp_target.stat().st_size
+                # If we requested from start, Content-Length is total expected
+                if start_pos == 0:
+                    total_expected = expected
+                else:
+                    # When Range requested, Content-Length may be remaining bytes
+                    total_expected = start_pos + expected
+                if actual < total_expected:
+                    raise RuntimeError(f"Short download: wrote {actual} of {total_expected}")
+
+            temp_target.replace(target)
+            return target
+        except (OSError, requests.RequestException, RuntimeError) as exc:
+            last_error = exc
+            # keep temp_target for resume when possible, otherwise attempt to remove it
+            try:
+                if not temp_target.exists():
+                    pass
+            except OSError:
+                pass
+            if attempt < max_attempts - 1:
+                if progress_callback:
+                    progress_callback(f"Retrying {safe_name} (attempt {attempt + 2}/{max_attempts})")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            break
+    raise RuntimeError(f"Download failed for {safe_name}: {last_error}") from last_error
+
+
+def _request_with_retries(method: str, url: str, *, attempts: int = 3, **kwargs: Any) -> requests.Response:
+    session = requests.Session()
+    # urllib3 Retry treats 'total' as additional re-tries beyond the first attempt.
+    retry_total = max(0, int(attempts) - 1)
+    retry = Retry(
+        total=retry_total,
+        connect=retry_total,
+        read=retry_total,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"]),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session.request(method, url, **kwargs)
+
+
+def _verify_downloaded_remote_file(path: Path, file_info: dict[str, Any]) -> None:
+    hashes = file_info.get("hashes")
+    if not isinstance(hashes, dict):
+        return
+    expected = _optional_str(hashes.get("sha512"))
+    algorithm = "sha512"
+    if not expected:
+        expected = _optional_str(hashes.get("sha1"))
+        algorithm = "sha1"
+    if not expected:
+        return
+    try:
+        digest = hashlib.new(algorithm)
+    except ValueError:
+        return
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError as exc:
+        raise RuntimeError(f"Could not verify downloaded file: {path.name}") from exc
+    if digest.hexdigest().lower() != expected.lower():
+        raise RuntimeError(f"Downloaded file verification failed for {path.name}.")
 
 
 def _modrinth_facets(instance: InstanceRecord, content_type: str) -> str:
@@ -4731,6 +6225,90 @@ def _search_modrinth_content(
             }
         )
     return results
+
+
+def _search_modrinth_modpacks(query: str, limit: int, offset: int = 0) -> list[dict[str, Any]]:
+    payload = _request_json(
+        f"{MODRINTH_API_BASE}/search",
+        params={
+            "query": query.strip(),
+            "facets": json.dumps([["project_type:modpack"]]),
+            "index": "relevance" if query.strip() else "downloads",
+            "limit": max(1, min(100, int(limit))),
+            "offset": max(0, int(offset)),
+        },
+    )
+    hits = payload.get("hits") if isinstance(payload, dict) else []
+    results: list[dict[str, Any]] = []
+    for hit in hits if isinstance(hits, list) else []:
+        if not isinstance(hit, dict):
+            continue
+        results.append(
+            {
+                "provider": "modrinth",
+                "project_id": _optional_str(hit.get("project_id")),
+                "slug": _optional_str(hit.get("slug")),
+                "title": _optional_str(hit.get("title")) or "Untitled Modpack",
+                "description": _optional_str(hit.get("description")) or "",
+                "icon_url": _optional_str(hit.get("icon_url")),
+                "downloads": _coerce_non_negative_int(hit.get("downloads")),
+                "author": _optional_str(hit.get("author")),
+                "versions": [str(item) for item in hit.get("versions", []) if _optional_str(item)] if isinstance(hit.get("versions"), list) else [],
+                "latest_version": _optional_str(hit.get("latest_version")),
+            }
+        )
+    return results
+
+
+def _modrinth_modpack_details(project_id: str) -> dict[str, Any]:
+    project = _request_json(f"{MODRINTH_API_BASE}/project/{project_id}")
+    if not isinstance(project, dict):
+        raise RuntimeError("Modrinth did not return a valid modpack project.")
+    return {
+        "provider": "modrinth",
+        "project_id": _optional_str(project.get("id")) or project_id,
+        "slug": _optional_str(project.get("slug")),
+        "title": _optional_str(project.get("title")) or "Untitled Modpack",
+        "description": _optional_str(project.get("description")) or "",
+        "body": _optional_str(project.get("body")) or "",
+        "icon_url": _optional_str(project.get("icon_url")),
+        "downloads": _coerce_non_negative_int(project.get("downloads")),
+        "followers": _coerce_non_negative_int(project.get("followers")),
+        "categories": [str(item) for item in project.get("categories", []) if _optional_str(item)] if isinstance(project.get("categories"), list) else [],
+        "client_side": _optional_str(project.get("client_side")),
+        "server_side": _optional_str(project.get("server_side")),
+    }
+
+
+def _modrinth_modpack_versions(project_id: str) -> list[dict[str, Any]]:
+    payload = _request_json(f"{MODRINTH_API_BASE}/project/{project_id}/version", params={"include_changelog": "false"})
+    versions = [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+    versions.sort(key=lambda item: str(item.get("date_published") or ""), reverse=True)
+    return versions
+
+
+def _inspect_mrpack_archive(archive: Path) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(archive, "r") as zf:
+            with zf.open("modrinth.index.json", "r") as handle:
+                manifest = json.load(handle)
+    except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Could not inspect the Modrinth modpack file.") from exc
+
+    files = manifest.get("files")
+    mods: list[str] = []
+    if isinstance(files, list):
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            path = _optional_str(item.get("path"))
+            if path and path.replace("\\", "/").lower().startswith("mods/"):
+                mods.append(Path(path).name)
+    return {
+        "name": _optional_str(manifest.get("name")) or archive.stem,
+        "summary": _optional_str(manifest.get("summary")) or "",
+        "mods": sorted(mods, key=str.lower),
+    }
 
 
 def _modrinth_versions(instance: InstanceRecord, content_type: str, project_id: str) -> list[dict[str, Any]]:
@@ -4848,6 +6426,7 @@ def _install_modrinth_project(
     url = _required_str(file_info.get("url"), "Modrinth download URL")
     filename = _required_str(file_info.get("filename"), "Modrinth file name")
     target = _download_remote_file(url, target_dir, filename, progress_callback)
+    _verify_downloaded_remote_file(target, file_info)
     if target.name not in installed:
         installed.append(target.name)
     local_index.update(_remote_project_key_candidates(project))
@@ -5508,6 +7087,13 @@ def _detect_minecraft_activity_from_log(
             server = connect_match.group(1).strip()
             port = _optional_int(connect_match.group(2))
             if server:
+                if (
+                    activity
+                    and _is_ip_address(_normalize_server_host(_split_server_address(server)[0]))
+                    and configured_addresses
+                    and not _display_address_is_configured(server, configured_addresses)
+                ):
+                    continue
                 display_address = _resolve_display_server_address(
                     server,
                     port,
@@ -5732,6 +7318,292 @@ def _offline_uuid(player_name: str) -> str:
     digest[6] = (digest[6] & 0x0F) | 0x30
     digest[8] = (digest[8] & 0x3F) | 0x80
     return str(uuid.UUID(bytes=bytes(digest)))
+
+
+def _normalize_account_type(value: Any) -> str:
+    normalized = str(value or "offline").strip().lower().replace("_", "-")
+    if normalized in {"offline", "local"}:
+        return "offline"
+    if normalized in {"microsoft", "ms", "xbox"}:
+        return "microsoft"
+    if normalized in {"ely", "ely-by", "ely.by", "elyby"}:
+        return "ely"
+    raise ValueError(f"Unsupported account type: {value}")
+
+
+def _account_id(account_type: str, uuid_value: Any, username: str) -> str:
+    account_type = _normalize_account_type(account_type)
+    if uuid_value:
+        return f"{account_type}:{_compact_uuid(str(uuid_value)).lower()}"
+    if account_type == "offline":
+        return f"offline:{_compact_uuid(_offline_uuid(username)).lower()}"
+    return f"{account_type}:{_slugify(username).lower() or uuid.uuid4().hex}"
+
+
+def _compact_uuid(value: str) -> str:
+    text = str(value).strip()
+    try:
+        return uuid.UUID(text).hex
+    except ValueError:
+        compact = re.sub(r"[^0-9a-fA-F]", "", text)
+        if len(compact) == 32:
+            return compact.lower()
+        return text
+
+
+def _future_timestamp(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(0, int(seconds)))).isoformat()
+
+
+def _is_expired_or_stale(value: str | None, *, skew_seconds: int = 180) -> bool:
+    if not value:
+        return True
+    return _parse_timestamp(value) <= datetime.now(timezone.utc) + timedelta(seconds=skew_seconds)
+
+
+def _new_state_token() -> str:
+    return uuid.uuid4().hex + uuid.uuid4().hex
+
+
+def _response_json(response: requests.Response, label: str) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        logger.warning("%s returned invalid JSON (%s): %s", label, response.status_code, response.text[:300])
+        raise AccountAuthenticationError(f"{label} returned invalid JSON ({response.status_code}).") from exc
+    if not isinstance(payload, dict):
+        logger.warning("%s returned unexpected JSON payload: %r", label, payload)
+        raise AccountAuthenticationError(f"{label} returned an unexpected response.")
+    if not response.ok:
+        message = (
+            _optional_str(payload.get("errorMessage"))
+            or _optional_str(payload.get("error_description"))
+            or _optional_str(payload.get("message"))
+            or _optional_str(payload.get("error"))
+            or response.reason
+        )
+        logger.warning("%s failed (%s): %s", label, response.status_code, _redacted_auth_payload(payload))
+        raise AccountAuthenticationError(f"{label} failed ({response.status_code}): {message}")
+    return payload
+
+
+def _redacted_auth_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    sensitive = {"access_token", "refresh_token", "client_secret", "code", "id_token", "Token", "identityToken"}
+    redacted: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key in sensitive or key.lower() in sensitive:
+            redacted[key] = "<redacted>"
+        elif isinstance(value, dict):
+            redacted[key] = _redacted_auth_payload(value)
+        elif isinstance(value, list):
+            redacted[key] = [_redacted_auth_payload(item) for item in value]
+        else:
+            redacted[key] = value
+    return redacted
+
+
+def _microsoft_needs_spa_origin(payload: dict[str, Any]) -> bool:
+    text = " ".join(str(payload.get(key, "")) for key in ("error", "error_description", "message")).lower()
+    return "aadsts90023" in text or "single-page application" in text or "origin header" in text
+
+
+def _microsoft_invalid_app_registration(payload: dict[str, Any]) -> bool:
+    text = " ".join(str(payload.get(key, "")) for key in ("error", "error_description", "message")).lower()
+    return "invalid app registration" in text or "app registration" in text or "aadsts7000" in text
+
+
+def _microsoft_xsts_error_message(payload: dict[str, Any]) -> str:
+    xerr = str(payload.get("XErr", "")).strip()
+    details = {
+        "2148916233": "This Microsoft account does not have an Xbox profile. Open xbox.com or the Xbox app once, create the profile, then sign in again.",
+        "2148916235": "Xbox Live is not available for this Microsoft account's country or region.",
+        "2148916236": "This Microsoft account must complete adult verification before Xbox Live can be used.",
+        "2148916237": "This child account needs approval from an adult in the Microsoft family group before Xbox Live can be used.",
+        "2148916238": "This child account cannot use Xbox Live for Minecraft services until its family safety settings allow it.",
+    }
+    if xerr in details:
+        return details[xerr]
+    message = _optional_str(payload.get("Message")) or _optional_str(payload.get("errorMessage"))
+    if message:
+        return f"Xbox security token exchange failed: {message}"
+    return f"Xbox security token exchange failed{f' ({xerr})' if xerr else ''}."
+
+
+def _minecraft_entitlements_include_java(payload: dict[str, Any]) -> bool:
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return False
+    entitlement_names = {
+        str(item.get("name", "")).lower()
+        for item in items
+        if isinstance(item, dict)
+    }
+    return bool(entitlement_names.intersection(MINECRAFT_JAVA_ENTITLEMENTS))
+
+
+def _ensure_auth_log_handler(path: Path) -> None:
+    global _AUTH_LOG_HANDLER_PATH
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return
+    if _AUTH_LOG_HANDLER_PATH == resolved:
+        return
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(resolved, encoding="utf-8")
+    except OSError:
+        return
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(min(logger.level or logging.INFO, logging.INFO))
+    _AUTH_LOG_HANDLER_PATH = resolved
+
+
+def _skin_and_cape_from_minecraft_profile(profile: dict[str, Any]) -> tuple[SkinInfo, SkinInfo]:
+    skins = profile.get("skins")
+    capes = profile.get("capes")
+    skin = _texture_from_minecraft_list(skins, source="minecraft", raw_profile=profile, texture_kind="skin")
+    cape = _texture_from_minecraft_list(capes, source="minecraft", raw_profile=profile, texture_kind="cape")
+    return skin, cape
+
+
+def _skin_from_minecraft_profile(profile: dict[str, Any]) -> SkinInfo:
+    skin, _cape = _skin_and_cape_from_minecraft_profile(profile)
+    return skin
+
+
+def _texture_from_minecraft_list(values: Any, *, source: str, raw_profile: dict[str, Any], texture_kind: str) -> SkinInfo:
+    if not isinstance(values, list):
+        return SkinInfo(source=source, updated_at=_utc_now(), raw=raw_profile)
+    active = next((item for item in values if isinstance(item, dict) and str(item.get("state") or "").upper() == "ACTIVE"), None)
+    if active is None:
+        active = next((item for item in values if isinstance(item, dict)), None)
+    if not isinstance(active, dict):
+        return SkinInfo(source=source, updated_at=_utc_now(), raw=raw_profile)
+    return SkinInfo(
+        source=source,
+        url=_optional_str(active.get("url")),
+        model=_normalize_skin_model(active.get("variant")) if texture_kind == "skin" else None,
+        texture_id=_optional_str(active.get("id")),
+        alias=_optional_str(active.get("alias")),
+        state=_optional_str(active.get("state")),
+        updated_at=_utc_now(),
+        raw=active,
+    )
+
+
+def _skin_from_textures_property(payload: dict[str, Any], *, source: str) -> SkinInfo:
+    return _texture_from_textures_property(payload, source=source, texture_key="SKIN")
+
+
+def _cape_from_textures_property(payload: dict[str, Any], *, source: str) -> SkinInfo:
+    return _texture_from_textures_property(payload, source=source, texture_key="CAPE")
+
+
+def _texture_from_textures_property(payload: dict[str, Any], *, source: str, texture_key: str) -> SkinInfo:
+    properties = payload.get("properties")
+    if not isinstance(properties, list):
+        return SkinInfo(source=source, updated_at=_utc_now(), raw=payload)
+    textures_property = next(
+        (item for item in properties if isinstance(item, dict) and item.get("name") == "textures"),
+        None,
+    )
+    if not isinstance(textures_property, dict):
+        return SkinInfo(source=source, updated_at=_utc_now(), raw=payload)
+    decoded = _decode_texture_value(_optional_str(textures_property.get("value")))
+    texture = decoded.get("textures", {}).get(texture_key) if isinstance(decoded.get("textures"), dict) else None
+    if not isinstance(texture, dict):
+        return SkinInfo(source=source, updated_at=_utc_now(), raw=payload)
+    metadata = texture.get("metadata") if isinstance(texture.get("metadata"), dict) else {}
+    texture_url = _optional_str(texture.get("url"))
+    texture_id = None
+    if texture_url:
+        texture_name = PurePosixPath(urlparse(texture_url).path).stem
+        texture_id = _optional_str(texture_name)
+    return SkinInfo(
+        source=source,
+        url=texture_url,
+        model=_normalize_skin_model(metadata.get("model")) if texture_key == "SKIN" else None,
+        texture_id=texture_id,
+        updated_at=_utc_now(),
+        raw={"profile": payload, "textures": decoded},
+    )
+
+
+def _decode_texture_value(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    padded = value + ("=" * (-len(value) % 4))
+    try:
+        decoded = base64.b64decode(padded).decode("utf-8")
+        payload = json.loads(decoded)
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _normalize_skin_model(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"classic", "steve", "default"}:
+        return "classic"
+    if normalized in {"slim", "alex"}:
+        return "slim"
+    return normalized or None
+
+
+def _png_dimensions(path: Path) -> tuple[int | None, int | None]:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return int(image.width), int(image.height)
+    except Exception:
+        return None, None
+
+
+def _write_minecraft_head_avatar(source: Path, target: Path, *, size: int = 96) -> None:
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - pillow is a declared runtime dependency
+        raise RuntimeError("Pillow is required to generate account avatars.") from exc
+
+    try:
+        with Image.open(source) as image:
+            skin = image.convert("RGBA")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Could not read skin texture: {source}") from exc
+
+    if skin.width < 64 or skin.height < 32:
+        raise RuntimeError("Minecraft skin texture is too small to render a player head.")
+
+    scale = max(1, int(round(skin.width / 64)))
+    face_box = (8 * scale, 8 * scale, 16 * scale, 16 * scale)
+    overlay_box = (40 * scale, 8 * scale, 48 * scale, 16 * scale)
+    face = skin.crop(face_box)
+    if skin.width >= 48 * scale and skin.height >= 16 * scale:
+        overlay = skin.crop(overlay_box)
+        if overlay.getbbox():
+            face.alpha_composite(overlay)
+
+    resampling = getattr(Image, "Resampling", Image).NEAREST
+    avatar = face.resize((size, size), resampling)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    avatar.save(target, "PNG")
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _format_release_date(value: Any) -> str:
@@ -6039,6 +7911,96 @@ def _split_custom_jvm_args(value: str | None) -> list[str]:
         return [item for item in shlex.split(text, posix=False) if item.strip()]
     except ValueError:
         return [item for item in text.split() if item.strip()]
+
+
+def _logical_cpu_count() -> int:
+    return max(1, psutil.cpu_count(logical=True) or os.cpu_count() or 1)
+
+
+def _round_memory_mb(memory_mb: int, step_mb: int = 256) -> int:
+    return max(1024, int(round(int(memory_mb) / step_mb) * step_mb))
+
+
+def _minecraft_optimization_profile(memory_mb: int) -> MinecraftOptimizationProfile:
+    total_memory_mb = _system_memory_cap_mb()
+    cpu_threads = _logical_cpu_count()
+    if total_memory_mb <= 8192 or cpu_threads <= 4 or memory_mb <= 3072:
+        tier = "low"
+        pause_target_ms = 180
+        initial_heap_mb = min(memory_mb, max(1024, min(1536, memory_mb // 2)))
+    elif total_memory_mb >= 24576 and cpu_threads >= 12 and memory_mb >= 6144:
+        tier = "high"
+        pause_target_ms = 120
+        initial_heap_mb = min(memory_mb, max(2048, min(4096, memory_mb // 2)))
+    else:
+        tier = "balanced"
+        pause_target_ms = 150
+        initial_heap_mb = min(memory_mb, max(1536, min(3072, memory_mb // 2)))
+    return MinecraftOptimizationProfile(
+        total_memory_mb=total_memory_mb,
+        cpu_threads=cpu_threads,
+        tier=tier,
+        initial_heap_mb=_round_memory_mb(initial_heap_mb),
+        g1_pause_target_ms=pause_target_ms,
+        use_string_deduplication=memory_mb <= 4096 or total_memory_mb <= 12288,
+    )
+
+
+def _custom_jvm_has(custom_args: list[str], *prefixes: str) -> bool:
+    return any(any(arg.startswith(prefix) for prefix in prefixes) for arg in custom_args)
+
+
+def _custom_jvm_selects_gc(custom_args: list[str]) -> bool:
+    gc_flags = (
+        "-XX:+UseSerialGC",
+        "-XX:+UseParallelGC",
+        "-XX:+UseG1GC",
+        "-XX:+UseZGC",
+        "-XX:+UseShenandoahGC",
+        "-XX:+UseEpsilonGC",
+    )
+    disabled_gc_flags = tuple(flag.replace(":+", ":-", 1) for flag in gc_flags)
+    return _custom_jvm_has(custom_args, *(gc_flags + disabled_gc_flags))
+
+
+def _optimized_minecraft_jvm_args(memory_mb: int, java_major: int | None, custom_jvm_args: str | None) -> list[str]:
+    custom_args = _split_custom_jvm_args(custom_jvm_args)
+    profile = _minecraft_optimization_profile(memory_mb)
+    java_supports_modern_g1_flags = java_major is not None and java_major >= 17
+
+    args: list[str] = []
+    if not _custom_jvm_selects_gc(custom_args):
+        args.append("-XX:+UseG1GC")
+
+    if not _custom_jvm_has(custom_args, "-XX:MaxGCPauseMillis"):
+        args.append(f"-XX:MaxGCPauseMillis={profile.g1_pause_target_ms}")
+    if not _custom_jvm_has(custom_args, "-Xms"):
+        args.append(f"-Xms{profile.initial_heap_mb}M")
+
+    if java_supports_modern_g1_flags:
+        if not _custom_jvm_has(custom_args, "-XX:+ParallelRefProcEnabled", "-XX:-ParallelRefProcEnabled"):
+            args.append("-XX:+ParallelRefProcEnabled")
+        if not _custom_jvm_has(custom_args, "-XX:+DisableExplicitGC", "-XX:-DisableExplicitGC"):
+            args.append("-XX:+DisableExplicitGC")
+        if profile.use_string_deduplication and not _custom_jvm_has(custom_args, "-XX:+UseStringDeduplication", "-XX:-UseStringDeduplication"):
+            args.append("-XX:+UseStringDeduplication")
+
+    if not _custom_jvm_has(custom_args, "-Dfile.encoding="):
+        args.append("-Dfile.encoding=UTF-8")
+    return args
+
+
+def _apply_minecraft_process_optimizations(pid: int) -> None:
+    try:
+        process = psutil.Process(pid)
+    except Exception:  # noqa: BLE001
+        return
+
+    if sys.platform == "win32" and hasattr(psutil, "ABOVE_NORMAL_PRIORITY_CLASS"):
+        try:
+            process.nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not raise Minecraft process priority.", exc_info=True)
 
 
 def _coerce_non_negative_int(value: Any, default: int = 0) -> int:

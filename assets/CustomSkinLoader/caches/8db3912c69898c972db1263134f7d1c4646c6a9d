@@ -1,0 +1,9 @@
+{
+  "id" : "22f31c8aee8a4ccaa32e0ef71b14e9ae",
+  "name" : "WemmbuMaceGuy",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzc5MjI4NywKICAicHJvZmlsZUlkIiA6ICIyMmYzMWM4YWVlOGE0Y2NhYTMyZTBlZjcxYjE0ZTlhZSIsCiAgInByb2ZpbGVOYW1lIiA6ICJXZW1tYnVNYWNlR3V5IiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlLzQwM2E5MWQ1ZTZlODU1YTk3YjNhZDk5OTk3MWQzZWU5ZDIzZWZlOGRiNWZkZWRkZTFmYzM2NDE5ZTc4OGYxZWEiLAogICAgICAibWV0YWRhdGEiIDogewogICAgICAgICJtb2RlbCIgOiAic2xpbSIKICAgICAgfQogICAgfQogIH0KfQ=="
+  } ],
+  "profileActions" : [ ]
+}

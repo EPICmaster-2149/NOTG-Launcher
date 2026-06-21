@@ -1,0 +1,9 @@
+{
+  "id" : "ff3814d33bc142c980c357484c396a05",
+  "name" : "yo67",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1MzU5MjQ3MSwKICAicHJvZmlsZUlkIiA6ICJmZjM4MTRkMzNiYzE0MmM5ODBjMzU3NDg0YzM5NmEwNSIsCiAgInByb2ZpbGVOYW1lIiA6ICJ5bzY3IiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlLzRjMDVhYjllMDdiMzUwNWRjM2VjMTEzNzBjM2JkY2U1NTcwYWQyZmIyYjU2MmU5YjlkZDljZjI3MWY4MWFhNDQiCiAgICB9CiAgfQp9"
+  } ],
+  "profileActions" : [ ]
+}

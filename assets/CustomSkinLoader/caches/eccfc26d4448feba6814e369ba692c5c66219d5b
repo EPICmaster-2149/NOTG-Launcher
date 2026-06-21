@@ -1,0 +1,9 @@
+{
+  "id" : "a25d3f0114c64ef2ae0c7d493f11fd58",
+  "name" : "Dragonfly1367",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzg4NTE0MiwKICAicHJvZmlsZUlkIiA6ICJhMjVkM2YwMTE0YzY0ZWYyYWUwYzdkNDkzZjExZmQ1OCIsCiAgInByb2ZpbGVOYW1lIiA6ICJEcmFnb25mbHkxMzY3IiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2EzYmQxNjA3OWY3NjRjZDU0MWUwNzJlODg4ZmU0Mzg4NWU3MTFmOTg2NTgzMjNkYjBmOWE2MDQ1ZGE5MWVlN2EiCiAgICB9CiAgfQp9"
+  } ],
+  "profileActions" : [ ]
+}

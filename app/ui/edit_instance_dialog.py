@@ -787,6 +787,12 @@ class EditInstanceDialog(QDialog):
         ram_title.setObjectName("editorSectionTitle")
         advanced_layout.addWidget(ram_title)
 
+        self.optimize_minecraft_checkbox = QCheckBox("Optimize Minecraft")
+        self.optimize_minecraft_checkbox.setObjectName("editorFilterCheck")
+        self.optimize_minecraft_checkbox.setChecked(self.instance.optimize_minecraft)
+        self.optimize_minecraft_checkbox.toggled.connect(self._save_optimize_minecraft)
+        advanced_layout.addWidget(self.optimize_minecraft_checkbox)
+
         ram_row = QHBoxLayout()
         ram_row.setContentsMargins(0, 0, 0, 0)
         ram_row.setSpacing(14)
@@ -2162,6 +2168,22 @@ class EditInstanceDialog(QDialog):
             QMessageBox.warning(self, "Memory", str(exc))
             self._set_ram_value(self.instance.memory_mb)
 
+    def _save_optimize_minecraft(self, checked: bool) -> None:
+        if bool(checked) == self.instance.optimize_minecraft:
+            return
+        try:
+            self._apply_instance(
+                self.service.set_instance_java_settings(
+                    self.instance,
+                    custom_jvm_args=self.instance.custom_jvm_args,
+                    java_executable=self.instance.java_executable,
+                    optimize_minecraft=bool(checked),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Optimization", str(exc))
+            self._sync_java_settings_fields()
+
     def _reload_java_runtime_options(self) -> None:
         if not hasattr(self, "java_runtime_combo"):
             return
@@ -2206,11 +2228,16 @@ class EditInstanceDialog(QDialog):
         self.jvm_args_input.blockSignals(True)
         self.jvm_args_input.setPlainText(self.instance.custom_jvm_args or "")
         self.jvm_args_input.blockSignals(False)
+        if hasattr(self, "optimize_minecraft_checkbox"):
+            self.optimize_minecraft_checkbox.blockSignals(True)
+            self.optimize_minecraft_checkbox.setChecked(self.instance.optimize_minecraft)
+            self.optimize_minecraft_checkbox.blockSignals(False)
         self._reload_java_runtime_options()
 
     def _save_java_settings(self) -> None:
         custom_jvm_args = self.jvm_args_input.toPlainText().strip() or None
         java_executable = self.java_runtime_combo.selected_value()
+        optimize_minecraft = self.optimize_minecraft_checkbox.isChecked()
         if java_executable:
             try:
                 runtime_rows = self.service.list_java_runtime_options(self.instance)
@@ -2231,6 +2258,7 @@ class EditInstanceDialog(QDialog):
                     self.instance,
                     custom_jvm_args=custom_jvm_args,
                     java_executable=java_executable,
+                    optimize_minecraft=optimize_minecraft,
                 )
             )
         except Exception as exc:  # noqa: BLE001

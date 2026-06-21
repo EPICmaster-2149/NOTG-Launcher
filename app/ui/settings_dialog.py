@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPointF, QRectF, QSize, Qt, QTimer, Signal, QVariantAnimation
+from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPointF, QRectF, QSize, Qt, QTimer, Signal, QVariantAnimation
 from PySide6.QtGui import QColor, QConicalGradient, QFont, QPainter, QPen, QPixmap, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication,
@@ -248,6 +248,7 @@ class ThemeColorWheel(QWidget):
         self._adaptive = True
         self._hover_pin = False
         self._pulse = 0.0
+        self._dragging = False
 
         self.setCursor(Qt.ForbiddenCursor)
 
@@ -280,6 +281,12 @@ class ThemeColorWheel(QWidget):
         self.setCursor(
             Qt.ForbiddenCursor if adaptive else Qt.CrossCursor
         )
+        if self._adaptive:
+            if self._pulse_animation.state() != QAbstractAnimation.Running:
+                self._pulse_animation.start()
+        else:
+            self._pulse_animation.stop()
+            self._pulse = 0.0
 
         self.update()
 
@@ -517,7 +524,8 @@ class ThemeColorWheel(QWidget):
             super().mousePressEvent(event)
             return
 
-        self._set_color_from_point(event.position())
+        self._dragging = True
+        self._set_color_from_point(event.position(), emit=False)
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
@@ -527,9 +535,18 @@ class ThemeColorWheel(QWidget):
         self._hover_pin = self._pin_hit(event.position())
 
         if event.buttons() & Qt.LeftButton:
-            self._set_color_from_point(event.position())
+            self._set_color_from_point(event.position(), emit=False)
         else:
             self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._adaptive or event.button() != Qt.LeftButton or not self._dragging:
+            super().mouseReleaseEvent(event)
+            return
+
+        self._dragging = False
+        self._set_color_from_point(event.position(), emit=True)
+        event.accept()
 
     def leaveEvent(self, event) -> None:
         self._hover_pin = False
@@ -537,7 +554,7 @@ class ThemeColorWheel(QWidget):
 
         super().leaveEvent(event)
 
-    def _set_color_from_point(self, point: QPointF) -> None:
+    def _set_color_from_point(self, point: QPointF, *, emit: bool) -> None:
         center = QPointF(
             self.width() / 2,
             self.height() / 2
@@ -556,7 +573,8 @@ class ThemeColorWheel(QWidget):
             1.0
         )
 
-        self.color_changed.emit(self._color.name())
+        if emit:
+            self.color_changed.emit(self._color.name())
 
         self.update()
 
@@ -619,7 +637,7 @@ class SettingsDialog(QDialog):
         self._pending_theme_color = self.service.get_theme_accent_color()
         self._manual_theme_timer = QTimer(self)
         self._manual_theme_timer.setSingleShot(True)
-        self._manual_theme_timer.setInterval(90)
+        self._manual_theme_timer.setInterval(0)
         self._manual_theme_timer.timeout.connect(self._commit_manual_theme_color)
 
         self.setObjectName("settingsDialog")
@@ -971,6 +989,7 @@ class SettingsDialog(QDialog):
 
     def _schedule_manual_theme_color(self, color: str) -> None:
         self._pending_theme_color = color
+        self._manual_theme_timer.stop()
         self._manual_theme_timer.start()
 
     def _commit_manual_theme_color(self) -> None:

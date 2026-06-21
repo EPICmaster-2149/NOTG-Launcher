@@ -1,0 +1,9 @@
+{
+  "id" : "70d946ae04114942ab2cb1ee5fe5d0eb",
+  "name" : "Dusank0000",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1MzMzMTQ2NiwKICAicHJvZmlsZUlkIiA6ICI3MGQ5NDZhZTA0MTE0OTQyYWIyY2IxZWU1ZmU1ZDBlYiIsCiAgInByb2ZpbGVOYW1lIiA6ICJEdXNhbmswMDAwIiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2NkZTZlZTUzZTMwNzJiMDYzY2ZlNmMxNTkxODVhZWM3Zjc1NmYyZTZiNzUxNDFjYTRkNGYyMmZhZWY5NTAwZmYiCiAgICB9CiAgfQp9"
+  } ],
+  "profileActions" : [ ]
+}

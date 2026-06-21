@@ -5,6 +5,18 @@ __pycache__/
 build/
 dist/
 
+# Local secrets and tokens
+.env
+.env.*
+!.env.example
+curseforge_config.json
+curseforge-api-key.txt
+spotify_token_cache*
+.spotify_token_cache*
+*.secret
+*.secrets
+*.token
+
 # VS Code
 .vscode/
 .vscode-server/

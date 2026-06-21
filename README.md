@@ -244,6 +244,21 @@ pip install -r requirements.txt
 .\.venv\Scripts\python.exe app\main.py
 ```
 
+### Local credentials
+
+Copy `.env.example` to `.env` in the project root while developing, or place a
+private `.env` next to `NOTG Launcher.exe` for an installed build.
+
+```dotenv
+SPOTIFY_CLIENT_ID=YOUR_SPOTIFY_CLIENT_ID_HERE
+SPOTIFY_CLIENT_SECRET=YOUR_SPOTIFY_CLIENT_SECRET_HERE
+SPOTIFY_REDIRECT_URI=http://localhost:8888/callback
+CURSEFORGE_API_KEY=YOUR_CURSEFORGE_API_KEY_HERE
+```
+
+Do not commit real credentials. The build script intentionally does not bundle
+`.env`, `curseforge_config.json`, token caches, or local key files.
+
 ### Useful development checks
 
 ```powershell

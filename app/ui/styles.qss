@@ -71,9 +71,9 @@ QLabel#accountAvatar {
     max-width: 28px;
     min-height: 28px;
     max-height: 28px;
-    border-radius: 14px;
-    background-color: rgba(102, 156, 255, 0.2);
-    border: 1px solid rgba(128, 176, 255, 0.55);
+    border-radius: 0px;
+    background: transparent;
+    border: none;
     color: #f3f8ff;
     font-size: 12px;
     font-weight: 700;
@@ -734,7 +734,8 @@ QLabel#musicTimeBubble {
     font-weight: 700;
 }
 
-QListWidget#musicTrackList {
+QListWidget#musicTrackList,
+QListView#musicTrackList {
     background-color: rgba(12, 20, 33, 0.54);
     border: 1px solid rgba(79, 111, 159, 0.28);
     border-radius: 12px;
@@ -742,14 +743,16 @@ QListWidget#musicTrackList {
     outline: 0;
 }
 
-QListWidget#musicTrackList::item {
+QListWidget#musicTrackList::item,
+QListView#musicTrackList::item {
     background: transparent;
     border: none;
     margin: 0;
     padding: 0;
 }
 
-QListWidget#musicTrackList::item:selected {
+QListWidget#musicTrackList::item:selected,
+QListView#musicTrackList::item:selected {
     background: transparent;
 }
 

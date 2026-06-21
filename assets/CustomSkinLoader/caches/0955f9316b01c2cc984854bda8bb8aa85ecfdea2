@@ -1,0 +1,9 @@
+{
+  "id" : "20470f93c1f24cd3af37d0669612bf4a",
+  "name" : "ALE32103210",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1Mzk0Nzk0NSwKICAicHJvZmlsZUlkIiA6ICIyMDQ3MGY5M2MxZjI0Y2QzYWYzN2QwNjY5NjEyYmY0YSIsCiAgInByb2ZpbGVOYW1lIiA6ICJBTEUzMjEwMzIxMCIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS9mNTRmMmI0Y2I2ZDIxZDM1NmVjNWMwY2I2ZjUxNjZmZWUzMTE5YzdkYzU5ZTIwODM5YzIwMzMxY2QxM2U0MzlkIgogICAgfQogIH0KfQ=="
+  } ],
+  "profileActions" : [ ]
+}

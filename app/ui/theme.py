@@ -12,6 +12,8 @@ THEME_ACCENT_PROPERTY = "notg_theme_accent"
 DEFAULT_THEME_ACCENT = "#2E45FF"
 _PALETTE_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _BASE_QSS_CACHE: dict[str, str] = {}
+_STYLESHEET_CACHE: dict[tuple[str, str], str] = {}
+_STYLESHEET_KEY_PROPERTY = "notg_stylesheet_key"
 
 
 def _mix_color(start: QColor, end: QColor, factor: float, *, alpha: int | None = None) -> QColor:
@@ -202,7 +204,7 @@ def current_theme_accent(widget: QWidget | None = None) -> QColor:
 
 def set_theme_accent(app: QApplication, color: QColor | str) -> str:
     normalized = normalize_theme_accent(color.name() if isinstance(color, QColor) else color)
-    if app.property(THEME_ACCENT_PROPERTY) == normalized:
+    if normalize_theme_accent(app.property(THEME_ACCENT_PROPERTY)) == normalized and app.styleSheet():
         return normalized
     app.setProperty(THEME_ACCENT_PROPERTY, normalized)
     _set_application_stylesheet(app)
@@ -743,6 +745,8 @@ def theme_palette(widget: QWidget | None = None) -> dict[str, Any]:
 
 def apply_theme(app: QApplication, mode: str) -> str:
     normalized = normalize_theme_mode(mode)
+    if current_theme_mode() == normalized and app.styleSheet():
+        return normalized
     app.setProperty(THEME_PROPERTY, normalized)
     _set_application_stylesheet(app)
     refresh_theme(app)
@@ -766,12 +770,24 @@ def _read_qss(name: str) -> str:
 
 def _set_application_stylesheet(app: QApplication) -> None:
     mode = current_theme_mode()
+    accent = normalize_theme_accent(current_theme_accent().name())
+    cache_key = (mode, accent)
+    if app.property(_STYLESHEET_KEY_PROPERTY) == cache_key and app.styleSheet():
+        return
+    cached = _STYLESHEET_CACHE.get(cache_key)
+    if cached is not None:
+        app.setStyleSheet(cached)
+        app.setProperty(_STYLESHEET_KEY_PROPERTY, cache_key)
+        return
     base_qss = _read_qss("styles.qss")
     parts = [base_qss]
     if mode == "light":
         parts.append(_read_qss("styles_light.qss"))
     parts.append(_dynamic_stylesheet(theme_palette()))
-    app.setStyleSheet("\n\n".join(parts))
+    stylesheet = "\n\n".join(parts)
+    _STYLESHEET_CACHE[cache_key] = stylesheet
+    app.setStyleSheet(stylesheet)
+    app.setProperty(_STYLESHEET_KEY_PROPERTY, cache_key)
 
 
 def _dynamic_stylesheet(palette: dict[str, Any]) -> str:
@@ -839,8 +855,8 @@ QFrame#editorSectionDivider {{
 }}
 
 QLabel#accountAvatar {{
-    background-color: {_qss_rgba(accent_soft)};
-    border: 1px solid {_qss_rgba(accent_bright, 154)};
+    background: transparent;
+    border: none;
     color: {_qss_hex(text)};
 }}
 
@@ -1004,6 +1020,7 @@ QPlainTextEdit#installLogOutput,
 QPlainTextEdit#instanceLogOutput,
 QListWidget#screenshotsGrid,
 QListWidget#musicTrackList,
+QListView#musicTrackList,
 QListWidget#musicPlaylistList {{
     background-color: {_qss_rgba(surface_1, 218)};
     alternate-background-color: {_qss_rgba(surface_2, 206)};
@@ -1168,5 +1185,4 @@ def refresh_theme(app: QApplication | None = None) -> None:
         refresh = getattr(widget, "refresh_theme", None)
         if callable(refresh):
             refresh()
-        widget.updateGeometry()
         widget.update()

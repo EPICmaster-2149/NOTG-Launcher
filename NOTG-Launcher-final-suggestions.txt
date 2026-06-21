@@ -1,0 +1,277 @@
+NOTG-Launcher — Final Suggestions and Action Plan
+Date: 2026-05-22
+
+Purpose
+- This file contains the final, detailed suggestions and action plan for improving the NOTG Launcher codebase. You requested I not modify source files; this is read-only guidance you can implement yourself.
+- I did not propose any changes to media or asset files per your preference.
+
+Executive Summary
+- Top issues found:
+  - Unsafe ZIP extraction in `app/core/updater.py` (use of `zipfile.extractall()` — ZIP-slip risk).
+  - Blocking network calls on the Qt GUI thread (e.g., `requests.get()` in UI modules like `app/ui/music.py`).
+  - Packaging bloat: large bundle size driven by `PySide6` + unused modules and development/test packages included in builds.
+- Primary goals for you to implement:
+  1. Fix updater ZIP handling & add integrity verification.
+  2. Move all UI network I/O to background workers and add robust HTTP retries/timeouts.
+  3. Trim packaging: use a production requirements list and tighten the PyInstaller spec.
+  4. Add logging, monitoring, and profiling to verify gains.
+
+Critical Fixes (Do these first)
+1) Replace unsafe ZIP extraction in `app/core/updater.py`
+- Problem: `zipfile.extractall()` allows path traversal entries (ZIP-slip). Updater extracts remote ZIPs — must be hardened.
+- Action: Replace `extractall()` with a member-by-member safe extractor that:
+  - Normalizes and resolves target paths.
+  - Rejects entries that would escape the extraction root (".." or absolute paths).
+  - Writes files atomically (write to a `.part` temporary file then replace).
+  - Preserves directories and handles directories vs files distinctly.
+
+- Drop-in safe extractor (adapt as needed):
+
+```python
+import zipfile, shutil
+from pathlib import Path, PurePosixPath
+
+def _safe_extract_zip(zip_path: Path, extract_dir: Path) -> Path:
+    extract_dir = extract_dir.resolve()
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for member in zf.infolist():
+            name = member.filename
+            if not name:
+                continue
+            # Normalize POSIX path inside zip
+            safe_parts = [p for p in PurePosixPath(name).parts if p not in ("", ".", "..")]
+            target = (extract_dir.joinpath(*safe_parts)).resolve()
+            if extract_dir not in target.parents and target != extract_dir:
+                raise RuntimeError(f"Unsafe zip entry: {name}")
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(target.suffix + ".part")
+            with zf.open(member, "r") as src, tmp.open("wb") as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+            tmp.replace(target)
+    return extract_dir
+```
+
+- Test: create a ZIP containing `../evil.txt` and verify the extractor raises `RuntimeError` and does not write outside the extraction directory.
+
+2) Add integrity checks for downloaded updates
+- Why: ensure updates are authentic and not corrupted.
+- Preferred: release a SHA256 file or a GPG signature alongside the ZIP on your release artifacts. Verify the signature or SHA256 before extraction.
+- Example SHA256 verification (pseudocode):
+
+```python
+import hashlib
+
+def _sha256_of_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+expected = read_text_of_remote_sha_file().strip()
+if _sha256_of_file(downloaded_zip).lower() != expected.lower():
+    raise RuntimeError("Update checksum verification failed")
+```
+
+- If you cannot publish a checksum file, at minimum verify a trusted HTTPS download origin, file size sanity checks, and manifest-based validation of required files inside the ZIP before extracting.
+
+3) Move UI network calls off the GUI thread
+- Problem: UI modules (examples: `app/ui/music.py`, `app/ui/install_mods_dialog.py`) call `requests.get()` synchronously — blocks Qt event loop.
+- Solution: run network I/O in a background `QRunnable` (or `QThread`) and marshal results back via signals. Use `QThreadPool` for simple fire-and-forget work.
+
+- Minimal worker pattern:
+```python
+from PySide6.QtCore import QObject, Signal, QRunnable, Slot
+
+class WorkerSignals(QObject):
+    finished = Signal(object)
+    error = Signal(Exception)
+
+class Worker(QRunnable):
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self):
+        try:
+            result = self.fn(*self.args, **self.kwargs)
+            self.signals.finished.emit(result)
+        except Exception as e:
+            self.signals.error.emit(e)
+```
+- Replace direct `requests.get(...)` calls with a `Worker` that performs the HTTP call and emits the result.
+
+4) Use `requests.Session()` with retries and timeouts
+- Pattern reduces connection overhead and adds resilience:
+
+```python
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+s = requests.Session()
+retry = Retry(total=3, backoff_factor=0.5, status_forcelist=(429,500,502,503,504))
+adapter = HTTPAdapter(max_retries=retry)
+s.mount("https://", adapter)
+s.mount("http://", adapter)
+# use s.get(url, timeout=(5, 30))
+```
+
+Packaging & Size Reduction (non-asset recommendations)
+- Goal: reduce final distribution size without removing features.
+
+1) Create `requirements-prod.txt`
+- Copy only runtime dependencies (exclude dev/test tools like `pytest`, `tox`, etc.)
+- Build PyInstaller from a clean venv installed from `requirements-prod.txt` to shrink `PYZ-00.pyz` contents.
+- Example commands:
+```powershell
+python -m venv .venv.build
+.\.venv.build\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements-prod.txt
+pip install pyinstaller
+pyinstaller --clean --noconfirm NOTG-Launcher.spec
+```
+- After build, compare `dist/` sizes to measure wins.
+
+2) Prune PyInstaller `spec` (use `excludes` and explicit `datas`)
+- Exclude unused Qt modules that PySide6 may drag in: common candidates:
+  - `PySide6.QtWebEngineWidgets`, `PySide6.QtQml`, `PySide6.QtQuick`, `PySide6.QtWebChannel`, `PySide6.QtWebEngineCore`.
+- Example `Analysis(..., excludes=[...])` snippet to add to `NOTG-Launcher.spec`:
+```python
+excludes=[
+    'PySide6.QtWebEngineWidgets',
+    'PySide6.QtQml',
+    'PySide6.QtQuick',
+    'PySide6.QtWebEngineCore',
+    'PySide6.QtWebChannel',
+]
+```
+- Use `hiddenimports` only when runtime errors require them. Iteratively exclude and rebuild; add modules back if runtime fails.
+
+3) Use `--strip` and optionally UPX (test carefully)
+- `--strip` reduces binary size (strip symbols) and works well on Unix; on Windows, `strip` may be limited.
+- UPX can compress many binaries; exclude core Qt DLLs if UPX causes runtime issues. Always test the packaged app thoroughly.
+
+4) Make heavy optional libs lazy-imported
+- If your app uses optional features (e.g., `yt_dlp` or optional tools), import them only inside the functions that need them. This prevents PyInstaller from including them in `PYZ` unless those code paths are included by analysis.
+
+Reliability, Observability & Diagnostics
+1) Add rotating logs
+- Use `logging.handlers.RotatingFileHandler` and `platformdirs.PlatformDirs` to place logs in the proper OS location.
+```python
+import logging
+from logging.handlers import RotatingFileHandler
+from platformdirs import PlatformDirs
+from pathlib import Path
+
+dirs = PlatformDirs(appname="NOTG Launcher", appauthor=False)
+log_file = Path(dirs.user_log_dir) / "notg-launcher.log"
+log_file.parent.mkdir(parents=True, exist_ok=True)
+handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5, encoding='utf-8')
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+```
+2) Use `logger.exception()` in except blocks so stack traces are captured.
+3) Add health/telemetry hooks (local logs only) to capture update failures, installer errors, and session-monitor exits.
+
+Testing & Verification Steps
+- Static checks:
+  - `python -m py_compile app/core/updater.py` (and other modified modules)
+  - `flake8` or `ruff` (optional) for style and potential mistakes.
+- Unit/Integration tests:
+  - Run `pytest -q` and fix failures in small iterative commits.
+- Manual verification after each critical change:
+  - Start the app and run the updater against a controlled test ZIP.
+  - Validate UI flows affected by network work are responsive and error-handling works.
+- Profiling to measure impact:
+  - `py-spy` (sampling profiler) is non-invasive for production builds:
+    - `py-spy record -o profile.svg -- .venv\Scripts\python.exe app\main.py`
+  - Or use built-in `cProfile` for targeted functions.
+
+Security & Hardening
+- Do NOT use `zipfile.extractall()` for remote archives.
+- Verify update downloads via SHA256 or signature files. Prefer GPG signatures if you can publish them.
+- Run network I/O with TLS verification enabled (do not disable SSL verification).
+- Limit IPC token file permissions and lifetime: ensure any `launcher-ipc.json` token files are created with restrictive file permissions and removed when unused.
+- Sanitize all external inputs (filenames, URLs, JSON data from third parties).
+
+Prioritized Roadmap & Time Estimates
+- Phase 0 — Critical (2–6 hours)
+  - Implement safe extractor + checksum verification in `app/core/updater.py`.
+  - Convert the most egregious UI blocking call (pick one file) to the worker pattern and ensure UI no longer freezes.
+- Phase 1 — Packaging (1–3 days, iterative)
+  - Create `requirements-prod.txt`, rebuild in clean venv, and tighten `NOTG-Launcher.spec` excludes. Measure size reductions and iterate.
+- Phase 2 — Reliability & Observability (1–2 days)
+  - Add rotating logging, exception tracing, and improved HTTP retry/backoff.
+- Phase 3 — Optional improvements (1–2 weeks)
+  - Profiling-guided micro-optimizations, lazy imports across optional features, and advanced updater integrity (GPG signatures/delta updates).
+
+Implementation Checklist (recommended commit workflow)
+1. Create a feature branch: `git checkout -b fix/updater-safe-extract`
+2. Implement safe extractor and checksum verify. Add unit tests for ZIP-slip cases.
+3. Run `python -m py_compile` and `pytest` to confirm no regressions.
+4. Commit and open a PR for review.
+5. On merge, pick next small task (move one blocking call to worker) and repeat.
+
+Quick Commands Summary
+- Create minimal build venv and install prod requirements:
+```powershell
+python -m venv .venv.build
+.\.venv.build\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements-prod.txt
+pip install pyinstaller
+pyinstaller --clean --noconfirm NOTG-Launcher.spec
+```
+- Run tests:
+```powershell
+.\.venv\Scripts\Activate.ps1
+pytest -q
+```
+- Check for ZIP-slip (quick smoke):
+```python
+# run a small script that uses _safe_extract_zip on a malicious test zip
+```
+
+Files of Interest (where I found issues)
+- `app/core/updater.py`  — replace `extractall()` and add verification.
+- `app/ui/startup_screen.py` — contains a safe extraction example; reuse pattern.
+- `app/ui/music.py` — contains blocking `requests` calls.
+- `app/ui/install_mods_dialog.py` — UI network calls; move to worker.
+- `app/main.py` — app startup: hook logging initialization here.
+- `requirements.txt` — create `requirements-prod.txt` derived from this file.
+
+Notes & Constraints
+- Per your instruction I have not modified any source files and did not propose changing media/assets. All recommendations avoid touching asset files.
+- The suggestions above focus on code fixes, packaging, and reliability improvements.
+
+If you want, I can also produce patch diffs for the critical fixes (safe extractor, checksum verification, and a single UI worker replacement) as text-only diffs that you can apply locally. I will not apply them unless you explicitly ask.
+
+-- End of report
+
+There are few problems and bugs in this app
+
+Bugs:
+1. Image 1 shows the the icons of the youtube playlist or music wont appear its just a default one i want the actual image of the music which was working before
+2. If the env is not there tell, tell for any feature to use it give error as This feature is not yet implemented
+3. When the playlist of the music player is added or removed or edited, all the playlsit icons will get randomised, i dont want that once the playlsit is added then it should be there untill the user changes it
+4. Playlist sidebar animation is very laggy i want it to smooth also the selector box of playlsit will go out of the sidebar and so one side is not visible
+5. Is there any way too still more optimise the current live wallpaper because its takes more gpu resources
+6. The reinstalltion of a instance like for example only the modlaoder will also reinstall the whole inecraft version and modlaoder even if the minecraft version is not changed, i mean its now really ineffecient, also when only the minecraft version is changed again both mod laoder and minecraft version will be reinstalled, this takes a lot of time even tho installing modlader takes seconds
+7. The instaltion/importing/reinstalltion/extraction is very inefficient and slower than other launcher, search properly what is the problem and also search the solution with the help of online resouces or refering what other launcher does with respect to using the current minecraft-launcher-lib
+8. The ETA system implemented when any installtion/import/reinstalltion/extraction is not proper is like fake, implement proper logic and algorithm to EFFECIENTLY calculate the ETA which also updates accordingly, completely change the current one like the 3min cap and all as it is fake i want proper ETA in minutes not seconds only minutes which works properly according to each case and system
+
+OPTIMISATION ISSUES
+1. Currently when the beackground is changed or the theme colour is changed the app would feel really laggy untill its resarted and it may fix sometimes, also the theme sector would become so laggy the colour wheel when used freezes and when it updates it jumps to the selector what the user has placed on the wheel suddenly rather than smoothly countinuesly changing when the user slides the wheel selector, also dont always update the coulour theme of entire app only do it when the selector wheel is properly set to a colour and no more the user is holding it, but the preview of the colour should always be shown at the center circle of the wheel everytime
+
+2. Make the laoding screen of the app functional rather than dummy like, rather than (FOR THE APP OPENING LOADING SCREEN ONLY) those fake loading progress bar and the fake loading texts, just take 4 seconds for loading screen, like take 2 seconds for animating the Launcher Logo and when the animation is done it should show starting with a loading animation icon beside it for another 2 seconds, then open the app, so for the laoding screen not to be fake, in that 4 seconsd load the entire app or something and open instantly whenthe loafding screen is done, like now after the laoding screen the app still takes 2 seconds to open, properly research in online hw to implement the logic and modify according to the current code
+
+Also when a update is done idk why for some reason when the reponening is happening the loading screen will again appear and then after closing will not at all open the app but run in background, so to fix that when a update is done and the update window screen is closed saying starting the launcher (it actually does no need to add that) then just directly properly open the app rather than opening the laoding screen again 
+

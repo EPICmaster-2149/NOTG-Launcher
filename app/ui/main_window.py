@@ -1,19 +1,33 @@
 from __future__ import annotations
 
 from datetime import datetime
-from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QKeyEvent, QLinearGradient, QPainter, QPainterPath, QPixmap, QRadialGradient
-from PySide6.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFrame,
+    QGraphicsScene,
+    QGraphicsView,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 try:
-    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 except ImportError:  # pragma: no cover - depends on the local Qt build
     QAudioOutput = None
     QMediaPlayer = None
-    QVideoSink = None
+    QGraphicsVideoItem = None
 
 from core.launcher import InstanceRecord, JavaCompatibilityError, LauncherService, VIDEO_SUFFIXES
 from ui.instance_card import InstanceCard
@@ -40,15 +54,16 @@ class LaunchWorker(QThread):
     launched = Signal(object, int)
     failed = Signal(str, str)
 
-    def __init__(self, service: LauncherService, instance: InstanceRecord, player_name: str):
+    def __init__(self, service: LauncherService, instance: InstanceRecord, account_ref: str):
         super().__init__()
         self.service = service
         self.instance = instance
-        self.player_name = player_name
+        self.account_ref = account_ref
 
     def run(self) -> None:
         try:
-            process = self.service.launch_instance(self.instance, self.player_name)
+            account_session = self.service.get_account_launch_session(self.account_ref)
+            process = self.service.launch_instance(self.instance, account_session.account_id)
             pid = int(getattr(process, "pid", 0) or 0)
             if pid <= 0:
                 raise RuntimeError("Minecraft started without a valid process id.")
@@ -56,10 +71,10 @@ class LaunchWorker(QThread):
             self.service.register_runtime_session(
                 self.instance,
                 pid=pid,
-                player_name=self.player_name,
+                player_name=account_session.username,
                 close_ui_on_launch=self.service.get_close_ui_on_launch(),
             )
-            monitor_pid = self.service.spawn_session_monitor(self.instance.instance_id, pid, self.player_name)
+            monitor_pid = self.service.spawn_session_monitor(self.instance.instance_id, pid, account_session.username)
             self.service.attach_runtime_monitor(self.instance.instance_id, monitor_pid)
             try:
                 updated = self.service.refresh_instance_last_played(self.instance)
@@ -74,6 +89,21 @@ class LaunchWorker(QThread):
         self.launched.emit(updated, pid)
 
 
+class CustomSkinLoaderWorker(QThread):
+    finished_check = Signal(dict)
+
+    def __init__(self, service: LauncherService):
+        super().__init__()
+        self.service = service
+
+    def run(self) -> None:
+        try:
+            result = self.service.ensure_custom_skin_loader_for_all_instances()
+        except Exception:  # noqa: BLE001
+            result = {}
+        self.finished_check.emit(result)
+
+
 class MainWindow(QWidget):
     def __init__(self, *, service: LauncherService | None = None, restore_request: dict[str, Any] | None = None):
         super().__init__()
@@ -86,6 +116,7 @@ class MainWindow(QWidget):
         self._progress_dialogs: list["InstallProgressDialog"] = []
         self._edit_dialogs: dict[str, "EditInstanceDialog"] = {}
         self._settings_dialog: "SettingsDialog | None" = None
+        self._custom_skin_loader_worker: CustomSkinLoaderWorker | None = None
         self._music_dialog: MusicManagerDialog | None = None
         self.music_controller = MusicController(self.service, self)
         self._instance_popup_target_id: str | None = None
@@ -99,10 +130,10 @@ class MainWindow(QWidget):
         self._atmosphere_cache_key: tuple[tuple[int, int], tuple[str, ...]] | None = None
         self._background_video_player = None
         self._background_audio_output = None
-        self._background_video_sink = None
+        self._background_video_view = None
+        self._background_video_scene = None
+        self._background_video_item = None
         self._background_video_source: str | None = None
-        self._background_video_last_frame_at = 0.0
-        self._background_video_min_frame_interval = 1.0 / 24.0
         self._screen_connected = False
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._runtime_session_snapshot: tuple[tuple[str, str, int | None, int | None, bool], ...] = ()
@@ -137,15 +168,24 @@ class MainWindow(QWidget):
             app.aboutToQuit.connect(self.music_controller.stop_with_checkpoint)
 
         QTimer.singleShot(0, self._apply_initial_restore_request)
+        QTimer.singleShot(1800, self._start_custom_skin_loader_check)
         QTimer.singleShot(1200, self._check_for_updates_on_startup)
 
     def showEvent(self, event) -> None:
         self._ensure_screen_tracking()
         self._apply_responsive_layout()
+        if self._background_is_video and self._background_video_player is not None:
+            QTimer.singleShot(0, self._background_video_player.play)
         super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        if self._background_video_player is not None:
+            self._background_video_player.pause()
+        super().hideEvent(event)
 
     def resizeEvent(self, event) -> None:
         self._apply_responsive_layout()
+        self._sync_background_video_geometry()
         self._invalidate_background_cache()
         self._invalidate_atmosphere_cache()
         super().resizeEvent(event)
@@ -185,6 +225,7 @@ class MainWindow(QWidget):
             self.music_controller.save_checkpoint()
             self._hide_for_background_music()
             return
+        self._clear_video_background()
         self.music_controller.stop_with_checkpoint()
         super().closeEvent(event)
 
@@ -254,7 +295,8 @@ class MainWindow(QWidget):
         self.music_widget = TopBarMusicWidget(self.music_controller)
         self.music_widget.manager_requested.connect(self._open_music_manager)
         self.topbar.add_right_widget(self.music_widget)
-        self.topbar.set_accounts(self.service.list_accounts(), self.service.get_player_name())
+        active_account = self.service.get_active_account()
+        self.topbar.set_account_records(self.service.list_account_records(), active_account.account_id, self._account_avatar_path)
         self.topbar.action_requested.connect(self._handle_topbar_action)
         main_layout.addWidget(self.topbar)
 
@@ -458,6 +500,16 @@ class MainWindow(QWidget):
                 QMessageBox.warning(self, "Accounts", str(exc))
                 return
             self._sync_accounts_ui()
+            return
+
+        if action.startswith("AccountId:"):
+            account_id = action.split(":", 1)[1]
+            try:
+                self.service.set_active_account(account_id)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Accounts", str(exc))
+                return
+            self._sync_accounts_ui()
 
     def _open_add_instance_dialog(self) -> None:
         from ui.add_instance_dialog import AddInstanceDialog
@@ -489,9 +541,19 @@ class MainWindow(QWidget):
 
     def _handle_install_success(self, instance: InstanceRecord) -> None:
         self.refresh_instances(select_instance_id=instance.instance_id)
+        self._start_custom_skin_loader_check()
 
     def _handle_install_failure(self, message: str) -> None:
         del message
+
+    def _start_custom_skin_loader_check(self) -> None:
+        if self._custom_skin_loader_worker is not None and self._custom_skin_loader_worker.isRunning():
+            return
+        worker = CustomSkinLoaderWorker(self.service)
+        worker.finished_check.connect(lambda _payload: None)
+        worker.finished.connect(lambda: setattr(self, "_custom_skin_loader_worker", None))
+        self._custom_skin_loader_worker = worker
+        worker.start()
 
     def _handle_current_item_changed(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
         del previous
@@ -563,7 +625,7 @@ class MainWindow(QWidget):
 
         self.music_controller.save_checkpoint()
         self._set_instance_status(instance.instance_id, "Launching")
-        worker = LaunchWorker(self.service, instance, self.service.get_player_name())
+        worker = LaunchWorker(self.service, instance, self.service.get_active_account().account_id)
         worker.launched.connect(self._handle_launch_success)
         worker.failed.connect(self._handle_launch_failure)
         worker.finished.connect(lambda instance_id=instance.instance_id: self._launch_threads.pop(instance_id, None))
@@ -696,12 +758,19 @@ class MainWindow(QWidget):
             break
 
     def _sync_accounts_ui(self) -> None:
-        player_name = self.service.get_player_name()
+        active_account = self.service.get_active_account()
+        player_name = active_account.username
         developer_mode = player_name == DEVELOPER_ACCOUNT_NAME
-        self.topbar.set_accounts(self.service.list_accounts(), player_name)
+        self.topbar.set_account_records(self.service.list_account_records(), active_account.account_id, self._account_avatar_path)
         if developer_mode and not self._developer_mode_active:
             QMessageBox.information(self, "Developer Mode", "Welcome Developer")
         self._developer_mode_active = developer_mode
+
+    def _account_avatar_path(self, account_id: str) -> str | None:
+        try:
+            return self.service.account_avatar_path(account_id)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _open_manage_accounts_dialog(self) -> None:
         from ui.accounts_dialog import AccountsDialog
@@ -794,8 +863,30 @@ class MainWindow(QWidget):
         )
 
     def _set_video_background(self, video_path: str) -> None:
-        if QMediaPlayer is None or QVideoSink is None:
+        if QMediaPlayer is None or QGraphicsVideoItem is None:
             return
+        if self._background_video_view is None:
+            self._background_video_scene = QGraphicsScene(self)
+            self._background_video_item = QGraphicsVideoItem()
+            try:
+                self._background_video_item.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
+            except Exception:  # noqa: BLE001
+                pass
+            self._background_video_scene.addItem(self._background_video_item)
+
+            self._background_video_view = QGraphicsView(self._background_video_scene, self)
+            self._background_video_view.setObjectName("backgroundVideoView")
+            self._background_video_view.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._background_video_view.setFrameShape(QFrame.NoFrame)
+            self._background_video_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self._background_video_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self._background_video_view.setViewportUpdateMode(QGraphicsView.MinimalViewportUpdate)
+            self._background_video_view.setCacheMode(QGraphicsView.CacheBackground)
+            self._background_video_view.setStyleSheet("background: transparent; border: 0;")
+            self._background_video_view.setFocusPolicy(Qt.NoFocus)
+            self._background_video_view.setGeometry(self.rect())
+            self._background_video_view.lower()
+            self._background_video_view.show()
         if self._background_video_player is None:
             self._background_video_player = QMediaPlayer(self)
             if QAudioOutput is not None:
@@ -803,20 +894,22 @@ class MainWindow(QWidget):
                 self._background_audio_output.setMuted(True)
                 self._background_audio_output.setVolume(0)
                 self._background_video_player.setAudioOutput(self._background_audio_output)
-            self._background_video_sink = QVideoSink(self)
-            self._background_video_sink.videoFrameChanged.connect(self._handle_background_video_frame)
-            self._background_video_player.setVideoSink(self._background_video_sink)
+            self._background_video_player.setVideoOutput(self._background_video_item)
             self._background_video_player.mediaStatusChanged.connect(self._handle_background_media_status)
             try:
                 self._background_video_player.setLoops(QMediaPlayer.Loops.Infinite)
             except Exception:  # noqa: BLE001
                 pass
+        elif self._background_video_item is not None:
+            self._background_video_player.setVideoOutput(self._background_video_item)
 
         if self._background_video_source != video_path:
             self._background_video_source = video_path
-            self._background_video_last_frame_at = 0.0
             self._background_video_player.stop()
             self._background_video_player.setSource(QUrl.fromLocalFile(video_path))
+        self._sync_background_video_geometry()
+        self._background_video_view.show()
+        self._background_video_view.lower()
         self._background_video_player.play()
 
     def _clear_video_background(self) -> None:
@@ -824,11 +917,19 @@ class MainWindow(QWidget):
             self._background_video_player.stop()
             if self._background_video_source is not None:
                 self._background_video_player.setSource(QUrl())
+        if self._background_video_view is not None:
+            self._background_video_view.hide()
         self._background_video_source = None
-        self._background_video_last_frame_at = 0.0
 
     def _sync_background_video_geometry(self) -> None:
-        self._invalidate_background_cache()
+        if self._background_video_view is not None:
+            self._background_video_view.setGeometry(self.rect())
+            scene_rect = QRectF(self.rect())
+            if self._background_video_scene is not None:
+                self._background_video_scene.setSceneRect(scene_rect)
+            if self._background_video_item is not None:
+                self._background_video_item.setSize(scene_rect.size())
+            self._background_video_view.lower()
 
     def _handle_background_media_status(self, status) -> None:
         if QMediaPlayer is None or self._background_video_player is None:
@@ -836,23 +937,6 @@ class MainWindow(QWidget):
         if status == QMediaPlayer.MediaStatus.EndOfMedia and self._background_is_video:
             self._background_video_player.setPosition(0)
             self._background_video_player.play()
-
-    def _handle_background_video_frame(self, frame) -> None:
-        if not self._background_is_video:
-            return
-        now = monotonic()
-        if now - self._background_video_last_frame_at < self._background_video_min_frame_interval:
-            return
-        try:
-            image = frame.toImage()
-        except Exception:  # noqa: BLE001
-            return
-        if image.isNull():
-            return
-        self._background_video_last_frame_at = now
-        self._background_pixmap = QPixmap.fromImage(image)
-        self._invalidate_background_cache()
-        self.update()
 
     def _open_edit_dialog(self, instance: InstanceRecord, *, page: str = "Minecraft Log") -> None:
         from ui.edit_instance_dialog import EditInstanceDialog

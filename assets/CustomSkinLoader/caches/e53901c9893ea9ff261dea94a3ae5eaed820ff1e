@@ -1,0 +1,9 @@
+{
+  "id" : "4bd68a1bd4074122a1c1dcd67fbfad12",
+  "name" : "SIGMA20",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NDMxODg4NywKICAicHJvZmlsZUlkIiA6ICI0YmQ2OGExYmQ0MDc0MTIyYTFjMWRjZDY3ZmJmYWQxMiIsCiAgInByb2ZpbGVOYW1lIiA6ICJTSUdNQTIwIiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlLzFhNGFmNzE4NDU1ZDRhYWI1MjhlN2E2MWY4NmZhMjVlNmEzNjlkMTc2OGRjYjEzZjdkZjMxOWE3MTNlYjgxMGIiCiAgICB9CiAgfQp9"
+  } ],
+  "profileActions" : [ ]
+}

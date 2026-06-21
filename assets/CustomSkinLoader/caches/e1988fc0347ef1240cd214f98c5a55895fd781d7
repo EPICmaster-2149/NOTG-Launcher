@@ -1,0 +1,9 @@
+{
+  "id" : "5510f61869c347b1a8ad6f60d1c64503",
+  "name" : "Shaill",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzg0MzY1MSwKICAicHJvZmlsZUlkIiA6ICI1NTEwZjYxODY5YzM0N2IxYThhZDZmNjBkMWM2NDUwMyIsCiAgInByb2ZpbGVOYW1lIiA6ICJTaGFpbGwiLAogICJ0ZXh0dXJlcyIgOiB7CiAgICAiU0tJTiIgOiB7CiAgICAgICJ1cmwiIDogImh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvZTE1OWU4ZTJjY2YyODljYTVmNDZhOTYyMWUwODQwN2QxZDFhODRkMTg1ODkyOWJhM2M1ZTA2ZWVjYWVlZDM0NCIKICAgIH0KICB9Cn0="
+  } ],
+  "profileActions" : [ ]
+}

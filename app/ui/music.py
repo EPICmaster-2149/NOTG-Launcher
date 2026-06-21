@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import random
 import re
 import shutil
@@ -12,9 +11,12 @@ from urllib.parse import urlparse
 
 import requests
 from PySide6.QtCore import (
+    QAbstractListModel,
     QEasingCurve,
     QMimeData,
+    QModelIndex,
     QPoint,
+    QRect,
     QRectF,
     QSize,
     Qt,
@@ -25,7 +27,7 @@ from PySide6.QtCore import (
     QVariantAnimation,
     QObject,
 )
-from PySide6.QtGui import QColor, QDesktopServices, QDrag, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -36,6 +38,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -45,6 +48,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -56,6 +61,7 @@ except ImportError:  # pragma: no cover - depends on the local Qt build
     QMediaDevices = None
     QMediaPlayer = None
 
+from core.config import FEATURE_NOT_IMPLEMENTED_MESSAGE, get_env_value, load_local_env
 from core.launcher import MUSIC_SUFFIXES, LauncherService, MusicPlaylistRecord, MusicRecord
 from ui.app_icon import application_icon
 from ui.responsive import fitted_window_size, scaled_px
@@ -68,6 +74,7 @@ DEFAULT_ACCENT = QColor("#2E45FF")
 UNSET_ICON = object()
 PLAYLIST_ICON_PREFIX = "assets/Playlist-Default-Icons"
 MUSIC_ICON_PREFIX = "assets/Music-Icons"
+YTDLP_AUDIO_FORMAT = "bestaudio[acodec^=opus]/bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]"
 _PIXMAP_CACHE: dict[tuple[str, int], QPixmap] = {}
 
 
@@ -85,6 +92,7 @@ class MediaResolveWorker(QThread):
         music_id: str | None = None,
         autoplay: bool = False,
         artwork_cache_dir: Path | None = None,
+        config_roots: list[Path] | None = None,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
@@ -94,6 +102,7 @@ class MediaResolveWorker(QThread):
         self._music_id = music_id
         self._autoplay = autoplay
         self._artwork_cache_dir = artwork_cache_dir
+        self._config_roots = list(config_roots or [])
 
     def run(self) -> None:
         try:
@@ -126,9 +135,6 @@ class MediaResolveWorker(QThread):
         if not clean_url:
             raise ValueError("Enter a music URL.")
         if _is_spotify_url(clean_url):
-            entity_type, _entity_id = _spotify_entity(clean_url)
-            if entity_type in {"playlist", "album"}:
-                raise RuntimeError(_playlist_import_error(clean_url))
             return self._resolve_spotify(clean_url)
         if _looks_like_playlist_url(clean_url) and not _is_youtube_url(clean_url):
             raise RuntimeError(_playlist_import_error(clean_url))
@@ -159,9 +165,8 @@ class MediaResolveWorker(QThread):
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
-            "format": "bestaudio/best",
+            "format": YTDLP_AUDIO_FORMAT,
             "noplaylist": True,
-            "playlistend": 50,
             "extract_flat": False,
         }
         with yt_dlp.YoutubeDL(options) as ydl:
@@ -192,7 +197,6 @@ class MediaResolveWorker(QThread):
             "skip_download": True,
             "extract_flat": "in_playlist",
             "ignoreerrors": True,
-            "playlistend": 150,
         }
         self.progress.emit({"type": "status", "text": "Reading YouTube playlist..."})
         with yt_dlp.YoutubeDL(flat_options) as ydl:
@@ -205,58 +209,27 @@ class MediaResolveWorker(QThread):
 
         total = len(entries)
         payloads: list[dict[str, object]] = []
-        resolve_options = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "format": "bestaudio/best",
-            "noplaylist": True,
-        }
-        with yt_dlp.YoutubeDL(resolve_options) as ydl:
-            for index, entry in enumerate(entries, start=1):
-                if self.isInterruptionRequested():
-                    break
-                title = _optional_text(entry.get("title")) or f"Track {index}"
-                self.progress.emit({"type": "progress", "value": index - 1, "maximum": total, "text": f"Resolving {title}"})
-                entry_url = entry.get("webpage_url") or entry.get("url") or entry.get("id")
-                if not entry_url:
-                    continue
-                if not str(entry_url).startswith(("http://", "https://")):
-                    entry_url = f"https://www.youtube.com/watch?v={entry_url}"
-                try:
-                    nested = ydl.extract_info(str(entry_url), download=False)
-                except Exception as exc:  # noqa: BLE001
-                    self.progress.emit({"type": "log", "text": f"Skipped {title}: {exc}"})
-                    continue
-                if isinstance(nested, dict):
-                    payloads.append(
-                        self._payload_from_info(
-                            nested,
-                            source_url=str(nested.get("webpage_url") or entry_url or source_url),
-                            platform="youtube",
-                        )
-                    )
-                self.progress.emit({"type": "progress", "value": index, "maximum": total, "text": f"Added {title}"})
+        for index, entry in enumerate(entries, start=1):
+            if self.isInterruptionRequested():
+                break
+            payload = self._youtube_playlist_payload(entry, index=index)
+            if payload is None:
+                continue
+            payloads.append(payload)
+            if index == total or index % 25 == 0:
+                self.progress.emit({"type": "progress", "value": index, "maximum": total, "text": f"Imported {index} of {total} tracks"})
         if not payloads:
-            raise RuntimeError("No playable YouTube playlist entries could be resolved.")
+            raise RuntimeError("No playable YouTube playlist entries could be imported.")
         return payloads
 
     def _resolve_spotify(self, spotify_url: str) -> list[dict[str, object]]:
         entity_type, entity_id = _spotify_entity(spotify_url)
         if entity_type == "track" and entity_id:
             metadata = self._spotify_track_metadata(entity_id, spotify_url)
-            query = " ".join(
-                item
-                for item in (
-                    metadata.get("artist"),
-                    metadata.get("name"),
-                    "official audio",
-                )
-                if item
-            )
+            query = f"{metadata.get('artist') or ''} - {metadata.get('name') or ''} (Audio)".strip()
             resolved = self._resolve_with_ytdlp(
                 f"ytsearch1:{query}",
-                source_url=spotify_url,
+                source_url=_optional_text(metadata.get("source_url")) or spotify_url,
                 platform="spotify",
                 display_name=str(metadata.get("name") or "Spotify Track"),
                 artist=_optional_text(metadata.get("artist")),
@@ -265,167 +238,138 @@ class MediaResolveWorker(QThread):
                 duration_ms=int(metadata.get("duration_ms") or 0),
             )
             for payload in resolved:
-                payload["source_url"] = spotify_url
+                payload["source_url"] = _optional_text(metadata.get("source_url")) or spotify_url
                 payload["platform"] = "spotify"
             return resolved
 
         if entity_type in {"playlist", "album"} and entity_id:
-            token = self._spotify_token()
-            if not token:
-                raise RuntimeError("Spotify playlist and album imports require SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET.")
             if entity_type == "playlist":
-                tracks = self._spotify_playlist_tracks(entity_id, token)
+                tracks = self._spotify_playlist_tracks(entity_id)
             else:
-                tracks = self._spotify_album_tracks(entity_id, token)
+                tracks = self._spotify_album_tracks(entity_id)
             payloads: list[dict[str, object]] = []
-            for metadata in tracks[:50]:
-                query = " ".join(
-                    item
-                    for item in (
-                        metadata.get("artist"),
-                        metadata.get("name"),
-                        "official audio",
-                    )
-                    if item
-                )
-                try:
-                    payload = self._resolve_with_ytdlp(
-                        f"ytsearch1:{query}",
-                        source_url=spotify_url,
-                        platform="spotify",
-                        display_name=str(metadata.get("name") or "Spotify Track"),
-                        artist=_optional_text(metadata.get("artist")),
-                        album=_optional_text(metadata.get("album")),
-                        artwork_url=_optional_text(metadata.get("artwork_url")),
-                        duration_ms=int(metadata.get("duration_ms") or 0),
-                    )[0]
-                except Exception:  # noqa: BLE001
-                    continue
-                payload["source_url"] = spotify_url
+            total = len(tracks)
+            for index, metadata in enumerate(tracks, start=1):
+                if self.isInterruptionRequested():
+                    break
+                payload = dict(metadata)
+                payload["stream_url"] = None
                 payload["platform"] = "spotify"
                 payloads.append(payload)
+                if index == total or index % 25 == 0:
+                    self.progress.emit({"type": "progress", "value": index, "maximum": total, "text": f"Imported {index} of {total} Spotify tracks"})
             if payloads:
                 return payloads
-            raise RuntimeError("No playable Spotify tracks could be resolved.")
+            raise RuntimeError("No Spotify tracks could be imported.")
 
-        metadata = self._spotify_oembed(spotify_url)
-        title = str(metadata.get("title") or "Spotify Track")
-        resolved = self._resolve_with_ytdlp(
-            f"ytsearch1:{title} official audio",
-            source_url=spotify_url,
-            platform="spotify",
-            display_name=title,
-            artwork_url=_optional_text(metadata.get("thumbnail_url")),
-        )
-        for payload in resolved:
-            payload["source_url"] = spotify_url
-            payload["platform"] = "spotify"
-        return resolved
+        raise RuntimeError("Unsupported Spotify link. Use a track, playlist, or album URL.")
 
     def _spotify_track_metadata(self, track_id: str, spotify_url: str) -> dict[str, object]:
-        token = self._spotify_token()
-        if token:
-            response = requests.get(
-                f"https://api.spotify.com/v1/tracks/{track_id}",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=15,
-            )
-            if response.ok:
-                data = response.json()
-                artists = ", ".join(artist.get("name", "") for artist in data.get("artists", []) if artist.get("name"))
-                images = data.get("album", {}).get("images", [])
-                return {
-                    "name": data.get("name"),
-                    "artist": artists,
-                    "album": data.get("album", {}).get("name"),
-                    "artwork_url": images[0].get("url") if images else None,
-                    "duration_ms": data.get("duration_ms") or 0,
-                }
+        del spotify_url
+        client = self._spotify_client()
+        return self._spotify_track_payload(client.track(track_id))
 
-        oembed = self._spotify_oembed(spotify_url)
-        return {
-            "name": oembed.get("title") or "Spotify Track",
-            "artist": None,
-            "album": None,
-            "artwork_url": oembed.get("thumbnail_url"),
-            "duration_ms": 0,
-        }
-
-    def _spotify_playlist_tracks(self, playlist_id: str, token: str) -> list[dict[str, object]]:
-        url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit=50"
-        response = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
-        if not response.ok:
-            raise RuntimeError("Spotify playlist metadata could not be read.")
+    def _spotify_playlist_tracks(self, playlist_id: str) -> list[dict[str, object]]:
+        client = self._spotify_client()
+        self.progress.emit({"type": "status", "text": "Reading Spotify playlist..."})
+        results = client.playlist_items(playlist_id, limit=100, additional_types=("track",))
         tracks: list[dict[str, object]] = []
-        for item in response.json().get("items", []):
-            track = item.get("track") if isinstance(item, dict) else None
-            if isinstance(track, dict):
-                tracks.append(self._spotify_track_payload(track))
+        while results:
+            for item in results.get("items", []):
+                track = item.get("track") if isinstance(item, dict) else None
+                if isinstance(track, dict) and _optional_text(track.get("id")):
+                    tracks.append(self._spotify_track_payload(track))
+            if self.isInterruptionRequested() or not results.get("next"):
+                break
+            results = client.next(results)
         return tracks
 
-    def _spotify_album_tracks(self, album_id: str, token: str) -> list[dict[str, object]]:
-        album_response = requests.get(
-            f"https://api.spotify.com/v1/albums/{album_id}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=20,
-        )
-        if not album_response.ok:
-            raise RuntimeError("Spotify album metadata could not be read.")
-        album = album_response.json()
+    def _spotify_album_tracks(self, album_id: str) -> list[dict[str, object]]:
+        client = self._spotify_client()
+        self.progress.emit({"type": "status", "text": "Reading Spotify album..."})
+        album = client.album(album_id)
         images = album.get("images", [])
         album_name = album.get("name")
         tracks: list[dict[str, object]] = []
-        for track in album.get("tracks", {}).get("items", []):
-            if isinstance(track, dict):
+        results = album.get("tracks", {})
+        while results:
+            for track in results.get("items", []):
+                if not isinstance(track, dict) or not _optional_text(track.get("id")):
+                    continue
                 payload = self._spotify_track_payload(track)
                 payload["album"] = album_name
-                payload["artwork_url"] = images[0].get("url") if images else None
+                artwork_url = _optional_text(images[0].get("url")) if images else None
+                payload["artwork_url"] = artwork_url
+                payload["artwork_path"] = self._cache_artwork(artwork_url)
                 tracks.append(payload)
+            if self.isInterruptionRequested() or not results.get("next"):
+                break
+            results = client.next(results)
         return tracks
 
     def _spotify_track_payload(self, track: dict[str, object]) -> dict[str, object]:
-        artists = ", ".join(
+        artist_names = [
             str(artist.get("name"))
             for artist in track.get("artists", [])
             if isinstance(artist, dict) and artist.get("name")
-        )
+        ]
+        primary_artist = artist_names[0] if artist_names else None
         album = track.get("album") if isinstance(track.get("album"), dict) else {}
         images = album.get("images", []) if isinstance(album, dict) else []
+        track_id = _optional_text(track.get("id"))
+        external_urls = track.get("external_urls") if isinstance(track.get("external_urls"), dict) else {}
+        source_url = _optional_text(external_urls.get("spotify")) if isinstance(external_urls, dict) else None
+        artwork_url = _optional_text(images[0].get("url")) if images else None
         return {
             "name": track.get("name"),
-            "artist": artists,
+            "source_url": source_url or (f"https://open.spotify.com/track/{track_id}" if track_id else None),
+            "artist": primary_artist,
             "album": album.get("name") if isinstance(album, dict) else None,
-            "artwork_url": images[0].get("url") if images else None,
+            "artwork_url": artwork_url,
+            "artwork_path": self._cache_artwork(artwork_url),
             "duration_ms": track.get("duration_ms") or 0,
         }
 
-    def _spotify_token(self) -> str | None:
-        client_id = os.environ.get("SPOTIFY_CLIENT_ID")
-        client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET")
+    def _spotify_client(self):
+        load_local_env(*self._config_roots)
+        client_id = get_env_value("SPOTIFY_CLIENT_ID")
+        client_secret = get_env_value("SPOTIFY_CLIENT_SECRET")
         if not client_id or not client_secret:
-            return None
-        response = requests.post(
-            "https://accounts.spotify.com/api/token",
-            data={"grant_type": "client_credentials"},
-            auth=(client_id, client_secret),
-            timeout=15,
-        )
-        if not response.ok:
-            return None
-        return _optional_text(response.json().get("access_token"))
+            raise RuntimeError(FEATURE_NOT_IMPLEMENTED_MESSAGE)
+        try:
+            import spotipy
+            from spotipy.oauth2 import SpotifyClientCredentials
+        except ImportError as exc:
+            raise RuntimeError("spotipy is required for Spotify imports. Install the updated requirements.") from exc
+        auth_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
+        return spotipy.Spotify(auth_manager=auth_manager, requests_timeout=20, retries=2, status_retries=2)
 
-    def _spotify_oembed(self, spotify_url: str) -> dict[str, object]:
-        response = requests.get("https://open.spotify.com/oembed", params={"url": spotify_url}, timeout=15)
-        if not response.ok:
-            raise RuntimeError("Spotify metadata could not be read.")
-        data = response.json()
-        return data if isinstance(data, dict) else {}
+    def _youtube_playlist_payload(self, entry: dict[str, object], *, index: int) -> dict[str, object] | None:
+        title = _optional_text(entry.get("title")) or f"Track {index}"
+        entry_url = _youtube_entry_url(entry)
+        if not entry_url:
+            return None
+        duration = entry.get("duration")
+        duration_ms = int(float(duration) * 1000) if isinstance(duration, (int, float)) else 0
+        artwork_url = _thumbnail_url_from_info(entry) or _youtube_thumbnail_url(entry)
+        return {
+            "name": title,
+            "source_url": entry_url,
+            "stream_url": None,
+            "artwork_url": artwork_url,
+            "artwork_path": self._cache_artwork(artwork_url),
+            "date_added": datetime.now(timezone.utc).isoformat(),
+            "duration_ms": duration_ms,
+            "platform": "youtube",
+            "artist": _optional_text(entry.get("channel")) or _optional_text(entry.get("uploader")),
+            "album": _optional_text(entry.get("playlist_title")),
+        }
 
     def _payload_from_info(self, info: dict[str, object], *, source_url: str, platform: str) -> dict[str, object]:
         stream_url = _best_stream_url(info)
         if not stream_url:
             raise RuntimeError("No playable audio stream was found.")
-        artwork_url = _optional_text(info.get("thumbnail"))
+        artwork_url = _thumbnail_url_from_info(info)
         return {
             "name": _optional_text(info.get("title")) or "Untitled Track",
             "source_url": source_url,
@@ -442,21 +386,18 @@ class MediaResolveWorker(QThread):
     def _cache_artwork(self, url: str | None) -> str | None:
         if not url or self._artwork_cache_dir is None:
             return None
+        target = _artwork_cache_path(self._artwork_cache_dir, url)
+        if target.is_file():
+            return str(target.resolve())
         try:
             response = requests.get(url, timeout=15)
         except requests.RequestException:
             return None
         if not response.ok or not response.content:
             return None
-        suffix = Path(urlparse(url).path).suffix.lower()
-        if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-            suffix = ".jpg"
-        digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
         self._artwork_cache_dir.mkdir(parents=True, exist_ok=True)
-        target = self._artwork_cache_dir / f"{digest}{suffix}"
         try:
-            if not target.exists():
-                target.write_bytes(response.content)
+            target.write_bytes(response.content)
         except OSError:
             return None
         return str(target.resolve())
@@ -482,6 +423,7 @@ class MusicController(QObject):
     def __init__(self, service: LauncherService, parent: QObject | None = None):
         super().__init__(parent)
         self.service = service
+        self.service.flush_music_runtime_state()
         self._playlists = self.service.list_music_playlists()
         self._current_playlist_id = self.service.get_active_music_playlist_id()
         self._current_music_id = self.service.get_active_music_id()
@@ -631,8 +573,7 @@ class MusicController(QObject):
         if track is None or not track.enabled:
             self.play_playlist()
             return
-        self._player.play()
-        self.playback_changed.emit(True)
+        self.play_track(track.music_id)
 
     def pause(self) -> None:
         if self._player is not None:
@@ -950,6 +891,7 @@ class MusicController(QObject):
             music_id=music_id,
             autoplay=autoplay,
             artwork_cache_dir=self.service.cache_root / "music-artwork",
+            config_roots=[self.service.install_root, self.service.project_root, self.service.config_root],
             parent=self,
         )
         worker.resolved.connect(self._handle_resolved_media)
@@ -971,10 +913,9 @@ class MusicController(QObject):
                 self.service.update_music_track_metadata(music_id, dict(tracks[0]))
                 first_id = music_id
         else:
-            for track_payload in tracks:
-                if isinstance(track_payload, dict):
-                    added_id = self.service.add_remote_music_to_playlist(playlist_id, track_payload)
-                    first_id = first_id or added_id
+            track_payloads = [track_payload for track_payload in tracks if isinstance(track_payload, dict)]
+            added_ids = self.service.add_remote_music_batch_to_playlist(playlist_id, track_payloads)
+            first_id = added_ids[0] if added_ids else None
         self.reload_playlists(select_playlist_id=playlist_id)
         self.resolving_changed.emit(False, "")
         if payload.get("autoplay") and first_id:
@@ -1061,6 +1002,7 @@ class MusicController(QObject):
                 return
             self._last_network_error_at = now
             self._stream_retry_counts[track.music_id] = retry_count + 1
+            self.service.update_music_track_metadata(track.music_id, {"stream_url": None})
             self.resolve_track_stream(track, autoplay=True)
             return
         if len(self.playable_tracks()) > 1:
@@ -1771,7 +1713,219 @@ class DragHandle(QWidget):
                 painter.drawEllipse(QRectF(4 + (column * 7), 6 + (row * 7), 3.2, 3.2))
 
 
-class AnimatedTrackList(QListWidget):
+class MusicTrackListModel(QAbstractListModel):
+    MusicIdRole = Qt.UserRole
+    RecordRole = Qt.UserRole + 1
+    NumberRole = Qt.UserRole + 2
+    CurrentRole = Qt.UserRole + 3
+    PlayingRole = Qt.UserRole + 4
+
+    def __init__(self, *, editor: bool = False, parent: QObject | None = None):
+        super().__init__(parent)
+        self._records: list[MusicRecord] = []
+        self._current_music_id: str | None = None
+        self._current_playing = False
+        self._editor = editor
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._records)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid() or index.row() < 0 or index.row() >= len(self._records):
+            return None
+        record = self._records[index.row()]
+        if role == Qt.DisplayRole:
+            return record.name
+        if role == Qt.SizeHintRole:
+            return QSize(100, 54 if self._editor else 52)
+        if role == self.MusicIdRole:
+            return record.music_id
+        if role == self.RecordRole:
+            return record
+        if role == self.NumberRole:
+            return index.row() + 1
+        if role == self.CurrentRole:
+            return record.music_id == self._current_music_id
+        if role == self.PlayingRole:
+            return record.music_id == self._current_music_id and self._current_playing
+        return None
+
+    def set_tracks(self, records: list[MusicRecord]) -> None:
+        self.beginResetModel()
+        self._records = list(records)
+        self.endResetModel()
+
+    def set_current(self, music_id: str | None, *, playing: bool) -> None:
+        self._current_music_id = music_id
+        self._current_playing = playing
+        if self._records:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self._records) - 1, 0), [self.CurrentRole, self.PlayingRole])
+
+    def row_for_id(self, music_id: str | None) -> int:
+        if not music_id:
+            return -1
+        for row, record in enumerate(self._records):
+            if record.music_id == music_id:
+                return row
+        return -1
+
+    def move_record(self, source_row: int, target_row: int) -> None:
+        if source_row == target_row or source_row < 0 or source_row >= len(self._records):
+            return
+        target_row = max(0, min(target_row, len(self._records) - 1))
+        self.beginResetModel()
+        record = self._records.pop(source_row)
+        self._records.insert(target_row, record)
+        self.endResetModel()
+
+    def ordered_ids(self) -> list[str]:
+        return [record.music_id for record in self._records]
+
+
+class MusicTrackDelegate(QStyledItemDelegate):
+    def __init__(self, service: LauncherService, *, editor: bool = False, parent: QObject | None = None):
+        super().__init__(parent)
+        self.service = service
+        self._editor = editor
+        self._accent = DEFAULT_ACCENT
+
+    def set_accent(self, color: QColor) -> None:
+        self._accent = QColor(color)
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
+        del option, index
+        return QSize(100, 54 if self._editor else 52)
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        record = index.data(MusicTrackListModel.RecordRole)
+        if not isinstance(record, MusicRecord):
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(option.rect).adjusted(1, 3, -1, -3)
+        active = bool(index.data(MusicTrackListModel.CurrentRole))
+        hover = bool(option.state & QStyle.State_MouseOver)
+        selected = bool(option.state & QStyle.State_Selected)
+        bg = QColor(10, 16, 26, 118)
+        accent = QColor(self._accent)
+        hover_color = QColor(accent)
+        hover_color.setAlpha(42 if hover or selected else 0)
+        active_color = QColor(accent)
+        active_color.setAlpha(68 if active else 0)
+        bg = blend_colors(bg, hover_color, 1.0 if hover or selected else 0.0)
+        bg = blend_colors(bg, active_color, 1.0 if active else 0.0)
+        border = QColor(accent)
+        border.setAlpha(115 if active else 62 if hover or selected else 34)
+        painter.setPen(QPen(border, 1.0))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 8, 8)
+
+        content = QRect(option.rect).adjusted(9, 6, -10, -6)
+        x = content.left()
+        center_y = content.center().y()
+        self._paint_drag_handle(painter, QRect(x, center_y - 14, 20, 28))
+        x += 30
+
+        number_rect = QRect(x, content.top(), 26, content.height())
+        number_font = QFont(option.font)
+        number_font.setWeight(QFont.Bold)
+        painter.setFont(number_font)
+        number_color = QColor(accent)
+        number_color.setAlpha(204)
+        painter.setPen(number_color)
+        painter.drawText(number_rect, Qt.AlignCenter, str(index.data(MusicTrackListModel.NumberRole) or index.row() + 1))
+        x += 36
+
+        artwork = _track_pixmap(record, self.service, 34)
+        artwork_rect = QRect(x, center_y - 17, 34, 34)
+        if not artwork.isNull():
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(artwork_rect), 7, 7)
+            painter.setClipPath(path)
+            painter.drawPixmap(artwork_rect, artwork)
+            painter.setClipping(False)
+        x += 44
+
+        right_reserved = 118 + 12 + 56
+        if self._editor:
+            right_reserved += 76
+        name_rect = QRect(x, content.top(), max(40, content.right() - x - right_reserved), content.height())
+        name_font = QFont(option.font)
+        name_font.setWeight(QFont.Bold if active else QFont.DemiBold)
+        painter.setFont(name_font)
+        painter.setPen(QColor("#f7fbff"))
+        painter.drawText(name_rect, Qt.AlignVCenter | Qt.AlignLeft, QFontMetrics(name_font).elidedText(record.name, Qt.ElideRight, name_rect.width()))
+
+        date_rect = QRect(name_rect.right() + 12, content.top(), 118, content.height())
+        meta_font = QFont(option.font)
+        meta_font.setPointSize(max(8, meta_font.pointSize() - 1))
+        meta_font.setWeight(QFont.DemiBold)
+        painter.setFont(meta_font)
+        painter.setPen(QColor(220, 232, 250, 170))
+        painter.drawText(date_rect, Qt.AlignVCenter | Qt.AlignLeft, _format_date_label(record.date_added))
+
+        duration_rect = QRect(date_rect.right() + 8, content.top(), 56, content.height())
+        painter.drawText(duration_rect, Qt.AlignVCenter | Qt.AlignRight, _format_time(record.duration_ms) if record.duration_ms else "--:--")
+
+        if self._editor:
+            playing = bool(index.data(MusicTrackListModel.PlayingRole))
+            self._paint_round_button(painter, self.preview_rect(option.rect), "pause" if playing else "play", QColor(accent))
+            self._paint_round_button(painter, self.delete_rect(option.rect), "trash", QColor("#d85f6f"))
+        painter.restore()
+
+    def drag_handle_rect(self, item_rect: QRect) -> QRect:
+        content = QRect(item_rect).adjusted(9, 6, -10, -6)
+        return QRect(content.left(), content.center().y() - 14, 20, 28)
+
+    def preview_rect(self, item_rect: QRect) -> QRect:
+        content = QRect(item_rect).adjusted(9, 6, -10, -6)
+        return QRect(content.right() - 70, content.center().y() - 17, 34, 34)
+
+    def delete_rect(self, item_rect: QRect) -> QRect:
+        content = QRect(item_rect).adjusted(9, 6, -10, -6)
+        return QRect(content.right() - 34, content.center().y() - 17, 34, 34)
+
+    def _paint_drag_handle(self, painter: QPainter, rect: QRect) -> None:
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(190, 210, 240, 150))
+        for column in range(2):
+            for row in range(3):
+                painter.drawEllipse(QRectF(rect.left() + 4 + (column * 7), rect.top() + 6 + (row * 7), 3.2, 3.2))
+
+    def _paint_round_button(self, painter: QPainter, rect: QRect, icon_kind: str, color: QColor) -> None:
+        fill = QColor(color)
+        fill.setAlpha(160)
+        border = QColor(color)
+        border.setAlpha(220)
+        painter.setPen(QPen(border, 1.0))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(QRectF(rect).adjusted(1, 1, -1, -1), 8, 8)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#f7fbff"))
+        icon_rect = QRectF(rect).adjusted(10, 9, -10, -9)
+        if icon_kind == "play":
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        QPoint(int(icon_rect.left()), int(icon_rect.top())),
+                        QPoint(int(icon_rect.left()), int(icon_rect.bottom())),
+                        QPoint(int(icon_rect.right()), int(icon_rect.center().y())),
+                    ]
+                )
+            )
+        elif icon_kind == "pause":
+            painter.drawRoundedRect(QRectF(icon_rect.left(), icon_rect.top(), 4, icon_rect.height()), 1, 1)
+            painter.drawRoundedRect(QRectF(icon_rect.right() - 4, icon_rect.top(), 4, icon_rect.height()), 1, 1)
+        else:
+            painter.setPen(QPen(QColor("#f7fbff"), 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawLine(int(icon_rect.left()), int(icon_rect.top() + 3), int(icon_rect.right()), int(icon_rect.top() + 3))
+            painter.drawLine(int(icon_rect.left() + 4), int(icon_rect.top()), int(icon_rect.right() - 4), int(icon_rect.top()))
+            painter.drawRoundedRect(QRectF(icon_rect.left() + 2, icon_rect.top() + 6, icon_rect.width() - 4, icon_rect.height() - 4), 2, 2)
+
+
+class AnimatedTrackList(QListView):
     records_reordered = Signal(list, str)
     track_enabled_changed = Signal(str, bool)
     track_activated = Signal(str)
@@ -1784,9 +1938,14 @@ class AnimatedTrackList(QListWidget):
         self._editor = editor
         self._drag_allowed = False
         self._drag_candidate_id: str | None = None
+        self._pressed_button: tuple[str, str] | None = None
         self._accent = DEFAULT_ACCENT
+        self._model = MusicTrackListModel(editor=editor, parent=self)
+        self._delegate = MusicTrackDelegate(service, editor=editor, parent=self)
         self.setObjectName("musicTrackList")
         self.setFrameShape(QFrame.NoFrame)
+        self.setModel(self._model)
+        self.setItemDelegate(self._delegate)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -1795,92 +1954,98 @@ class AnimatedTrackList(QListWidget):
         self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setDragDropOverwriteMode(False)
         self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setUniformItemSizes(True)
         self.setSpacing(6)
         self.setMouseTracking(True)
-        self.itemSelectionChanged.connect(self._emit_selected_track)
+        selection_model = self.selectionModel()
+        if selection_model is not None:
+            selection_model.currentChanged.connect(lambda *_: self._emit_selected_track())
 
     def set_accent(self, color: QColor) -> None:
         self._accent = QColor(color)
-        for index in range(self.count()):
-            row = self.itemWidget(self.item(index))
-            if isinstance(row, TrackRowWidget):
-                row.setProperty("accentColor", self._accent)
-                row.update()
+        self._delegate.set_accent(self._accent)
+        self.viewport().update()
 
     def set_tracks(self, records: list[MusicRecord], current_music_id: str | None = None, *, current_playing: bool = True) -> None:
         selected_id = self.selected_music_id()
         scroll_value = self.verticalScrollBar().value()
-        self.clear()
-        for index, record in enumerate(records, start=1):
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, record.music_id)
-            item.setData(Qt.UserRole + 1, record)
-            item.setSizeHint(QSize(100, 54 if self._editor else 52))
-            self.addItem(item)
-            row = TrackRowWidget(index, record, self.service, editor=self._editor)
-            row.setProperty("accentColor", self._accent)
-            row.enabled_changed.connect(self.track_enabled_changed)
-            row.preview_requested.connect(self.track_activated)
-            row.delete_requested.connect(self.delete_requested)
-            row.set_active(record.music_id == current_music_id, playing=current_playing)
-            self.setItemWidget(item, row)
-
-        restore_id = selected_id if self._item_for_id(selected_id) is not None else current_music_id
-        item = self._item_for_id(restore_id)
-        if item is not None:
-            self.setCurrentItem(item)
+        self._model.set_tracks(records)
+        self._model.set_current(current_music_id, playing=current_playing)
+        restore_id = selected_id if self._model.row_for_id(selected_id) >= 0 else current_music_id
+        row = self._model.row_for_id(restore_id)
+        if row >= 0:
+            self.setCurrentIndex(self._model.index(row, 0))
         QTimer.singleShot(0, lambda value=scroll_value: self._restore_scroll_value(value))
 
     def selected_music_id(self) -> str | None:
-        item = self.currentItem()
-        return str(item.data(Qt.UserRole)) if item is not None else None
+        index = self.currentIndex()
+        if not index.isValid():
+            return None
+        return _optional_text(index.data(MusicTrackListModel.MusicIdRole))
 
     def selected_record(self) -> MusicRecord | None:
-        item = self.currentItem()
-        if item is None:
-            return None
-        record = item.data(Qt.UserRole + 1)
+        index = self.currentIndex()
+        record = index.data(MusicTrackListModel.RecordRole) if index.isValid() else None
         return record if isinstance(record, MusicRecord) else None
 
     def set_current_track_id(self, music_id: str | None, *, playing: bool = True) -> None:
-        for index in range(self.count()):
-            item = self.item(index)
-            row = self.itemWidget(item)
-            if isinstance(row, TrackRowWidget):
-                row.set_active(item.data(Qt.UserRole) == music_id, playing=playing)
+        self._model.set_current(music_id, playing=playing)
+        self.viewport().update()
 
     def mousePressEvent(self, event) -> None:
         self._drag_allowed = False
         self._drag_candidate_id = None
-        item = self.itemAt(event.position().toPoint())
-        if item is not None:
-            row_widget = self.itemWidget(item)
-            item_rect = self.visualItemRect(item)
-            row_point = QPoint(int(event.position().x() - item_rect.left()), int(event.position().y() - item_rect.top()))
-            if isinstance(row_widget, TrackRowWidget) and row_widget.drag_handle_contains(row_point):
+        self._pressed_button = None
+        point = event.position().toPoint()
+        index = self.indexAt(point)
+        if index.isValid():
+            item_rect = self.visualRect(index)
+            music_id = _optional_text(index.data(MusicTrackListModel.MusicIdRole))
+            if self._editor and music_id:
+                if self._delegate.preview_rect(item_rect).contains(point):
+                    self._pressed_button = ("preview", music_id)
+                    event.accept()
+                    return
+                if self._delegate.delete_rect(item_rect).contains(point):
+                    self._pressed_button = ("delete", music_id)
+                    event.accept()
+                    return
+            if self._delegate.drag_handle_rect(item_rect).contains(point) and music_id:
                 self._drag_allowed = True
-                self._drag_candidate_id = str(item.data(Qt.UserRole))
-                self.setCurrentItem(item)
+                self._drag_candidate_id = music_id
+                self.setCurrentIndex(index)
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        point = event.position().toPoint()
+        index = self.indexAt(point)
+        if self._pressed_button and index.isValid():
+            button_kind, music_id = self._pressed_button
+            item_rect = self.visualRect(index)
+            if button_kind == "preview" and self._delegate.preview_rect(item_rect).contains(point):
+                self.track_activated.emit(music_id)
+                event.accept()
+            elif button_kind == "delete" and self._delegate.delete_rect(item_rect).contains(point):
+                self.delete_requested.emit(music_id)
+                event.accept()
+        self._pressed_button = None
         self._drag_allowed = False
         self._drag_candidate_id = None
         super().mouseReleaseEvent(event)
 
     def startDrag(self, supported_actions) -> None:
-        item = self.currentItem()
-        if item is None or not self._drag_allowed:
+        index = self.currentIndex()
+        if not index.isValid() or not self._drag_allowed:
             return
-        music_id = str(item.data(Qt.UserRole))
+        music_id = _optional_text(index.data(MusicTrackListModel.MusicIdRole))
+        if not music_id:
+            return
         if self._drag_candidate_id != music_id:
             return
-        row = self.itemWidget(item)
-        if isinstance(row, TrackRowWidget):
-            row.set_dragging(True)
-            pixmap = row.grab()
-        else:
-            pixmap = QPixmap(self.visualItemRect(item).size())
+        item_rect = self.visualRect(index)
+        pixmap = self.viewport().grab(item_rect)
+        if pixmap.isNull():
+            pixmap = QPixmap(item_rect.size())
             pixmap.fill(Qt.transparent)
         drag = QDrag(self)
         mime = QMimeData()
@@ -1889,10 +2054,6 @@ class AnimatedTrackList(QListWidget):
         drag.setPixmap(pixmap)
         drag.setHotSpot(QPoint(18, max(1, pixmap.height() // 2)))
         drag.exec(Qt.MoveAction if supported_actions & Qt.MoveAction else supported_actions)
-        item = self._item_for_id(music_id)
-        row = self.itemWidget(item) if item is not None else None
-        if isinstance(row, TrackRowWidget):
-            row.set_dragging(False)
         self._drag_allowed = False
         self._drag_candidate_id = None
 
@@ -1914,61 +2075,43 @@ class AnimatedTrackList(QListWidget):
             super().dropEvent(event)
             return
         dragged_id = bytes(event.mimeData().data(MUSIC_MIME)).decode("utf-8")
-        source_item = self._item_for_id(dragged_id)
-        if source_item is None:
+        source_row = self._model.row_for_id(dragged_id)
+        if source_row < 0:
             event.ignore()
             return
-        source_row = self.row(source_item)
         target_row = self._target_row(event.position().toPoint())
         if target_row > source_row:
             target_row -= 1
-        target_row = max(0, min(target_row, self.count() - 1))
+        target_row = max(0, min(target_row, self._model.rowCount() - 1))
         if target_row == source_row:
             event.accept()
             return
-        widget = self.itemWidget(source_item)
-        self.removeItemWidget(source_item)
-        moved_item = self.takeItem(source_row)
-        self.insertItem(target_row, moved_item)
-        if widget is not None:
-            self.setItemWidget(moved_item, widget)
-        for index in range(self.count()):
-            row_widget = self.itemWidget(self.item(index))
-            if isinstance(row_widget, TrackRowWidget):
-                row_widget.set_number(index + 1)
-                row_widget.flash_moved()
+        self._model.move_record(source_row, target_row)
         event.setDropAction(Qt.MoveAction)
         event.accept()
-        self.setCurrentItem(moved_item)
+        self.setCurrentIndex(self._model.index(target_row, 0))
         self.records_reordered.emit(self._ordered_ids(), dragged_id)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        item = self.itemAt(event.position().toPoint())
-        if item is not None:
-            self.track_activated.emit(str(item.data(Qt.UserRole)))
+        index = self.indexAt(event.position().toPoint())
+        if index.isValid():
+            music_id = _optional_text(index.data(MusicTrackListModel.MusicIdRole))
+            if music_id:
+                self.track_activated.emit(music_id)
         super().mouseDoubleClickEvent(event)
 
     def _target_row(self, point: QPoint) -> int:
-        target = self.itemAt(point)
-        if target is None:
-            return self.count()
-        row = self.row(target)
-        rect = self.visualItemRect(target)
+        target = self.indexAt(point)
+        if not target.isValid():
+            return self._model.rowCount()
+        row = target.row()
+        rect = self.visualRect(target)
         if point.y() > rect.center().y():
             row += 1
         return row
 
     def _ordered_ids(self) -> list[str]:
-        return [str(self.item(index).data(Qt.UserRole)) for index in range(self.count())]
-
-    def _item_for_id(self, music_id: str | None) -> QListWidgetItem | None:
-        if not music_id:
-            return None
-        for index in range(self.count()):
-            item = self.item(index)
-            if item.data(Qt.UserRole) == music_id:
-                return item
-        return None
+        return self._model.ordered_ids()
 
     def _restore_scroll_value(self, value: int) -> None:
         scroll_bar = self.verticalScrollBar()
@@ -1986,6 +2129,7 @@ class PlaylistRowWidget(QFrame):
         self._selected = False
         self._compact = False
         self.setObjectName("musicPlaylistRow")
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setMinimumHeight(46)
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(8, 6, 8, 6)
@@ -2007,16 +2151,13 @@ class PlaylistRowWidget(QFrame):
         self.name_label.setVisible(not compact)
         self.setFixedHeight(48)
         if compact:
-            self._layout.setContentsMargins(0, 6, 0, 6)
+            self._layout.setContentsMargins(1, 6, 1, 6)
             self._layout.setAlignment(self.icon_label, Qt.AlignCenter)
-            self.setFixedWidth(width or 48)
+            self.setFixedWidth(width or 50)
         else:
             self._layout.setContentsMargins(8, 6, 8, 6)
             self._layout.setAlignment(self.icon_label, Qt.Alignment())
-            self.setMinimumWidth(0)
-            self.setMaximumWidth(16777215)
-            if width is not None:
-                self.setFixedWidth(width)
+            self.setFixedWidth(width or 204)
             self.name_label.updateGeometry()
         self.updateGeometry()
         self.update()
@@ -2025,7 +2166,7 @@ class PlaylistRowWidget(QFrame):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        rect = QRectF(self.contentsRect()).adjusted(2, 1, -2, -1)
         accent = self.property("accentColor")
         accent = QColor(accent) if isinstance(accent, QColor) else DEFAULT_ACCENT
         bg = QColor(accent)
@@ -2332,7 +2473,7 @@ class MusicPlaylistEditorDialog(QDialog):
         name = self.name_input.text().strip()
         if not name:
             return
-        self.controller.update_playlist(self.playlist.playlist_id, name=name, icon_path=self._icon_path)
+        self.controller.update_playlist(self.playlist.playlist_id, name=name)
 
     def _choose_icon(self) -> None:
         dialog = PlaylistIconSelectorDialog(self.controller.service, self._icon_path, self)
@@ -2457,8 +2598,9 @@ class MusicManagerDialog(QDialog):
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("musicSidebar")
-        self.sidebar.setMinimumWidth(224)
-        self.sidebar.setMaximumWidth(224)
+        self.sidebar.setMinimumWidth(232)
+        self.sidebar.setMaximumWidth(232)
+        self.sidebar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         side_layout = QVBoxLayout(self.sidebar)
         side_layout.setContentsMargins(10, 10, 10, 10)
         side_layout.setSpacing(10)
@@ -2484,7 +2626,10 @@ class MusicManagerDialog(QDialog):
         self.playlist_list.setObjectName("musicPlaylistList")
         self.playlist_list.setFrameShape(QFrame.NoFrame)
         self.playlist_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.playlist_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.playlist_list.setUniformItemSizes(True)
         self.playlist_list.setSpacing(6)
+        self.playlist_list.setContentsMargins(0, 0, 0, 0)
         self.playlist_list.itemClicked.connect(self._handle_playlist_clicked)
         side_layout.addWidget(self.playlist_list, 1)
         body.addWidget(self.sidebar)
@@ -2652,11 +2797,11 @@ class MusicManagerDialog(QDialog):
         for playlist in self.controller.playlists():
             item = QListWidgetItem()
             item.setData(Qt.UserRole, playlist.playlist_id)
-            item.setSizeHint(QSize(52 if self._sidebar_collapsed else 100, 48))
+            item.setSizeHint(QSize(50 if self._sidebar_collapsed else 204, 48))
             self.playlist_list.addItem(item)
             row = PlaylistRowWidget(playlist, self.controller.service)
             row.setProperty("accentColor", self._accent)
-            row.set_compact(self._sidebar_collapsed, width=48 if self._sidebar_collapsed else 196)
+            row.set_compact(self._sidebar_collapsed, width=50 if self._sidebar_collapsed else 204)
             row.set_selected(playlist.playlist_id == current_id)
             self.playlist_list.setItemWidget(item, row)
             if playlist.playlist_id == current_id:
@@ -2736,13 +2881,13 @@ class MusicManagerDialog(QDialog):
             existing.stop()
         self._sidebar_collapsed = not self._sidebar_collapsed
         start = self.sidebar.maximumWidth()
-        end = 66 if self._sidebar_collapsed else 224
+        end = 66 if self._sidebar_collapsed else 232
         if self._sidebar_collapsed:
             self._refresh_sidebar_layout_state(animated=True)
         else:
             self.add_playlist_button.setVisible(False)
             self.background_play_button.setVisible(False)
-            self.playlist_list.setFixedWidth(52)
+            self.playlist_list.setFixedWidth(50)
         animation = QVariantAnimation(self, duration=320, easingCurve=QEasingCurve.OutCubic)
         animation.setStartValue(start)
         animation.setEndValue(end)
@@ -2756,12 +2901,10 @@ class MusicManagerDialog(QDialog):
         self.sidebar.setMinimumWidth(width)
         self.sidebar.setMaximumWidth(width)
         if self._sidebar_collapsed:
-            list_width = 52
+            list_width = 50
         else:
-            progress = (width - 66) / max(1, 224 - 66)
-            list_width = int(round(52 + ((204 - 52) * max(0.0, min(1.0, progress)))))
+            list_width = max(50, width - 20)
         self.playlist_list.setFixedWidth(list_width)
-        self.sidebar.updateGeometry()
 
     def _refresh_sidebar_layout_state(self, *, animated: bool) -> None:
         compact = self._sidebar_collapsed
@@ -2772,21 +2915,19 @@ class MusicManagerDialog(QDialog):
         self.side_header.setContentsMargins(9 if compact else 0, 0, 9 if compact else 0, 0)
         self.side_header.setSpacing(0 if compact else 8)
         self.side_header.setAlignment(self.burger_button, Qt.AlignCenter if compact else Qt.AlignLeft | Qt.AlignVCenter)
-        self.playlist_list.setFixedWidth(52 if compact else 204)
+        self.playlist_list.setFixedWidth(50 if compact else 212)
         self.add_playlist_button.setVisible(not compact)
         self.background_play_button.setVisible(not compact)
         if not animated:
-            self.sidebar.setMinimumWidth(66 if compact else 160)
-            self.sidebar.setMaximumWidth(66 if compact else 224)
-        row_width = 48 if compact else 196
+            self.sidebar.setMinimumWidth(66 if compact else 232)
+            self.sidebar.setMaximumWidth(66 if compact else 232)
+        row_width = 50 if compact else 204
         for index in range(self.playlist_list.count()):
             item = self.playlist_list.item(index)
-            item.setSizeHint(QSize(52 if compact else 100, 48))
+            item.setSizeHint(QSize(row_width, 48))
             row = self.playlist_list.itemWidget(item)
             if isinstance(row, PlaylistRowWidget):
                 row.set_compact(compact, width=row_width)
-                row.updateGeometry()
-                row.update()
         self.playlist_list.doItemsLayout()
         self.playlist_list.viewport().update()
         self.sidebar.updateGeometry()
@@ -2890,18 +3031,18 @@ QFrame#musicSidebar, QFrame#musicMain, QFrame#musicPlaybackDock {{
     border: 1px solid rgba(180, 210, 255, 38);
     border-radius: 8px;
 }}
-QListWidget#musicPlaylistList, QListWidget#musicTrackList {{
+QListWidget#musicPlaylistList, QListWidget#musicTrackList, QListView#musicTrackList {{
     background: transparent;
     border: none;
     outline: 0;
 }}
-QListWidget#musicPlaylistList::item, QListWidget#musicTrackList::item {{
+QListWidget#musicPlaylistList::item, QListWidget#musicTrackList::item, QListView#musicTrackList::item {{
     background: transparent;
     border: none;
     margin: 0;
     padding: 0;
 }}
-QListWidget#musicPlaylistList::item:selected, QListWidget#musicTrackList::item:selected {{
+QListWidget#musicPlaylistList::item:selected, QListWidget#musicTrackList::item:selected, QListView#musicTrackList::item:selected {{
     background: transparent;
 }}
 QLabel#musicCategoryLabel, QLabel#musicTableHeader, QLabel#musicTrackMeta, QLabel#musicTimeLabel {{
@@ -3074,6 +3215,11 @@ def _track_pixmap(record: MusicRecord | None, service: LauncherService, size: in
                 pixmap = _load_image_pixmap(path_text, service, size, fallback_music=False)
                 if not pixmap.isNull():
                     return pixmap
+        cached_artwork = _cached_artwork_path(service, record.artwork_url)
+        if cached_artwork is not None:
+            pixmap = _load_image_pixmap(str(cached_artwork), service, size, fallback_music=False)
+            if not pixmap.isNull():
+                return pixmap
         if record is not None:
             return _fallback_music_pixmap(service, size, seed=record.music_id)
     return _fallback_music_pixmap(service, size, seed="empty")
@@ -3136,6 +3282,21 @@ def _fallback_from_folder(folder: Path, service: LauncherService, size: int, *, 
 def _settings_icon_path(service: LauncherService) -> str | None:
     path = service.project_root / "assets" / "Settings.png"
     return str(path) if path.is_file() else None
+
+
+def _artwork_cache_path(cache_dir: Path, url: str) -> Path:
+    suffix = Path(urlparse(url).path).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        suffix = ".jpg"
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    return cache_dir / f"{digest}{suffix}"
+
+
+def _cached_artwork_path(service: LauncherService, url: str | None) -> Path | None:
+    if not url:
+        return None
+    target = _artwork_cache_path(service.cache_root / "music-artwork", url)
+    return target if target.is_file() else None
 
 
 def _dominant_color(pixmap: QPixmap) -> QColor:
@@ -3219,11 +3380,11 @@ def _format_date_label(value: str | None) -> str:
 
 def _best_stream_url(info: dict[str, object]) -> str | None:
     direct = _optional_text(info.get("url"))
-    if direct and str(info.get("acodec") or "") != "none":
+    if direct and _audio_format_score(info) >= 0:
         return direct
     formats = info.get("formats")
     if not isinstance(formats, list):
-        return direct
+        return None
     audio_formats = [
         item
         for item in formats
@@ -3231,13 +3392,52 @@ def _best_stream_url(info: dict[str, object]) -> str | None:
         and item.get("url")
         and item.get("acodec") != "none"
         and item.get("vcodec") in {None, "none"}
+        and _audio_format_score(item) >= 0
     ]
     if not audio_formats:
-        audio_formats = [item for item in formats if isinstance(item, dict) and item.get("url") and item.get("acodec") != "none"]
-    if not audio_formats:
-        return direct
-    audio_formats.sort(key=lambda item: float(item.get("abr") or item.get("tbr") or 0), reverse=True)
+        return None
+    audio_formats.sort(key=lambda item: _audio_format_score(item), reverse=True)
     return _optional_text(audio_formats[0].get("url"))
+
+
+def _thumbnail_url_from_info(info: dict[str, object]) -> str | None:
+    direct = _optional_text(info.get("thumbnail"))
+    if direct:
+        return direct
+    thumbnails = info.get("thumbnails")
+    if not isinstance(thumbnails, list):
+        return None
+    candidates: list[tuple[int, str]] = []
+    for item in thumbnails:
+        if not isinstance(item, dict):
+            continue
+        url = _optional_text(item.get("url"))
+        if not url:
+            continue
+        width = _coerce_int(item.get("width"))
+        height = _coerce_int(item.get("height"))
+        preference = max(width * height, width, height, 1)
+        candidates.append((preference, url))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _audio_format_score(info: dict[str, object]) -> float:
+    acodec = str(info.get("acodec") or "").lower()
+    ext = str(info.get("ext") or "").lower()
+    protocol = str(info.get("protocol") or "").lower()
+    if not acodec or acodec == "none":
+        return -1
+    if protocol == "mhtml":
+        return -1
+    bitrate = float(info.get("abr") or info.get("tbr") or 0)
+    if acodec.startswith("opus") or (ext == "webm" and "opus" in acodec):
+        return 3000 + bitrate
+    if ext == "m4a" or acodec.startswith("mp4a") or "aac" in acodec:
+        return 2000 + bitrate
+    return -1
 
 
 def _is_spotify_url(url: str) -> bool:
@@ -3261,6 +3461,44 @@ def _looks_like_playlist_url(url: str) -> bool:
     parsed = urlparse(url)
     lowered = f"{parsed.path}?{parsed.query}".lower()
     return "playlist" in lowered or "list=" in lowered or "/sets/" in lowered
+
+
+def _youtube_entry_url(entry: dict[str, object]) -> str | None:
+    for key in ("webpage_url", "url", "id"):
+        value = _optional_text(entry.get(key))
+        if not value:
+            continue
+        if value.startswith(("http://", "https://")):
+            return value
+        return f"https://www.youtube.com/watch?v={value}"
+    return None
+
+
+def _youtube_thumbnail_url(entry: dict[str, object]) -> str | None:
+    video_id = _youtube_video_id(entry)
+    if not video_id:
+        return None
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+
+def _youtube_video_id(entry: dict[str, object]) -> str | None:
+    raw_id = _optional_text(entry.get("id"))
+    if raw_id and re.fullmatch(r"[A-Za-z0-9_-]{6,}", raw_id):
+        return raw_id
+    url = _youtube_entry_url(entry)
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if "youtu.be" in parsed.netloc.lower():
+        candidate = parsed.path.strip("/").split("/", 1)[0]
+        return candidate or None
+    match = re.search(r"(?:^|[?&])v=([A-Za-z0-9_-]+)", parsed.query)
+    return match.group(1) if match else None
+
+
+def _playlist_import_error(url: str) -> str:
+    platform = _platform_from_url(url)
+    return f"{platform.title()} playlist imports are not supported for this link."
 
 
 def _spotify_entity(url: str) -> tuple[str | None, str | None]:
@@ -3292,6 +3530,13 @@ def _optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _coerce_int(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _unique_icon_name(folder: Path, name: str) -> str:

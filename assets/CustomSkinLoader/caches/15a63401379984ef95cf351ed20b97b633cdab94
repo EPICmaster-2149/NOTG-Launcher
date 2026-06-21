@@ -1,0 +1,9 @@
+{
+  "id" : "0da40434c54a4b85ba0cb01bfeda8e1b",
+  "name" : "stipica",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzg3MzQyOSwKICAicHJvZmlsZUlkIiA6ICIwZGE0MDQzNGM1NGE0Yjg1YmEwY2IwMWJmZWRhOGUxYiIsCiAgInByb2ZpbGVOYW1lIiA6ICJzdGlwaWNhIiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlLzVjOTNmZGI4ODA5ODVkN2NlZDBlYTQ3YTA4MTJmNTI3YjE5OTU1Y2ZiOWYzOTU3YjM2MzMyZWRjMzU2YzI4OWEiCiAgICB9CiAgfQp9"
+  } ],
+  "profileActions" : [ ]
+}

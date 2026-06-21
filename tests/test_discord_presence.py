@@ -98,3 +98,14 @@ def test_minecraft_transfer_keeps_configured_server_address() -> None:
     )
 
     assert _detect_minecraft_activity_from_log(log, server_addresses=["play.example.com"]) == "Playing in play.example.com"
+
+
+def test_redirected_backend_ip_does_not_replace_configured_server_address() -> None:
+    log = "\n".join(
+        [
+            "[Render thread/INFO]: Connecting to mc.example.net, 25565",
+            "[Render thread/INFO]: Connecting to 212.2.253.119, 24454",
+        ]
+    )
+
+    assert _detect_minecraft_activity_from_log(log, server_addresses=["mc.example.net"]) == "Playing in mc.example.net"

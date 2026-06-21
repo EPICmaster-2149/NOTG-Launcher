@@ -1,0 +1,9 @@
+{
+  "id" : "4c6589ce8b6742a49c4d6805f0eada46",
+  "name" : "peephole",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NDc0NTI4NywKICAicHJvZmlsZUlkIiA6ICI0YzY1ODljZThiNjc0MmE0OWM0ZDY4MDVmMGVhZGE0NiIsCiAgInByb2ZpbGVOYW1lIiA6ICJwZWVwaG9sZSIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS81MWEwZDhiMDhjMzVjYWUyNGJkZTBhNzQ3ZTJmNDBkM2Q1ODRmOThmNzM5OGVmNmYzMzM0YjBjODQxYzE5MTg5IgogICAgfQogIH0KfQ=="
+  } ],
+  "profileActions" : [ ]
+}

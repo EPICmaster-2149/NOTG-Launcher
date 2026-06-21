@@ -1,0 +1,9 @@
+{
+  "id" : "6f9d415c11bc48e2bc3fb5c0f02060e1",
+  "name" : "sigmaninja123",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NjA0NTg3NCwKICAicHJvZmlsZUlkIiA6ICI2ZjlkNDE1YzExYmM0OGUyYmMzZmI1YzBmMDIwNjBlMSIsCiAgInByb2ZpbGVOYW1lIiA6ICJzaWdtYW5pbmphMTIzIiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2RhZjNkODhjY2IzOGYxMWY3NDgxNGU5MjA1M2Q5MmY3NzI4ZGRiMWE3OTU1NjUyYTYwZTMwY2IyN2FlNjY1OWYiCiAgICB9CiAgfQp9"
+  } ],
+  "profileActions" : [ ]
+}

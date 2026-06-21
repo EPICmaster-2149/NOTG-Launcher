@@ -1,0 +1,9 @@
+{
+  "id" : "375a47e96d6b4260b63a1f04f8fa4dda",
+  "name" : "Oblaster",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NjY1NDM2MiwKICAicHJvZmlsZUlkIiA6ICIzNzVhNDdlOTZkNmI0MjYwYjYzYTFmMDRmOGZhNGRkYSIsCiAgInByb2ZpbGVOYW1lIiA6ICJPYmxhc3RlciIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS80OWNhMTM3NTllNGVjYzI0M2JjMmFkOGRiM2VjYjZmMmZhNGUyZTE3ZDIyMWM4YmQ2M2Q1N2Y3NDI1MDFhNGM1IgogICAgfQogIH0KfQ=="
+  } ],
+  "profileActions" : [ ]
+}

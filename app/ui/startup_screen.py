@@ -10,7 +10,7 @@ import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from PySide6.QtCore import QEasingCurve, QEventLoop, QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
@@ -21,6 +21,7 @@ INTRO_MARKER_VERSION = 1
 INTRO_MARKER_NAME = "startup_intro_v1.json"
 DEVELOPER_ACCOUNT_NAME = "NOTG_Launcher"
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧")
+T = TypeVar("T")
 
 NOTG_ASCII_LOGO = (
     "███╗   ██╗ ██████╗ ████████╗ ██████╗",
@@ -59,7 +60,7 @@ class StartupUpdateWindow(QWidget):
         self._activities: list[ActivityEntry] = []
         self._spinner_index = 0
         self._final_state = False
-        self._final_message = "Starting the Launcher..."
+        self._final_message = "Starting" if mode == "startup" else "Starting the Launcher..."
         self._error_message = ""
 
         self.setObjectName("startupUpdateWindow")
@@ -72,11 +73,11 @@ class StartupUpdateWindow(QWidget):
         self.setWindowFlags(flags)
 
         self._logo_timer = QTimer(self)
-        self._logo_timer.setInterval(105)
+        self._logo_timer.setInterval(max(28, int(1250 / max(1, len(NOTG_ASCII_LOGO)))))
         self._logo_timer.timeout.connect(self._reveal_next_logo_line)
 
         self._frame_timer = QTimer(self)
-        self._frame_timer.setInterval(70)
+        self._frame_timer.setInterval(33)
         self._frame_timer.timeout.connect(self._tick)
         self._frame_timer.start()
 
@@ -117,20 +118,26 @@ class StartupUpdateWindow(QWidget):
         self._display_progress = 100.0
         self.update()
 
-    def run_intro_sequence(self) -> None:
+    def run_intro_sequence(self, *, auto_finish: bool = True) -> None:
         self.show()
         self._center_on_screen()
         self.start_logo_animation()
-        QTimer.singleShot(950, lambda: self.add_activity("Preparing startup environment..."))
-        QTimer.singleShot(950, lambda: self.set_progress(18))
-        QTimer.singleShot(1450, lambda: self.add_activity("Loading launcher profile..."))
-        QTimer.singleShot(1450, lambda: self.set_progress(46))
-        QTimer.singleShot(1950, lambda: self.add_activity("Syncing local data..."))
-        QTimer.singleShot(1950, lambda: self.set_progress(72))
-        QTimer.singleShot(2450, lambda: self.add_activity("Opening launcher..."))
-        QTimer.singleShot(2450, lambda: self.set_progress(100))
-        QTimer.singleShot(3050, self.show_final_starting)
-        QTimer.singleShot(4250, self._finish_intro)
+        if self._mode == "startup":
+            QTimer.singleShot(1350, self.show_final_starting)
+            if auto_finish:
+                QTimer.singleShot(2450, self._finish_intro)
+            return
+        QTimer.singleShot(520, lambda: self.add_activity("Preparing startup environment..."))
+        QTimer.singleShot(520, lambda: self.set_progress(18))
+        QTimer.singleShot(900, lambda: self.add_activity("Loading launcher profile..."))
+        QTimer.singleShot(900, lambda: self.set_progress(46))
+        QTimer.singleShot(1280, lambda: self.add_activity("Syncing local data..."))
+        QTimer.singleShot(1280, lambda: self.set_progress(72))
+        QTimer.singleShot(1660, lambda: self.add_activity("Opening launcher..."))
+        QTimer.singleShot(1660, lambda: self.set_progress(100))
+        QTimer.singleShot(2060, self.show_final_starting)
+        if auto_finish:
+            QTimer.singleShot(2820, self._finish_intro)
 
     def _finish_intro(self) -> None:
         self.complete_current_activity()
@@ -175,6 +182,8 @@ class StartupUpdateWindow(QWidget):
             self._paint_error(painter, rect, logo_rect)
         elif self._final_state:
             self._paint_final_state(painter, rect, logo_rect)
+        elif self._mode == "startup":
+            pass
         else:
             self._paint_activity_area(painter, rect, logo_rect)
 
@@ -577,7 +586,7 @@ def run_update_manifest(manifest_path: str | Path) -> int:
 
 def _launch_and_quit(command: list[str], cwd: str, worker: QThread, window: QWidget) -> None:
     try:
-        _hidden_popen(command, cwd=Path(cwd))
+        _hidden_popen(_with_skip_intro_argument(command), cwd=Path(cwd), hide_window=False)
     finally:
         worker.quit()
         window.close()
@@ -586,7 +595,14 @@ def _launch_and_quit(command: list[str], cwd: str, worker: QThread, window: QWid
             app.quit()
 
 
-def _hidden_popen(command: list[str], *, cwd: Path) -> subprocess.Popen[Any]:
+def _with_skip_intro_argument(command: list[str]) -> list[str]:
+    launch_command = list(command)
+    if "--skip-startup-intro" not in launch_command:
+        launch_command.append("--skip-startup-intro")
+    return launch_command
+
+
+def _hidden_popen(command: list[str], *, cwd: Path, hide_window: bool = True) -> subprocess.Popen[Any]:
     kwargs: dict[str, Any] = {
         "cwd": str(cwd),
         "stdin": subprocess.DEVNULL,
@@ -595,11 +611,14 @@ def _hidden_popen(command: list[str], *, cwd: Path) -> subprocess.Popen[Any]:
         "close_fds": True,
     }
     creationflags = 0
-    for flag_name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
+    flag_names = ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP")
+    if hide_window:
+        flag_names = ("CREATE_NO_WINDOW",) + flag_names
+    for flag_name in flag_names:
         creationflags |= int(getattr(subprocess, flag_name, 0))
     if creationflags:
         kwargs["creationflags"] = creationflags
-    if sys.platform == "win32" and hasattr(subprocess, "STARTUPINFO"):
+    if hide_window and sys.platform == "win32" and hasattr(subprocess, "STARTUPINFO"):
         startupinfo = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
         startupinfo.wShowWindow = subprocess.SW_HIDE  # type: ignore[attr-defined]
@@ -626,21 +645,51 @@ def mark_startup_intro_seen(service: Any) -> None:
     marker.write_text(json.dumps({"version": INTRO_MARKER_VERSION, "completed": True}, indent=2), encoding="utf-8")
 
 
-def run_startup_intro(service: Any, *, developer_mode: bool) -> bool:
+def run_startup_intro_with_preload(service: Any, *, developer_mode: bool, preload: Callable[[], T]) -> T:
     window = StartupUpdateWindow(mode="startup", developer_mode=developer_mode)
     loop = QEventLoop()
     completed = {"value": False}
+    state: dict[str, Any] = {
+        "loaded": False,
+        "minimum_elapsed": False,
+        "result": None,
+        "error": None,
+    }
 
     def finish() -> None:
         completed["value"] = True
         loop.quit()
 
+    def maybe_finish() -> None:
+        if state["loaded"] and state["minimum_elapsed"]:
+            window._finish_intro()
+
+    def run_preload() -> None:
+        try:
+            state["result"] = preload()
+        except BaseException as exc:  # noqa: BLE001 - re-raised after the modal intro closes
+            state["error"] = exc
+        state["loaded"] = True
+        maybe_finish()
+
+    def mark_minimum_elapsed() -> None:
+        state["minimum_elapsed"] = True
+        maybe_finish()
+
     window.intro_finished.connect(finish)
-    window.run_intro_sequence()
+    window.run_intro_sequence(auto_finish=False)
+    QTimer.singleShot(1250, run_preload)
+    QTimer.singleShot(2450, mark_minimum_elapsed)
     loop.exec()
+    if state["error"] is not None:
+        raise state["error"]
     if completed["value"]:
         mark_startup_intro_seen(service)
-    return completed["value"]
+    return state["result"]
+
+
+def run_startup_intro(service: Any, *, developer_mode: bool) -> bool:
+    return bool(run_startup_intro_with_preload(service, developer_mode=developer_mode, preload=lambda: True))
 
 
 def _zip_prefix(root: PurePosixPath, child: str = "") -> str:

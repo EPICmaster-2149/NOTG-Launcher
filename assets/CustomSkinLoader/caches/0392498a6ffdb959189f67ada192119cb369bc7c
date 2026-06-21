@@ -1,0 +1,9 @@
+{
+  "id" : "7129b55b554f42dd8b62e201cba1a9c7",
+  "name" : "Ester",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NTg4MTI0MSwKICAicHJvZmlsZUlkIiA6ICI3MTI5YjU1YjU1NGY0MmRkOGI2MmUyMDFjYmExYTljNyIsCiAgInByb2ZpbGVOYW1lIiA6ICJFc3RlciIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS80YzA1YWI5ZTA3YjM1MDVkYzNlYzExMzcwYzNiZGNlNTU3MGFkMmZiMmI1NjJlOWI5ZGQ5Y2YyNzFmODFhYTQ0IgogICAgfQogIH0KfQ=="
+  } ],
+  "profileActions" : [ ]
+}

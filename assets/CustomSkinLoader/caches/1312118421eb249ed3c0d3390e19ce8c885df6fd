@@ -1,0 +1,9 @@
+{
+  "id" : "389e4b8bf28c495ab29ead9a064f9ec8",
+  "name" : "Lia123",
+  "properties" : [ {
+    "name" : "textures",
+    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NDc1MTc5MywKICAicHJvZmlsZUlkIiA6ICIzODllNGI4YmYyOGM0OTVhYjI5ZWFkOWEwNjRmOWVjOCIsCiAgInByb2ZpbGVOYW1lIiA6ICJMaWExMjMiLAogICJ0ZXh0dXJlcyIgOiB7CiAgICAiU0tJTiIgOiB7CiAgICAgICJ1cmwiIDogImh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvNmVhMjFmY2I0ZDgzYjQ3YWI4NGRlZjYxNDQxMzc3OTk3ZDk5YzkyZmIxNWZlZDRhMGYwNWJhODI0NWQ2MjJjZiIKICAgIH0KICB9Cn0="
+  } ],
+  "profileActions" : [ ]
+}
