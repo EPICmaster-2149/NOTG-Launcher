@@ -23,8 +23,6 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineSettings
-from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -43,6 +41,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QRadioButton,
     QScrollArea,
     QSlider,
@@ -50,6 +49,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTabWidget,
     QTableView,
+    QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -363,13 +363,13 @@ class ModpackVersionDialog(QDialog):
         self.selected_version: dict[str, Any] | None = None
         self._versions = list(versions)
         self.setObjectName("editInstanceDialog")
-        self.setWindowTitle("Select Modpack Version")
+        self.setWindowTitle("Select Version")
         self.setModal(True)
         self.setMinimumSize(520, 420)
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 16)
         root.setSpacing(12)
-        title = QLabel("Minecraft Version")
+        title = QLabel("Select a version to install:")
         title.setObjectName("editorSectionTitle")
         root.addWidget(title)
         self.version_list = QListWidget()
@@ -390,7 +390,7 @@ class ModpackVersionDialog(QDialog):
         cancel_button = ModernButton("Cancel", role="sidebar", height=38, icon_size=0, minimum_width=96)
         cancel_button.clicked.connect(self.reject)
         buttons.addWidget(cancel_button)
-        confirm_button = ModernButton("Confirm", role="accent", height=38, icon_size=0, minimum_width=106)
+        confirm_button = ModernButton("Install", role="accent", height=38, icon_size=0, minimum_width=106)
         confirm_button.clicked.connect(self._confirm)
         buttons.addWidget(confirm_button)
         root.addLayout(buttons)
@@ -631,6 +631,10 @@ class ModrinthModpackSelectorDialog(QDialog):
         top_row.addWidget(self.search_button)
         surface_layout.addLayout(top_row)
 
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("editorStatusText")
+        surface_layout.addWidget(self.status_label)
+
         self.results = QListWidget()
         self.results.setObjectName("musicTrackList")
         self.results.setFrameShape(QFrame.NoFrame)
@@ -787,37 +791,8 @@ class ModrinthModpackSelectorDialog(QDialog):
         super().closeEvent(event)
 
 
-class ModrinthModpackBrowserPage(QWebEnginePage):
-    download_requested = Signal(str)
-
-    def __init__(self, profile: QWebEngineProfile, parent: QWidget | None = None, allowed_prefix: str = ""):
-        super().__init__(profile, parent)
-        self._allowed_prefix = allowed_prefix.rstrip("/")
-
-    def set_allowed_prefix(self, allowed_prefix: str) -> None:
-        self._allowed_prefix = allowed_prefix.rstrip("/")
-
-    def acceptNavigationRequest(self, url, navigation_type, is_main_frame):  # type: ignore[override]
-        url_text = url.toString()
-        if _is_modrinth_modpack_download_url(url_text):
-            self.download_requested.emit(url_text)
-            return False
-
-        if self._allowed_prefix and is_main_frame:
-            normalized = url_text.split("?", 1)[0].rstrip("/")
-            if normalized.startswith("about:"):
-                return True
-            if normalized == self._allowed_prefix or normalized.startswith(self._allowed_prefix + "/"):
-                return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
-            return False
-
-        return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
-
-    def createWindow(self, _type):  # type: ignore[override]
-        return None
-
-
 class ModrinthModpackDetailsDialog(QDialog):
+    """Lightweight API-driven modpack detail dialog (no heavy WebEngine browser)."""
     install_ready = Signal(str, str)
 
     def __init__(self, service: LauncherService, project: dict[str, Any], parent: QWidget | None = None):
@@ -825,24 +800,17 @@ class ModrinthModpackDetailsDialog(QDialog):
         self.service = service
         self.project = dict(project)
         self._project_id = str(project.get("project_id") or project.get("slug") or "")
-        self._project_root_url = self._project_url().split("?", 1)[0].rstrip("/")
         self._versions: list[dict[str, Any]] = []
-        self._pending_download_url: str | None = None
-        self._pending_download_file_name = ""
         self._workers: list[ModrinthModpackWorker] = []
         self._icon_worker: ModrinthModpackIconWorker | None = None
         self._download_worker: ModrinthModpackWorker | None = None
-        self._web_profile: QWebEngineProfile | None = None
-        self._browser_page: ModrinthModpackBrowserPage | None = None
-        self._browser_cache_dir = self.service.cache_root / "modrinth-browser"
         self._icon_cache_dir = self.service.cache_root / "modrinth-modpack-icons"
         self.setObjectName("editInstanceDialog")
         self.setWindowTitle(str(project.get("title") or "Modrinth Modpack"))
         self.setModal(True)
-        self.setMinimumSize(980, 720)
-        self.resize(fitted_window_size(self.parentWidget() or self, 1180, 820, minimum_width=980, minimum_height=720))
+        self.setMinimumSize(640, 520)
+        self.resize(fitted_window_size(self.parentWidget() or self, 780, 600, minimum_width=640, minimum_height=520))
         self._build_ui()
-        self._configure_web_view()
         self._load()
 
     def _build_ui(self) -> None:
@@ -850,12 +818,13 @@ class ModrinthModpackDetailsDialog(QDialog):
         root.setContentsMargins(18, 18, 18, 16)
         root.setSpacing(12)
 
-        self.browser_card = QFrame()
-        self.browser_card.setObjectName("modrinthBrowserCard")
-        browser_layout = QVBoxLayout(self.browser_card)
-        browser_layout.setContentsMargins(0, 0, 0, 0)
-        browser_layout.setSpacing(0)
-        self.browser_card.setStyleSheet(
+        # Info card
+        info_card = QFrame()
+        info_card.setObjectName("modrinthBrowserCard")
+        info_layout = QVBoxLayout(info_card)
+        info_layout.setContentsMargins(18, 16, 18, 16)
+        info_layout.setSpacing(10)
+        info_card.setStyleSheet(
             """
             QFrame#modrinthBrowserCard {
                 background-color: rgba(5, 11, 18, 0.92);
@@ -865,181 +834,81 @@ class ModrinthModpackDetailsDialog(QDialog):
             """
         )
 
-        self.web_view = QWebEngineView()
-        self.web_view.setObjectName("modrinthWebView")
-        self.web_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        browser_layout.addWidget(self.web_view, 1)
-        root.addWidget(self.browser_card, 1)
+        # Project title
+        self.project_title = QLabel(str(self.project.get("title") or "Untitled Modpack"))
+        self.project_title.setObjectName("editorPageTitle")
+        info_layout.addWidget(self.project_title)
 
+        # Description
+        desc_text = str(self.project.get("description") or "No description available.")
+        self.desc_label = QLabel(desc_text)
+        self.desc_label.setObjectName("editorStatusText")
+        self.desc_label.setWordWrap(True)
+        info_layout.addWidget(self.desc_label)
+
+        # Author / downloads
+        author = str(self.project.get("author") or "Unknown")
+        downloads = int(self.project.get("downloads") or 0)
+        meta_text = f"Author: {author}  |  Downloads: {downloads:,}"
+        self.meta_label = QLabel(meta_text)
+        self.meta_label.setObjectName("remoteContentMeta")
+        info_layout.addWidget(self.meta_label)
+
+        # Version list
+        version_label = QLabel("Versions:")
+        version_label.setObjectName("editorSectionTitle")
+        info_layout.addWidget(version_label)
+
+        self.version_list = QListWidget()
+        self.version_list.setObjectName("musicTrackList")
+        self.version_list.setFrameShape(QFrame.NoFrame)
+        self.version_list.setMinimumHeight(180)
+        info_layout.addWidget(self.version_list, 1)
+
+        # Loading/progress label
+        self.status_label = QLabel("Loading versions...")
+        self.status_label.setObjectName("editorStatusText")
+        info_layout.addWidget(self.status_label)
+
+        root.addWidget(info_card, 1)
+
+        # Footer
         footer = QHBoxLayout()
         footer.setSpacing(10)
+        self.install_button = ModernButton("Install Selected", role="accent", height=38, icon_size=0, minimum_width=160)
+        self.install_button.clicked.connect(self._install_selected_version)
+        self.install_button.setEnabled(False)
+        footer.addWidget(self.install_button)
         footer.addStretch()
         cancel_button = ModernButton("Cancel", role="sidebar", height=38, icon_size=0, minimum_width=98)
         cancel_button.clicked.connect(self.reject)
         footer.addWidget(cancel_button)
         root.addLayout(footer)
+
         self.setStyleSheet(
             """
             QDialog#editInstanceDialog {
                 background-color: qradialgradient(
-                    cx: 0.16,
-                    cy: 0.08,
-                    radius: 1.12,
-                    fx: 0.16,
-                    fy: 0.08,
-                    stop: 0 #0f241c,
-                    stop: 0.42 #08140f,
-                    stop: 1 #040806
+                    cx: 0.16, cy: 0.08, radius: 1.12,
+                    fx: 0.16, fy: 0.08,
+                    stop: 0 #0f241c, stop: 0.42 #08140f, stop: 1 #040806
                 );
             }
-            QLabel#editorSectionTitle,
-            QLabel#editorStatusText {
-                background: transparent;
-                color: #D9F7E9;
+            QLabel#editorSectionTitle, QLabel#editorStatusText {
+                background: transparent; color: #D9F7E9;
             }
-            QWebEngineView#modrinthWebView {
-                background-color: #050b12;
+            QLabel#remoteContentMeta {
+                background: transparent; color: #7CB8A0; font-size: 12px;
             }
             """
         )
-
-    def _configure_web_view(self) -> None:
-        try:
-            try:
-                self._web_profile = QWebEngineProfile("modrinth-modpack-browser", self)
-            except TypeError:
-                self._web_profile = QWebEngineProfile.defaultProfile()
-            self._browser_cache_dir.mkdir(parents=True, exist_ok=True)
-            self._web_profile.setCachePath(str(self._browser_cache_dir / "cache"))
-            self._web_profile.setPersistentStoragePath(str(self._browser_cache_dir / "storage"))
-            self._web_profile.setHttpUserAgent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-            cookies_policy = getattr(getattr(QWebEngineProfile, "PersistentCookiesPolicy", QWebEngineProfile), "ForcePersistentCookies", None)
-            if cookies_policy is None:
-                cookies_policy = getattr(QWebEngineProfile, "ForcePersistentCookies", None)
-            if cookies_policy is not None:
-                self._web_profile.setPersistentCookiesPolicy(cookies_policy)
-        except Exception:
-            self._web_profile = QWebEngineProfile.defaultProfile()
-
-        if self._web_profile is None:
-            return
-
-        self._browser_page = ModrinthModpackBrowserPage(self._web_profile, self.web_view, self._project_root_url)
-        self._browser_page.download_requested.connect(self._queue_download_from_url)
-        self.web_view.setPage(self._browser_page)
-        try:
-            settings = self.web_view.settings()
-            for name in ("JavascriptEnabled", "AutoLoadImages", "LocalStorageEnabled", "JavascriptCanOpenWindows"):
-                attr = getattr(QWebEngineSettings.WebAttribute, name, None)
-                if attr is not None:
-                    settings.setAttribute(attr, True)
-            for name in ("PluginsEnabled", "PdfViewerEnabled"):
-                attr = getattr(QWebEngineSettings.WebAttribute, name, None)
-                if attr is not None:
-                    settings.setAttribute(attr, False)
-        except Exception:
-            pass
-        self.web_view.page().profile().downloadRequested.connect(self._handle_download_requested)  # type: ignore[attr-defined]
-        self._install_trim_script()
-        self.web_view.loadFinished.connect(self._handle_load_finished)
-        self.web_view.setUrl(QUrl(self._project_url()))
-
-    def _install_trim_script(self) -> None:
-        if self._web_profile is None:
-            return
-
-        script = QWebEngineScript()
-        script.setName("notg-modrinth-trim-script")
-        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
-        script.setWorldId(getattr(QWebEngineScript, "MainWorld", 0))
-        script.setRunsOnSubFrames(True)
-        script.setSourceCode(
-            f"""
-            (() => {{
-                const allowedPrefix = {json.dumps(self._project_root_url)};
-                const styleId = "notg-modrinth-browser-trim-style";
-                const ensureStyle = () => {{
-                    let style = document.getElementById(styleId);
-                    if (!style) {{
-                        style = document.createElement("style");
-                        style.id = styleId;
-                        style.textContent = `
-                            html, body {{
-                                background: #050b12 !important;
-                            }}
-                            header, nav, [role="banner"],
-                            [data-testid*="header"], [data-testid*="topbar"],
-                            [class*="header"], [class*="navbar"], [class*="topbar"] {{
-                                display: none !important;
-                                visibility: hidden !important;
-                                height: 0 !important;
-                                min-height: 0 !important;
-                                max-height: 0 !important;
-                                overflow: hidden !important;
-                            }}
-                            main {{
-                                padding-top: 0 !important;
-                                margin-top: 0 !important;
-                            }}
-                            a[href] {{
-                                cursor: pointer;
-                            }}
-                        `;
-                        (document.head || document.documentElement).appendChild(style);
-                    }}
-                }};
-
-                const trimView = () => {{
-                    const main = document.querySelector("main") || document.body;
-                    const title = document.querySelector("h1") || main;
-                    if (title && title.scrollIntoView) {{
-                        title.scrollIntoView({{ block: "start", behavior: "auto" }});
-                    }}
-                }};
-
-                const blockExternalNavigation = (event) => {{
-                    const link = event.target && event.target.closest ? event.target.closest("a[href]") : null;
-                    if (!link) {{
-                        return;
-                    }}
-                    const href = link.href || "";
-                    if (!href.startsWith(allowedPrefix)) {{
-                        event.preventDefault();
-                        event.stopPropagation();
-                    }}
-                }};
-
-                document.addEventListener("click", blockExternalNavigation, true);
-                document.addEventListener("auxclick", blockExternalNavigation, true);
-                const observer = new MutationObserver(() => {{
-                    ensureStyle();
-                    trimView();
-                }});
-                observer.observe(document.documentElement, {{ childList: true, subtree: true }});
-                ensureStyle();
-                trimView();
-                setTimeout(trimView, 240);
-            }})();
-            """
-        )
-        self._web_profile.scripts().insert(script)
-
-    def _project_url(self) -> str:
-        slug = str(self.project.get("slug") or "").strip()
-        project_id = self._project_id or slug
-        if slug:
-            return f"https://modrinth.com/modpack/{slug}"
-        return f"https://modrinth.com/modpack/{project_id}" if project_id else "https://modrinth.com"
 
     def _load(self) -> None:
         if not self._project_id:
             QMessageBox.warning(self, "Modrinth Modpack", "Cannot open this pack because the project id is missing.")
             self.reject()
             return
+        self.status_label.setText("Loading versions...")
         self._start_worker("versions", project_id=self._project_id)
         icon_url = str(self.project.get("icon_url") or "")
         if icon_url.startswith(("http://", "https://")):
@@ -1049,14 +918,14 @@ class ModrinthModpackDetailsDialog(QDialog):
         worker = ModrinthModpackWorker(self.service, job, project_id=project_id, version=version, icon_url=icon_url, parent=self)
         worker.loaded.connect(self._handle_worker_loaded)
         worker.failed.connect(self._handle_worker_failed)
-        worker.finished.connect(lambda worker=worker: self._workers.remove(worker) if worker in self._workers else None)
+        worker.finished.connect(lambda w=worker: self._workers.remove(w) if w in self._workers else None)
         self._workers.append(worker)
         worker.start()
 
     def _start_icon_worker(self, icon_url: str) -> None:
         worker = ModrinthModpackIconWorker([(self._project_id or str(self.project.get("slug") or "project"), icon_url)], self._icon_cache_dir, self)
         worker.icon_loaded.connect(self._handle_icon_loaded)
-        worker.finished.connect(lambda worker=worker: setattr(self, "_icon_worker", None) if self._icon_worker is worker else None)
+        worker.finished.connect(lambda w=worker: setattr(self, "_icon_worker", None) if self._icon_worker is w else None)
         self._icon_worker = worker
         worker.start()
 
@@ -1070,60 +939,62 @@ class ModrinthModpackDetailsDialog(QDialog):
     def _handle_worker_loaded(self, job: str, payload: object) -> None:
         if job == "versions":
             self._versions = list(payload) if isinstance(payload, list) else []
-            if self._pending_download_url:
-                pending = self._pending_download_url
-                pending_file_name = self._pending_download_file_name
-                self._pending_download_url = None
-                self._pending_download_file_name = ""
-                self._queue_download_from_url_with_name(pending, pending_file_name)
+            self._populate_version_list()
+            if self._versions:
+                self.install_button.setEnabled(True)
+                self.status_label.setText(f"{len(self._versions)} versions available. Select one and click Install.")
+                self.version_list.setCurrentRow(0)
+            else:
+                self.status_label.setText("No versions found for this modpack.")
         elif job == "download" and isinstance(payload, str):
+            self.install_button.setText("Installing...")
+            self.install_button.setEnabled(False)
+            self.status_label.setText("Download complete! Creating instance...")
             self.install_ready.emit(str(self.project.get("title") or "Modrinth Modpack"), payload)
             self.accept()
 
     def _handle_worker_failed(self, message: str) -> None:
-        QMessageBox.warning(self, "Modrinth Modpack", message)
+        self.install_button.setText("Install Selected")
+        self.install_button.setEnabled(bool(self._versions))
+        error_text = str(message)
+        self.status_label.setText(f"Error loading: {error_text}")
+        QMessageBox.warning(self, "Modrinth Modpack", f"Could not load modpack data:\n{error_text}")
 
-    def _handle_load_finished(self, ok: bool) -> None:
-        if not ok:
-            QMessageBox.warning(self, "Modrinth Modpack", "The embedded Modrinth page could not load.")
+    def _populate_version_list(self) -> None:
+        self.version_list.clear()
+        for version in self._versions:
+            game_versions = version.get("game_versions") if isinstance(version.get("game_versions"), list) else []
+            minecraft_versions = ", ".join(str(v) for v in game_versions[:4])
+            label = str(version.get("name") or version.get("version_number") or "Version")
+            version_number = str(version.get("version_number") or "")
+            loaders = version.get("loaders") if isinstance(version.get("loaders"), list) else []
+            loader_str = ", ".join(str(l) for l in loaders[:2])
+            item_text = f"{label}"
+            if version_number:
+                item_text += f"\n{version_number}"
+            if minecraft_versions:
+                item_text += f"  |  MC {minecraft_versions}"
+            if loader_str:
+                item_text += f"  |  {loader_str}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, version)
+            item.setSizeHint(QSize(0, 52))
+            self.version_list.addItem(item)
+
+    def _install_selected_version(self) -> None:
+        item = self.version_list.currentItem()
+        if item is None:
+            QMessageBox.information(self, "Select Version", "Please select a version from the list first.")
             return
-
-    def _queue_download_from_url(self, url_text: str) -> None:
-        self._queue_download_from_url_with_name(url_text, "")
-
-    def _handle_download_requested(self, request) -> None:
-        url = ""
-        file_name = ""
-        try:
-            url = request.url().toString()
-        except Exception:
-            url = ""
-        try:
-            file_name = str(request.downloadFileName())
-        except Exception:
-            file_name = ""
-        try:
-            request.cancel()
-        except Exception:
-            pass
-        if url:
-            self._queue_download_from_url_with_name(url, file_name)
-
-    def _queue_download_from_url_with_name(self, url_text: str, file_name: str = "") -> None:
-        if not self._versions:
-            self._pending_download_url = url_text
-            self._pending_download_file_name = file_name
-            return
-        version = _match_modrinth_version_from_url(url_text, self._versions, file_name=file_name)
-        if version is None:
-            QMessageBox.warning(
-                self,
-                "Modrinth Modpack",
-                "Could not match the selected version. Please try again.",
-            )
+        version = item.data(Qt.UserRole)
+        if not isinstance(version, dict):
             return
         if self._download_worker is not None and self._download_worker.isRunning():
+            QMessageBox.information(self, "Downloading", "A download is already in progress.")
             return
+        self.install_button.setText("Downloading...")
+        self.install_button.setEnabled(False)
+        self.status_label.setText("Downloading modpack...")
         self._download_worker = ModrinthModpackWorker(self.service, "download", version=version, parent=self)
         self._download_worker.loaded.connect(self._handle_worker_loaded)
         self._download_worker.failed.connect(self._handle_worker_failed)
