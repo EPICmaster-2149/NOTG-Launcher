@@ -23,6 +23,9 @@ from PySide6.QtWidgets import (
 from core.launcher import InstallRequest, InstallResult, LauncherService, run_install_task
 from ui.topbar import ModernButton
 
+# Braille spinner frames (matches modrinth browser style)
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧")
+
 
 class InstallProgressDialog(QDialog):
     installation_succeeded = Signal(object)
@@ -45,6 +48,7 @@ class InstallProgressDialog(QDialog):
         self._display_percent = 0
         self._eta_samples: deque[tuple[float, int]] = deque(maxlen=60)
         self._eta_started_at = monotonic()
+        self._spinner_index = 0
 
         self.setObjectName("installProgressDialog")
         self.setWindowTitle(_operation_window_title(request.operation))
@@ -53,10 +57,24 @@ class InstallProgressDialog(QDialog):
 
         self._build_ui()
 
+        # Spinner timer for the footer animation
+        self._spinner_timer = QTimer(self)
+        self._spinner_timer.setInterval(80)
+        self._spinner_timer.timeout.connect(self._tick_spinner)
+
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(90)
         self._poll_timer.timeout.connect(self._poll_events)
         self._start_install()
+
+    def _tick_spinner(self) -> None:
+        """Advance braille spinner and update footer status text."""
+        self._spinner_index = (self._spinner_index + 1) % len(_SPINNER_FRAMES)
+        spinner = _SPINNER_FRAMES[self._spinner_index]
+        self.footer_spinner_label.setText(spinner)
+        # Also update the ETA label if we have status info
+        if self._last_status:
+            self.footer_status_label.setText(self._last_status)
 
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
@@ -69,19 +87,13 @@ class InstallProgressDialog(QDialog):
         header_layout.setContentsMargins(18, 16, 18, 16)
         header_layout.setSpacing(16)
 
-        text_column = QVBoxLayout()
-        text_column.setSpacing(6)
+        # Title only in header (status moved to footer)
         title_prefix = _operation_title_prefix(self.request.operation)
         self.title_label = QLabel(f"{title_prefix} {self.request.name}")
         self.title_label.setObjectName("installProgressTitle")
-        text_column.addWidget(self.title_label)
+        header_layout.addWidget(self.title_label, 1)
 
-        initial_status = _operation_initial_status(self.request.operation)
-        self.status_label = QLabel(initial_status)
-        self.status_label.setObjectName("installProgressStatus")
-        text_column.addWidget(self.status_label)
-        header_layout.addLayout(text_column, 1)
-
+        # ETA summary on the right side of header
         self.progress_summary_label = QLabel("calculating...")
         self.progress_summary_label.setObjectName("installProgressSummary")
         self.progress_summary_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -104,8 +116,23 @@ class InstallProgressDialog(QDialog):
         self.log_output.setLineWrapMode(QPlainTextEdit.NoWrap)
         root_layout.addWidget(self.log_output, 1)
 
+        # Footer: spinner + status text on left, abort button on right
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(8)
+
+        # Spinner label (braille character)
+        self.footer_spinner_label = QLabel(_SPINNER_FRAMES[0])
+        self.footer_spinner_label.setObjectName("installFooterSpinner")
+        self.footer_spinner_label.setFixedWidth(18)
+        footer.addWidget(self.footer_spinner_label)
+
+        # Status text (what's currently happening)
+        initial_status = _operation_initial_status(self.request.operation)
+        self.footer_status_label = QLabel(initial_status)
+        self.footer_status_label.setObjectName("installFooterStatus")
+        footer.addWidget(self.footer_status_label, 1)
+
         footer.addStretch()
 
         self.abort_button = ModernButton("Abort", role="danger", height=44, icon_size=0)
@@ -122,6 +149,7 @@ class InstallProgressDialog(QDialog):
         )
         self._process.start()
         self._poll_timer.start()
+        self._spinner_timer.start()
         prefix = _operation_log_prefix(self.request.operation)
         self._append_log(f"Starting {prefix} for {self.request.name}")
 
@@ -150,8 +178,9 @@ class InstallProgressDialog(QDialog):
         event_type = event.get("type")
         if event_type == "status":
             text = str(event.get("text", ""))
-            self.status_label.setText(text)
             self._last_status = text
+            # Update both the internal status (for the spinner footer) and header
+            self.footer_status_label.setText(text)
             return
 
         if event_type == "log":
@@ -193,6 +222,8 @@ class InstallProgressDialog(QDialog):
 
         self._completed = True
         self._poll_timer.stop()
+        self._spinner_timer.stop()
+        self.footer_spinner_label.setText("✓")
         try:
             instance = self.service.finalize_install(self.request, result)
         except Exception as exc:  # noqa: BLE001
@@ -213,6 +244,8 @@ class InstallProgressDialog(QDialog):
 
         self._completed = True
         self._poll_timer.stop()
+        self._spinner_timer.stop()
+        self.footer_spinner_label.setText("✗")
         self._terminate_process()
         self.service.cleanup_install(self.request)
         self.installation_failed.emit(message)
@@ -236,7 +269,9 @@ class InstallProgressDialog(QDialog):
 
     def _abort_install(self) -> None:
         self._aborting = True
-        self.status_label.setText("Cancelling installation…")
+        self._spinner_timer.stop()
+        self.footer_spinner_label.setText("✗")
+        self.footer_status_label.setText("Cancelling installation…")
         self._append_log("Abort requested by user.")
         self._terminate_process()
         self.service.cleanup_install(self.request)
@@ -265,7 +300,7 @@ class InstallProgressDialog(QDialog):
         if eta_seconds is None:
             self.progress_summary_label.setText("calculating...")
             return
-        self.progress_summary_label.setText(f"about {_format_duration(eta_seconds)} remaining")
+        self.progress_summary_label.setText(f"{_format_duration(eta_seconds)} remaining")
 
     def _estimate_remaining_seconds(self, now: float) -> float | None:
         if self._display_percent <= 0 or now - self._eta_started_at < 2.0 or not self._eta_samples:
@@ -332,9 +367,10 @@ def _operation_window_title(operation: str) -> str:
 
 
 def _format_duration(seconds: float) -> str:
+    """Format remaining time without 'about' or 'less than' prefixes."""
     total_seconds = max(0, int(math.ceil(seconds)))
     if total_seconds < 60:
-        return "less than 1 min"
+        return "1 min"
     minutes = max(1, int(math.ceil(total_seconds / 60)))
     return f"{minutes} min"
 
