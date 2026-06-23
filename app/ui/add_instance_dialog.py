@@ -60,6 +60,7 @@ import psutil
 
 from core.launcher import LauncherService
 from ui.icon_selector_dialog import IconSelectorDialog
+from ui.modrinth_modpack_browser import ModrinthModpackBrowser
 from ui.icon_utils import load_scaled_icon
 from ui.responsive import fitted_window_size, scaled_px, screen_scale
 from ui.theme import theme_palette
@@ -1877,9 +1878,9 @@ class AddInstanceDialog(QDialog):
         return page
 
     def _open_modrinth_selector(self) -> None:
-        dialog = ModrinthModpackSelectorDialog(self.service, self)
-        dialog.install_ready.connect(self._accept_modrinth_modpack)
-        dialog.exec()
+        browser = ModrinthModpackBrowser(self.service, self)
+        browser.install_ready.connect(self._accept_modrinth_modpack)
+        browser.exec()
 
     def _build_transfer_column(self, title_text: str, list_widget: QListWidget) -> QWidget:
         column = QWidget()
