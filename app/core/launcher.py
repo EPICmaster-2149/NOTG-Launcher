@@ -6358,6 +6358,10 @@ def _modrinth_content_details(instance: InstanceRecord, content_type: str, proje
             "file_name": _optional_str(file_info.get("filename")),
             "file_size": _coerce_non_negative_int(file_info.get("size")),
             "dependencies_count": len(dependencies),
+            # Pass through version-level metadata that search results may lack
+            "loaders": version.get("loaders") or project.get("loaders") or [],
+            "game_versions": version.get("game_versions") or project.get("game_versions") or [],
+            "dependencies": dependencies,
         }
     )
     return details
