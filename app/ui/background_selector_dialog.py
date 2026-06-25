@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - depends on the local Qt build
     QMediaPlayer = None
     QVideoSink = None
 
-from core.launcher import BACKGROUND_SUFFIXES, BackgroundRecord, LauncherService
+from core.launcher import BACKGROUND_SUFFIXES, BackgroundRecord, LauncherService, VIDEO_SUFFIXES
 from ui.responsive import fitted_window_size, scaled_px, screen_scale
 from ui.theme import theme_palette
 from ui.topbar import ModernButton, blend_colors
@@ -188,6 +188,8 @@ class BackgroundTile(QWidget):
 
         if self.background_record.is_video:
             self._draw_video_tag(painter, preview, scale)
+        if self.background_record.is_laggy:
+            self._draw_laggy_warning(painter, preview, scale)
 
         label_rect = rect.adjusted(12 * scale, rect.height() - 49 * scale, -12 * scale, -6 * scale)
         font = QFont(self.font())
@@ -220,6 +222,27 @@ class BackgroundTile(QWidget):
         painter.setPen(QColor("#dcecff"))
         painter.setFont(tag_font)
         painter.drawText(tag, Qt.AlignCenter, text)
+
+    def _draw_laggy_warning(self, painter: QPainter, preview: QRectF, scale: float) -> None:
+        """Draw a warning symbol (⚠) in the top-right corner for potentially laggy 4K videos."""
+        warning_font = QFont(self.font())
+        warning_font.setPointSizeF(max(9.0, 11.0 * scale))
+        warning_font.setWeight(QFont.Weight.Bold)
+        metrics = QFontMetrics(warning_font)
+        text = "⚠"
+        warning_size = int(26 * scale)
+        tag = QRectF(
+            preview.right() - warning_size - 6 * scale,
+            preview.top() + 6 * scale,
+            warning_size,
+            warning_size,
+        )
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 180, 0, 220))
+        painter.drawRoundedRect(tag, 6 * scale, 6 * scale)
+        painter.setPen(QColor(40, 20, 0))
+        painter.setFont(warning_font)
+        painter.drawText(tag, Qt.AlignCenter, "⚠")
 
 
 class BackgroundSelectorDialog(QDialog):

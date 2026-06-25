@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover - depends on the local Qt build
     QMediaPlayer = None
     QGraphicsVideoItem = None
 
+from core.global_hotkey import GlobalHotkeyManager
 from core.launcher import InstanceRecord, JavaCompatibilityError, LauncherService, VIDEO_SUFFIXES
 from ui.instance_card import InstanceCard
 from ui.message_utils import show_java_error
@@ -141,6 +142,7 @@ class MainWindow(QWidget):
         self._developer_mode_active = self.service.get_player_name() == DEVELOPER_ACCOUNT_NAME
         self._startup_update_worker: CheckUpdateWorker | None = None
         self._startup_update_check_started = False
+        self._global_hotkey: GlobalHotkeyManager | None = None
 
         self.setObjectName("appRoot")
         self.setWindowTitle("NOTG Launcher")
@@ -170,6 +172,26 @@ class MainWindow(QWidget):
         QTimer.singleShot(0, self._apply_initial_restore_request)
         QTimer.singleShot(1800, self._start_custom_skin_loader_check)
         QTimer.singleShot(1200, self._check_for_updates_on_startup)
+        QTimer.singleShot(100, self._init_global_hotkey)
+
+    def _init_global_hotkey(self) -> None:
+        """Initialize the global hotkey manager so F3+M works even when window is hidden/minimized."""
+        try:
+            self._global_hotkey = GlobalHotkeyManager(self)
+            self._global_hotkey.f3_m_triggered.connect(self._on_global_f3_m)
+            self._global_hotkey.install(int(self.winId()))
+            self._global_hotkey.register_f3_m()
+            self._global_hotkey.set_enabled(self.service.get_f3_kill_enabled())
+            logger = __import__("logging").getLogger(__name__)
+            logger.info("Global hotkey F3+M initialized for background mode")
+        except Exception as exc:
+            logger = __import__("logging").getLogger(__name__)
+            logger.debug("Could not register global hotkey: %s", exc)
+
+    def _on_global_f3_m(self) -> None:
+        """Handle global F3+M hotkey press (works even in background)."""
+        if self.service.get_f3_kill_enabled():
+            self._kill_all_running_instances()
 
     def showEvent(self, event) -> None:
         self._ensure_screen_tracking()

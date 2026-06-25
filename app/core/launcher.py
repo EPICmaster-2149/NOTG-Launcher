@@ -368,6 +368,7 @@ class BackgroundRecord:
     absolute_path: str
     is_default: bool
     is_video: bool
+    is_laggy: bool = False
 
 
 @dataclass(slots=True)
@@ -3398,6 +3399,10 @@ class LauncherService:
             if not path.is_file() or path.suffix.lower() not in BACKGROUND_SUFFIXES:
                 continue
             relative_path = self._user_background_reference(path)
+            is_video = path.suffix.lower() in VIDEO_SUFFIXES
+            is_laggy = False
+            if is_video:
+                is_laggy = _check_video_is_4k(str(path.resolve()))
             records.append(
                 BackgroundRecord(
                     background_id=relative_path,
@@ -3405,7 +3410,8 @@ class LauncherService:
                     relative_path=relative_path,
                     absolute_path=str(path.resolve()),
                     is_default=False,
-                    is_video=path.suffix.lower() in VIDEO_SUFFIXES,
+                    is_video=is_video,
+                    is_laggy=is_laggy,
                 )
             )
         return records
@@ -6350,6 +6356,27 @@ def _modrinth_content_details(instance: InstanceRecord, content_type: str, proje
         for dep in version.get("dependencies", [])
         if isinstance(dep, dict) and str(dep.get("dependency_type") or "").lower() == "required"
     ]
+    # Resolve dependency project IDs to actual names for proper display
+    resolved_dep_names: list[str] = []
+    for dep in dependencies[:10]:  # Limit to avoid too many API calls
+        dep_project_id = _optional_str(dep.get("project_id"))
+        if dep_project_id:
+            try:
+                dep_project = _request_json(f"{MODRINTH_API_BASE}/project/{dep_project_id}")
+                if isinstance(dep_project, dict):
+                    name = _optional_str(dep_project.get("title")) or _optional_str(dep_project.get("slug")) or dep_project_id
+                    resolved_dep_names.append(name)
+                else:
+                    resolved_dep_names.append(dep_project_id)
+            except Exception:
+                resolved_dep_names.append(dep_project_id)
+        else:
+            dep_version_id = _optional_str(dep.get("version_id"))
+            if dep_version_id:
+                resolved_dep_names.append(dep_version_id)
+            else:
+                resolved_dep_names.append("?")
+
     details = dict(project)
     details.update(
         {
@@ -6362,6 +6389,7 @@ def _modrinth_content_details(instance: InstanceRecord, content_type: str, proje
             "loaders": version.get("loaders") or project.get("loaders") or [],
             "game_versions": version.get("game_versions") or project.get("game_versions") or [],
             "dependencies": dependencies,
+            "_resolved_dependency_names": resolved_dep_names,
         }
     )
     return details
@@ -8093,3 +8121,52 @@ def _required_str(value: Any, label: str) -> str:
     if not text:
         raise ValueError(f"Missing {label}.")
     return text
+
+
+def _check_video_is_4k(file_path: str) -> bool:
+    """Check if a video file has a resolution of 3840x2160 (4K) or higher.
+    
+    Uses ffprobe to check video stream dimensions, with file size heuristic as fallback.
+    """
+    try:
+        import subprocess
+        import os
+        import json as _json
+        
+        # Try using ffprobe first (most reliable)
+        ffprobe_cmd = "ffprobe"
+        if os.name == "nt":
+            ffprobe_cmd = "ffprobe.exe"
+        
+        try:
+            completed = subprocess.run(
+                [ffprobe_cmd, "-v", "quiet", "-print_format", "json",
+                 "-show_streams", "--", file_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            if completed.returncode == 0:
+                info = _json.loads(completed.stdout)
+                streams = info.get("streams") if isinstance(info, dict) else []
+                for stream in streams:
+                    if isinstance(stream, dict) and stream.get("codec_type") == "video":
+                        width = int(stream.get("width", 0) or 0)
+                        height = int(stream.get("height", 0) or 0)
+                        if width >= 3840 or height >= 2160:
+                            return True
+                        return False
+        except (OSError, subprocess.SubprocessError, ValueError, _json.JSONDecodeError):
+            pass
+        
+        # Fallback: Use file size heuristic for large 4K files
+        try:
+            size_mb = Path(file_path).stat().st_size / (1024 * 1024)
+            # 4K videos are typically > 50MB even with compression
+            if size_mb > 200:
+                return True
+        except OSError:
+            pass
+            
+    except ImportError:
+        pass
+    
+    return False

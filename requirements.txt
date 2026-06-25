@@ -1,36 +1,57 @@
-black==26.3.1
-certifi==2026.2.25
-charset-normalizer==3.4.6
-click==8.3.1
-flake8==7.3.0
-idna==3.11
-iniconfig==2.3.0
-mccabe==0.7.0
-minecraft-launcher-lib==8.0
-mutagen==1.47.0
-mypy_extensions==1.1.0
-packaging==26.0
-pathspec==1.0.4
-pillow==12.1.1
-platformdirs==4.9.4
-pluggy==1.6.0
-psutil==7.2.2
-pypresence==4.6.1
-pycodestyle==2.14.0
-pyflakes==3.4.0
-Pygments==2.19.2
-python-dotenv==1.2.2
+# =============================================================================
+# NOTG Launcher - Python Dependencies
+# =============================================================================
+#
+# INSTALLATION
+#   pip install -r requirements.txt          (all deps, including dev/testing)
+#   pip install -r requirements-runtime.txt  (production runtime only)
+#
+# =============================================================================
+# RUNTIME DEPENDENCIES
+#   These are directly imported by the application at runtime.
+# =============================================================================
+
 PySide6==6.10.2
-PySide6_Addons==6.10.2
-PySide6_Essentials==6.10.2
+minecraft-launcher-lib==8.0
+requests==2.32.5
+psutil==7.2.2
+platformdirs==4.9.4
+pillow==12.1.1
+
+# ── Optional runtime (try/except guarded) ──────────────────────────────────
+python-dotenv==1.2.2
+pypresence==4.6.1
+spotipy==2.25.2
+yt-dlp==2026.3.17
+mutagen==1.47.0
+
+# =============================================================================
+# DEVELOPMENT & TESTING ONLY
+#   Not used by the application at runtime. Not bundled by PyInstaller.
+# =============================================================================
+
+# Testing
 pytest==9.0.2
 pytest-qt==4.5.0
-pytokens==0.4.1
-PyYAML==6.0.3
-requests==2.32.5
-shiboken6==6.10.2
-spotipy==2.25.2
-typing_extensions==4.15.0
-urllib3==2.6.3
-watchdog==6.0.0
-yt-dlp==2026.3.17
+
+# Code quality
+black==26.3.1
+flake8==7.3.0
+pycodestyle==2.14.0
+pyflakes==3.4.0
+mccabe==0.7.0
+
+# Build tools
+PyInstaller>=6.0,<7.0
+
+# Unused transitive / orphan entries (kept for reference but NOT needed)
+#   PyYAML==6.0.3         # never imported
+#   pytokens==0.4.1       # never imported
+#   watchdog==6.0.0       # never imported
+#   Pygments==2.19.2      # never imported
+#   click==8.3.1          # never imported
+#   mypy_extensions==1.1.0  # never imported
+#   pathspec==1.0.4       # never imported
+#   pluggy==1.6.0         # never imported
+#   iniconfig==2.3.0      # never imported
+#   packaging==26.0       # never imported

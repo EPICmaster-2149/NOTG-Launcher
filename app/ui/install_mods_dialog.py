@@ -1435,11 +1435,20 @@ class InstallModsDialog(QDialog):
                 """)
                 lb_layout.insertWidget(lb_layout.count() - 1, lbl)
 
-        # Dependencies
+        # Dependencies - resolved to actual names
         deps = project.get("dependencies") or []
         if isinstance(deps, list) and deps:
             dep_count = len(deps)
-            dep_names = [str(d.get("project_id") or d.get("version_id") or "?") for d in deps[:5]]
+            # Use resolved dependency names if available (set by worker), otherwise show IDs
+            dep_names_raw = []
+            for d in deps[:5]:
+                pid = str(d.get("project_id") or d.get("version_id") or "?")
+                dep_names_raw.append(pid)
+            resolved_names = project.get("_resolved_dependency_names") or []
+            if resolved_names:
+                dep_names = resolved_names[:5]
+            else:
+                dep_names = dep_names_raw
             dep_text = ", ".join(dep_names)
             if dep_count > 5:
                 dep_text += f" + {dep_count - 5} more"
