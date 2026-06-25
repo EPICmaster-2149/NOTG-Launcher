@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
-except ImportError:  # pragma: no cover - depends on the local Qt build
+except ImportError:
     QAudioOutput = None
     QMediaPlayer = None
     QGraphicsVideoItem = None
@@ -83,7 +83,7 @@ class LaunchWorker(QThread):
                 updated = self.instance
             updated.pid = pid
             updated.status = "Launching"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.failed.emit(self.instance.instance_id, str(exc))
             return
 
@@ -100,7 +100,7 @@ class CustomSkinLoaderWorker(QThread):
     def run(self) -> None:
         try:
             result = self.service.ensure_custom_skin_loader_for_all_instances()
-        except Exception:  # noqa: BLE001
+        except Exception:
             result = {}
         self.finished_check.emit(result)
 
@@ -175,7 +175,6 @@ class MainWindow(QWidget):
         QTimer.singleShot(100, self._init_global_hotkey)
 
     def _init_global_hotkey(self) -> None:
-        """Initialize the global hotkey manager so F3+M works even when window is hidden/minimized."""
         try:
             self._global_hotkey = GlobalHotkeyManager(self)
             self._global_hotkey.f3_m_triggered.connect(self._on_global_f3_m)
@@ -189,7 +188,6 @@ class MainWindow(QWidget):
             logger.debug("Could not register global hotkey: %s", exc)
 
     def _on_global_f3_m(self) -> None:
-        """Handle global F3+M hotkey press (works even in background)."""
         if self.service.get_f3_kill_enabled():
             self._kill_all_running_instances()
 
@@ -518,7 +516,7 @@ class MainWindow(QWidget):
             account_name = action.split(":", 1)[1]
             try:
                 self.service.set_active_account(account_name)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 QMessageBox.warning(self, "Accounts", str(exc))
                 return
             self._sync_accounts_ui()
@@ -528,7 +526,7 @@ class MainWindow(QWidget):
             account_id = action.split(":", 1)[1]
             try:
                 self.service.set_active_account(account_id)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 QMessageBox.warning(self, "Accounts", str(exc))
                 return
             self._sync_accounts_ui()
@@ -547,7 +545,7 @@ class MainWindow(QWidget):
         except JavaCompatibilityError as exc:
             show_java_error(self, "Java Required", str(exc))
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             QMessageBox.critical(self, "Install Instance", str(exc))
             return
 
@@ -641,7 +639,7 @@ class MainWindow(QWidget):
         except JavaCompatibilityError as exc:
             show_java_error(self, "Java Required", str(exc))
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             QMessageBox.critical(self, "Launch Failed", str(exc))
             return
 
@@ -688,7 +686,7 @@ class MainWindow(QWidget):
         except JavaCompatibilityError as exc:
             show_java_error(self, "Java Required", str(exc))
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             QMessageBox.critical(self, "Copy Instance", str(exc))
             return
 
@@ -718,7 +716,7 @@ class MainWindow(QWidget):
 
         try:
             self.service.delete_instance(instance)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             QMessageBox.critical(self, "Delete Instance", str(exc))
             return
 
@@ -791,7 +789,7 @@ class MainWindow(QWidget):
     def _account_avatar_path(self, account_id: str) -> str | None:
         try:
             return self.service.account_avatar_path(account_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
 
     def _open_manage_accounts_dialog(self) -> None:
@@ -892,7 +890,7 @@ class MainWindow(QWidget):
             self._background_video_item = QGraphicsVideoItem()
             try:
                 self._background_video_item.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             self._background_video_scene.addItem(self._background_video_item)
 
@@ -920,7 +918,7 @@ class MainWindow(QWidget):
             self._background_video_player.mediaStatusChanged.connect(self._handle_background_media_status)
             try:
                 self._background_video_player.setLoops(QMediaPlayer.Loops.Infinite)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         elif self._background_video_item is not None:
             self._background_video_player.setVideoOutput(self._background_video_item)

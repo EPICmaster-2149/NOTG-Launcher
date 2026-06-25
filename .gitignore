@@ -28,6 +28,7 @@ instances/*
 !instances/.keep
 
 runtime/
+AUTHENTICATION_AUDIT.md
 
 # OS
 .DS_Store

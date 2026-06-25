@@ -1,5 +1,3 @@
-"""Discord Rich Presence integration for NOTG Launcher."""
-
 from __future__ import annotations
 
 import logging
@@ -8,7 +6,7 @@ from typing import Any
 
 try:
     from pypresence import Presence
-except ImportError:  # pragma: no cover - depends on local environment
+except ImportError:
     Presence = None
 
 logger = logging.getLogger(__name__)
@@ -18,18 +16,9 @@ APPLICATION_ID = "1496879744858325066"
 LARGE_IMAGE_KEY = "notg_launcher_logo"
 SMALL_IMAGE_KEY = "graphicslogo"
 MAX_ACTIVITY_TEXT_LENGTH = 128
-MISSING_PYPRESENCE_MESSAGE = (
-    "Discord Rich Presence skipped because pypresence is not installed."
-)
-MISSING_APPLICATION_ID_MESSAGE = (
-    "Discord Rich Presence skipped because the application id is " "not configured."
-)
-RETRY_WITHOUT_IMAGES_MESSAGE = "Retrying Discord RPC update without image assets."
 
 
 class DiscordRichPresence:
-    """Maintain a single Discord RPC connection for one runtime session."""
-
     def __init__(self, *, application_id: str = APPLICATION_ID):
         self.application_id = str(application_id).strip()
         self._rpc: Presence | None = None
@@ -45,10 +34,10 @@ class DiscordRichPresence:
         if self._connected:
             return True
         if Presence is None:
-            logger.debug(MISSING_PYPRESENCE_MESSAGE)
+            logger.debug("Discord Rich Presence skipped because pypresence is not installed.")
             return False
         if not self.is_configured():
-            logger.debug(MISSING_APPLICATION_ID_MESSAGE)
+            logger.debug("Discord Rich Presence skipped because the application id is not configured.")
             return False
 
         for attempt in range(max_retries):
@@ -58,7 +47,7 @@ class DiscordRichPresence:
                 self._connected = True
                 logger.info("Connected to Discord RPC")
                 return True
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug("Discord RPC connection attempt failed: %s", exc)
                 self._reset_connection()
                 if attempt < max_retries - 1:
@@ -110,13 +99,13 @@ class DiscordRichPresence:
         try:
             self._rpc.update(**payload)
             self._last_payload = normalized_payload
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("Discord RPC update failed: %s", exc)
             self._reset_connection()
             if self._image_assets_enabled and (
                 "large_image" in payload or "small_image" in payload
             ):
-                logger.debug(RETRY_WITHOUT_IMAGES_MESSAGE)
+                logger.debug("Retrying Discord RPC update without image assets.")
                 self._image_assets_enabled = False
                 payload.pop("large_image", None)
                 payload.pop("large_text", None)
@@ -132,7 +121,7 @@ class DiscordRichPresence:
                 self._rpc.clear(pid=self._activity_pid)
             else:
                 self._rpc.clear()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("Discord RPC clear failed: %s", exc)
         finally:
             self._last_payload = None
@@ -142,7 +131,7 @@ class DiscordRichPresence:
             return
         try:
             self._rpc.close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("Discord RPC close failed: %s", exc)
         finally:
             self._rpc = None
@@ -156,7 +145,7 @@ class DiscordRichPresence:
         try:
             self._rpc.update(**payload)
             self._last_payload = normalized_payload
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("Discord RPC retry failed: %s", exc)
             self._reset_connection()
 

@@ -423,7 +423,7 @@ class MinecraftOptimizationProfile:
 
 
 class JavaCompatibilityError(RuntimeError):
-    """Raised when no installed Java runtime can launch the selected Minecraft version."""
+    pass
 
 
 @dataclass(slots=True)
@@ -8124,10 +8124,6 @@ def _required_str(value: Any, label: str) -> str:
 
 
 def _check_video_is_4k(file_path: str) -> bool:
-    """Check if a video file has a resolution of 3840x2160 (4K) or higher.
-    
-    Uses ffprobe to check video stream dimensions, with file size heuristic as fallback.
-    """
     try:
         import subprocess
         import os

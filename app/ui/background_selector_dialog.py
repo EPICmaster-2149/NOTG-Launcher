@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - depends on the local Qt build
 
 from core.launcher import BACKGROUND_SUFFIXES, BackgroundRecord, LauncherService, VIDEO_SUFFIXES
 from ui.responsive import fitted_window_size, scaled_px, screen_scale
-from ui.theme import theme_palette
+from ui.theme import current_theme_mode, theme_palette
 from ui.topbar import ModernButton, blend_colors
 
 
@@ -216,10 +216,11 @@ class BackgroundTile(QWidget):
         text = "VIDEO"
         width = metrics.horizontalAdvance(text) + int(13 * scale)
         tag = QRectF(preview.left() + 8 * scale, preview.top() + 8 * scale, width, 21 * scale)
+        roles = theme_palette(self)["roles"]
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(16, 26, 43, 210))
+        painter.setBrush(roles["surface_3"])
         painter.drawRoundedRect(tag, 6 * scale, 6 * scale)
-        painter.setPen(QColor("#dcecff"))
+        painter.setPen(roles["text"])
         painter.setFont(tag_font)
         painter.drawText(tag, Qt.AlignCenter, text)
 

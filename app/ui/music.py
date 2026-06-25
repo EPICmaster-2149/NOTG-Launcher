@@ -65,7 +65,7 @@ from core.config import FEATURE_NOT_IMPLEMENTED_MESSAGE, get_env_value, load_loc
 from core.launcher import MUSIC_SUFFIXES, LauncherService, MusicPlaylistRecord, MusicRecord
 from ui.app_icon import application_icon
 from ui.responsive import fitted_window_size, scaled_px
-from ui.theme import theme_palette
+from ui.theme import current_theme_mode, theme_palette
 from ui.topbar import ModernButton, blend_colors
 
 
@@ -1667,7 +1667,9 @@ class TrackRowWidget(QFrame):
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         accent = self.property("accentColor")
         accent = QColor(accent) if isinstance(accent, QColor) else DEFAULT_ACCENT
-        bg = QColor(10, 16, 26, 118)
+        roles = theme_palette(self)["roles"]
+        bg = QColor(roles["surface_1"])
+        bg.setAlpha(148 if current_theme_mode(self) == "light" else 118)
         hover = QColor(accent)
         hover.setAlpha(42)
         active = QColor(accent)
@@ -2562,24 +2564,25 @@ class MusicManagerDialog(QDialog):
 
     def paintEvent(self, event) -> None:
         del event
+        palette = theme_palette(self)
+        roles = palette["roles"]
+        light_mode = current_theme_mode(self) == "light"
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        base = QColor("#000000")
-        deep = QColor("#07182a")
+        base = QColor(roles["background"])
+        deep = QColor(roles["background_mid"])
         accent = QColor(self._accent)
-        gradient = painter.window()
-        del gradient
         rect = self.rect()
-        linear = QColor(deep)
         painter.fillRect(rect, base)
         wash = QColor(accent)
-        wash.setAlpha(34)
-        painter.fillRect(rect, QColor("#020710"))
+        wash.setAlpha(12 if light_mode else 34)
+        if not light_mode:
+            painter.fillRect(rect, QColor("#020710"))
         path = QPainterPath()
         path.addEllipse(QRectF(-self.width() * 0.18, -self.height() * 0.24, self.width() * 0.9, self.height() * 0.74))
         painter.fillPath(path, wash)
-        lower = QColor(linear)
-        lower.setAlpha(116)
+        lower = QColor(deep)
+        lower.setAlpha(48 if light_mode else 116)
         painter.fillRect(rect.adjusted(0, int(self.height() * 0.25), 0, 0), lower)
 
     def resizeEvent(self, event) -> None:

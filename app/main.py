@@ -51,7 +51,6 @@ def main():
         try:
             UpdateInstaller(sys.executable, str(service.cache_root)).cleanup_stale_update_artifacts()
         except Exception:
-            # Startup should continue even if a previous update left locked files.
             pass
 
     restore_request = {

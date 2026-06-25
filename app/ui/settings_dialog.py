@@ -24,7 +24,7 @@ from core.launcher import LauncherService, VIDEO_SUFFIXES
 from ui.app_icon import application_icon
 from ui.background_selector_dialog import BackgroundSelectorDialog
 from ui.responsive import fitted_window_size, scaled_px
-from ui.theme import apply_theme, current_theme_accent, set_theme_accent, theme_palette
+from ui.theme import apply_theme, current_theme_accent, current_theme_mode, set_theme_accent, theme_palette
 from ui.topbar import ModernButton, blend_colors
 from ui.update_settings import UpdateSettingsPanel
 
@@ -444,8 +444,11 @@ class ThemeColorWheel(QWidget):
 
         painter.setPen(QPen(border, 1.4))
 
+        light_mode = current_theme_mode(self) == "light"
+        roles = theme_palette(self)["roles"]
+        base_bg = QColor("#070a10") if not light_mode else QColor("#f0f2f5")
         fill = blend_colors(
-            QColor("#070a10"),
+            base_bg,
             QColor(active_color),
             0.16 if self._adaptive else 0.22
         )
@@ -461,7 +464,7 @@ class ThemeColorWheel(QWidget):
         font.setWeight(QFont.Bold)
 
         painter.setFont(font)
-        painter.setPen(QColor("#edf2ff"))
+        painter.setPen(QColor(roles["text"]))
 
         painter.drawText(
             preview.adjusted(0, -8, 0, 0),
@@ -474,7 +477,7 @@ class ThemeColorWheel(QWidget):
 
         painter.setFont(font)
 
-        painter.setPen(QColor(190, 203, 224, 190))
+        painter.setPen(QColor(roles["text_muted"]))
 
         painter.drawText(
             preview.adjusted(0, 18, 0, 0),

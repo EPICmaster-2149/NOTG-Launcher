@@ -10,7 +10,6 @@ FEATURE_NOT_IMPLEMENTED_MESSAGE = "This feature is not yet implemented."
 
 
 def load_local_env(*roots: Path | str | None) -> None:
-    """Load local .env files without overriding real environment variables."""
     for env_file in _candidate_env_files(*roots):
         if env_file in _LOADED_ENV_FILES or not env_file.is_file():
             continue
