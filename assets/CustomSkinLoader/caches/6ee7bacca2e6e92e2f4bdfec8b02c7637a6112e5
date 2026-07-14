@@ -1,9 +1,0 @@
-{
-  "id" : "cc65451992ff4864bb569bac2ae4c113",
-  "name" : "FRISPY",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NDU1ODU4NSwKICAicHJvZmlsZUlkIiA6ICJjYzY1NDUxOTkyZmY0ODY0YmI1NjliYWMyYWU0YzExMyIsCiAgInByb2ZpbGVOYW1lIiA6ICJGUklTUFkiLAogICJ0ZXh0dXJlcyIgOiB7CiAgICAiU0tJTiIgOiB7CiAgICAgICJ1cmwiIDogImh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvNGYyNWQwMjY1MDM0NmZmYzJmYTUwNWQ5OWIwOTQyYTUxNTlkMTA3MDIwYTliYzc4OGIyYTExNDQ3MTgxNzRlYiIKICAgIH0KICB9Cn0="
-  } ],
-  "profileActions" : [ ]
-}

@@ -1,9 +1,0 @@
-{
-  "id" : "ddfba8d183b94e99bf02ebf3e7a9f0b3",
-  "name" : "OliDusi",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NTg4MDAyOSwKICAicHJvZmlsZUlkIiA6ICJkZGZiYThkMTgzYjk0ZTk5YmYwMmViZjNlN2E5ZjBiMyIsCiAgInByb2ZpbGVOYW1lIiA6ICJPbGlEdXNpIiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2FiNzUzMDVkZmUyM2UzYjUxYWFhMGYyMDViMTc1YzVhODljNzY4NTY4ZDM4OWI5NzNjN2FiZTNhYmMxNWMyMWQiCiAgICB9CiAgfQp9"
-  } ],
-  "profileActions" : [ ]
-}

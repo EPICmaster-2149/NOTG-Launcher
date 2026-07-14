@@ -1,9 +1,0 @@
-{
-  "id" : "05370a4b0ba14288b1f9e9faa6e0d196",
-  "name" : "Deorist",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzgxMzAzOCwKICAicHJvZmlsZUlkIiA6ICIwNTM3MGE0YjBiYTE0Mjg4YjFmOWU5ZmFhNmUwZDE5NiIsCiAgInByb2ZpbGVOYW1lIiA6ICJEZW9yaXN0IiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlLzQ2M2NmYTNmYzE2YTIwMmI5YmQ2ODBkZGFmNjk3MGI4NWQyN2RlZWQ5ZTZhODg0MTQ4MDcxZjQ1Y2ZiZTBhYTkiCiAgICB9CiAgfQp9"
-  } ],
-  "profileActions" : [ ]
-}

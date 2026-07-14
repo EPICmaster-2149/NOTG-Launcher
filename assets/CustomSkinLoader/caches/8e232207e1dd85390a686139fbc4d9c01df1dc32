@@ -1,9 +1,0 @@
-{
-  "id" : "1acec4bc45214b269bf5b011dac86f32",
-  "name" : "xxhaze",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzgxMzEyNCwKICAicHJvZmlsZUlkIiA6ICIxYWNlYzRiYzQ1MjE0YjI2OWJmNWIwMTFkYWM4NmYzMiIsCiAgInByb2ZpbGVOYW1lIiA6ICJ4eGhhemUiLAogICJ0ZXh0dXJlcyIgOiB7CiAgICAiU0tJTiIgOiB7CiAgICAgICJ1cmwiIDogImh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvYWY0NzY2ZGJhNzVhOTk1ZjUxMWEzMDFkMjljMzY3Y2YxMGQyMDQ4OGM4ZmVhZWQ4OWY0NTY3NzM5YmE5MDI1NiIKICAgIH0KICB9Cn0="
-  } ],
-  "profileActions" : [ ]
-}

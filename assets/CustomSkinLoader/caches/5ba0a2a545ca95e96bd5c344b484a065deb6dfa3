@@ -1,9 +1,0 @@
-{
-  "id" : "7b0546772f86491da88308880be7fafd",
-  "name" : "Srijith",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzc5NzA5NSwKICAicHJvZmlsZUlkIiA6ICI3YjA1NDY3NzJmODY0OTFkYTg4MzA4ODgwYmU3ZmFmZCIsCiAgInByb2ZpbGVOYW1lIiA6ICJTcmlqaXRoIiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlLzMxZjQ3N2ViMWE3YmVlZTYzMWMyY2E2NGQwNmY4ZjY4ZmE5M2EzMzg2ZDA0NDUyYWIyN2Y0M2FjZGYxYjYwY2IiCiAgICB9CiAgfQp9"
-  } ],
-  "profileActions" : [ ]
-}

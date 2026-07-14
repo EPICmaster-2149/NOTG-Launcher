@@ -1,9 +1,0 @@
-{
-  "id" : "d916131fba7644ad96743dd392d588c6",
-  "name" : "Moman16",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzc4MjcxMSwKICAicHJvZmlsZUlkIiA6ICJkOTE2MTMxZmJhNzY0NGFkOTY3NDNkZDM5MmQ1ODhjNiIsCiAgInByb2ZpbGVOYW1lIiA6ICJNb21hbjE2IiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2E4NTM3NzAxMzc3MTJkZWQwMzJkNmY1MzgxNmZhYzE3MzRjOGZhMjFhOWQxZDJjZjNkNTcwMGY0MTMxYmVhNzYiCiAgICB9CiAgfQp9"
-  } ],
-  "profileActions" : [ ]
-}

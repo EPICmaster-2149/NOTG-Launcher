@@ -1,9 +1,0 @@
-{
-  "id" : "798ab1316f9a431c96242fb1b15b26dc",
-  "name" : "bxrko",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NjA2NTQxOCwKICAicHJvZmlsZUlkIiA6ICI3OThhYjEzMTZmOWE0MzFjOTYyNDJmYjFiMTViMjZkYyIsCiAgInByb2ZpbGVOYW1lIiA6ICJieHJrbyIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS82MmRjZTBiOWM1ODNiZWM2MmZiOWMwNTM2MmZjOGUzN2MwNjM3N2RiMTQ3ZDc0NDNkOTE2NGMyNWQ5OWQwMWYiLAogICAgICAibWV0YWRhdGEiIDogewogICAgICAgICJtb2RlbCIgOiAic2xpbSIKICAgICAgfQogICAgfQogIH0KfQ=="
-  } ],
-  "profileActions" : [ ]
-}

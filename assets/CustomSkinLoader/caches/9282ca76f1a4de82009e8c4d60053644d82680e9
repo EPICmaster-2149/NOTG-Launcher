@@ -1,9 +1,0 @@
-{
-  "id" : "ffbe9ec0f65640889954a21f1f35f5ad",
-  "name" : "Jsbetter",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzc4MzEyMCwKICAicHJvZmlsZUlkIiA6ICJmZmJlOWVjMGY2NTY0MDg4OTk1NGEyMWYxZjM1ZjVhZCIsCiAgInByb2ZpbGVOYW1lIiA6ICJKc2JldHRlciIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS8xYTRhZjcxODQ1NWQ0YWFiNTI4ZTdhNjFmODZmYTI1ZTZhMzY5ZDE3NjhkY2IxM2Y3ZGYzMTlhNzEzZWI4MTBiIiwKICAgICAgIm1ldGFkYXRhIiA6IHsKICAgICAgICAibW9kZWwiIDogInNsaW0iCiAgICAgIH0KICAgIH0KICB9Cn0="
-  } ],
-  "profileActions" : [ ]
-}

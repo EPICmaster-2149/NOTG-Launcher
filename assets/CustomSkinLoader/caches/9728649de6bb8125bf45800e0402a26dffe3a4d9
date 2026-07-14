@@ -1,9 +1,0 @@
-{
-  "id" : "73ad907d36964c2fb6ce2a4e293e681d",
-  "name" : "Chrome67",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NDc1MDk2OSwKICAicHJvZmlsZUlkIiA6ICI3M2FkOTA3ZDM2OTY0YzJmYjZjZTJhNGUyOTNlNjgxZCIsCiAgInByb2ZpbGVOYW1lIiA6ICJDaHJvbWU2NyIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS8xYWJjODAzMDIyZDgzMDBhYjc1NzhiMTg5Mjk0Y2NlMzk2MjJkOWE0MDRjZGMwMGQzZmVhY2ZkZjQ1YmU2OTgxIgogICAgfQogIH0KfQ=="
-  } ],
-  "profileActions" : [ ]
-}

@@ -1,9 +1,0 @@
-{
-  "id" : "4f5fdd027fd04ffd93d1d1c77df747c5",
-  "name" : "Oreo1215",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzgyOTE2NSwKICAicHJvZmlsZUlkIiA6ICI0ZjVmZGQwMjdmZDA0ZmZkOTNkMWQxYzc3ZGY3NDdjNSIsCiAgInByb2ZpbGVOYW1lIiA6ICJPcmVvMTIxNSIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS9kYmNlODljNzgxMDA1Mjk4ZTFkZDNlYmVlNjIyY2YxY2ExZjIyNGEzZGQ2NTE5MjhmYzZjZmI3MWFhZGE5MGY3IgogICAgfQogIH0KfQ=="
-  } ],
-  "profileActions" : [ ]
-}

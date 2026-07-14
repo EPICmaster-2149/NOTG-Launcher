@@ -1,9 +1,0 @@
-{
-  "id" : "0d31df598cc740cfa4f4d9cd305f141f",
-  "name" : "REAL_MARIO",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1MzU1MDQ5OCwKICAicHJvZmlsZUlkIiA6ICIwZDMxZGY1OThjYzc0MGNmYTRmNGQ5Y2QzMDVmMTQxZiIsCiAgInByb2ZpbGVOYW1lIiA6ICJSRUFMX01BUklPIiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2UxMzYzNTEzYzdiYzkyYmI1M2Y0ZjM1MzkxMjNiMzViYWE1NDAxMmYxMTRmMWI5MGI3MDgwMDk5MDhjMjE5OTkiCiAgICB9CiAgfQp9"
-  } ],
-  "profileActions" : [ ]
-}

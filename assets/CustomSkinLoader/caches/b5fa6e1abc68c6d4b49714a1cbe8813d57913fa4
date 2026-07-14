@@ -1,9 +1,0 @@
-{
-  "id" : "38648d833d3747a390d34499cf4e1d57",
-  "name" : "Hiichamx",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMjk4MjUxOCwKICAicHJvZmlsZUlkIiA6ICIzODY0OGQ4MzNkMzc0N2EzOTBkMzQ0OTljZjRlMWQ1NyIsCiAgInByb2ZpbGVOYW1lIiA6ICJIaWljaGFteCIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS9mYzI3YTAwOWU2YTgyY2ZhNTIyYjJlMDRiMmE3ZGRiY2Y4NjcwNWMzMWQwZWNmNzlmOGQ1OWQ4NjlkNzgzYTUzIgogICAgfQogIH0KfQ=="
-  } ],
-  "profileActions" : [ ]
-}

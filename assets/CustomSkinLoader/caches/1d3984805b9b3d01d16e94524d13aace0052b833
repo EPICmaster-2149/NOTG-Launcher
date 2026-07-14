@@ -1,9 +1,0 @@
-{
-  "id" : "c32aae63fe8d4e13a001eacba400aa7a",
-  "name" : "pscht",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1Mzk2MDM4NSwKICAicHJvZmlsZUlkIiA6ICJjMzJhYWU2M2ZlOGQ0ZTEzYTAwMWVhY2JhNDAwYWE3YSIsCiAgInByb2ZpbGVOYW1lIiA6ICJwc2NodCIsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS9mNjkzOGMxZTI4N2E5MmIwNjZiYmI0NDc4MTJiNzliYmJhMzBhYzkxYmY5MmEzNjAzMDY2MzVjZjkxMGE0ZmQiCiAgICB9CiAgfQp9"
-  } ],
-  "profileActions" : [ ]
-}

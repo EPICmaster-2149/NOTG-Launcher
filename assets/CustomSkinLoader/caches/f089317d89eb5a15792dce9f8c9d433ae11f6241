@@ -1,9 +1,0 @@
-{
-  "id" : "45969332abbe4a159960c70897c22aa7",
-  "name" : "Stelian",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzg1NjE1NSwKICAicHJvZmlsZUlkIiA6ICI0NTk2OTMzMmFiYmU0YTE1OTk2MGM3MDg5N2MyMmFhNyIsCiAgInByb2ZpbGVOYW1lIiA6ICJTdGVsaWFuIiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlLzQ4ODM3NzdlMDc5YzczOGJmNGJiMTBiNjIwYzY2NDFmNWNiMzZjNzZlOTBjODI5OGRmODc5MmViMGIzNzE2OTgiCiAgICB9CiAgfQp9"
-  } ],
-  "profileActions" : [ ]
-}

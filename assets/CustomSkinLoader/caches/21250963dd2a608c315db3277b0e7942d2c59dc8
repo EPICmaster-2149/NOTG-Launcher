@@ -1,9 +1,0 @@
-{
-  "id" : "901c480ca36843a2a7d88d03e6187a83",
-  "name" : "Distortion",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzg0ODM3MiwKICAicHJvZmlsZUlkIiA6ICI5MDFjNDgwY2EzNjg0M2EyYTdkODhkMDNlNjE4N2E4MyIsCiAgInByb2ZpbGVOYW1lIiA6ICJEaXN0b3J0aW9uIiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlLzI0NDAyYzA4MTA1MDViYmUzMDU0ZTU2MGZkYThiMDRmY2ZkNzY1ZGNkNTJjNTI1ZGU1ZDJjNWE3YTEzNzlmNiIKICAgIH0KICB9Cn0="
-  } ],
-  "profileActions" : [ ]
-}

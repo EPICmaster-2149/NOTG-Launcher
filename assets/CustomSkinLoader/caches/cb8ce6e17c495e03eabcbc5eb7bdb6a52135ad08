@@ -1,9 +1,0 @@
-{
-  "id" : "b32143e1e6f14ad5a04b553dd1100c6c",
-  "name" : "Ralitou",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzgzMzQ3MCwKICAicHJvZmlsZUlkIiA6ICJiMzIxNDNlMWU2ZjE0YWQ1YTA0YjU1M2RkMTEwMGM2YyIsCiAgInByb2ZpbGVOYW1lIiA6ICJSYWxpdG91IiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2Y1ZGRkYjQxZGNhZmVmNjE2ZTk1OWMyODE3ODA4ZTBiZTc0MWM4OWZmYmZlZDM5MTM0YTEzZTc1YjgxMTg2M2QiCiAgICB9CiAgfQp9"
-  } ],
-  "profileActions" : [ ]
-}

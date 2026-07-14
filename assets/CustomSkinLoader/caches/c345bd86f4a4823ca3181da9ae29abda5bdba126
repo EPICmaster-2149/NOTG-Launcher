@@ -1,9 +1,0 @@
-{
-  "id" : "c7a3926ac5e640649c26136b0789c872",
-  "name" : "Potatoman123",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQ1NjA3NjQ3NiwKICAicHJvZmlsZUlkIiA6ICJjN2EzOTI2YWM1ZTY0MDY0OWMyNjEzNmIwNzg5Yzg3MiIsCiAgInByb2ZpbGVOYW1lIiA6ICJQb3RhdG9tYW4xMjMiLAogICJ0ZXh0dXJlcyIgOiB7CiAgICAiU0tJTiIgOiB7CiAgICAgICJ1cmwiIDogImh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvNGJkZjJhZTY4MDRlOTIwYzBjNjcyMDI5ZWQ1ZjUwYzAxODc2OTJkNTJhZjAyZDhmNmUxZjAzMjc4OGIyYjZmNSIKICAgIH0KICB9Cn0="
-  } ],
-  "profileActions" : [ ]
-}

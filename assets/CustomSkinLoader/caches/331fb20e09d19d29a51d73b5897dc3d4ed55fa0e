@@ -1,9 +1,0 @@
-{
-  "id" : "5d7290af42d44e5f87387ff613e2b233",
-  "name" : "Nor9",
-  "properties" : [ {
-    "name" : "textures",
-    "value" : "ewogICJ0aW1lc3RhbXAiIDogMTc4MTQzMzczODI0MCwKICAicHJvZmlsZUlkIiA6ICI1ZDcyOTBhZjQyZDQ0ZTVmODczODdmZjYxM2UyYjIzMyIsCiAgInByb2ZpbGVOYW1lIiA6ICJOb3I5IiwKICAidGV4dHVyZXMiIDogewogICAgIlNLSU4iIDogewogICAgICAidXJsIiA6ICJodHRwOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2Y5MjI4NzgyZTFjNGUyZDMwMWM5ZmQ2MjA0Nzg3NDFkYzZhMjU4NTdjM2JkMWYwY2VmNDQ5OWFjZWY4ZjVhYTAiCiAgICB9CiAgfQp9"
-  } ],
-  "profileActions" : [ ]
-}
