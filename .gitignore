@@ -1,11 +1,29 @@
 # Python
-.venv/
 __pycache__/
-*.pyc
-build/
-dist/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+env/
 
-# Local secrets and tokens
+# Test and tool caches
+.cache
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local AI/editor workspace files
+.agents/
+.continue/
+.codex/
+.vscode/
+.idea/
+
+# Secrets and local config
 .env
 .env.*
 !.env.example
@@ -16,22 +34,30 @@ spotify_token_cache*
 *.secret
 *.secrets
 *.token
+*.key
 
-# VS Code
-.vscode/
-.vscode-server/
+# Build output
+build/
+dist/
+*.spec
+*.manifest
+*.log
 
-
-
-# Launcher data
-instances/*
-!instances/.keep
-
+# Launcher runtime data
 runtime/
+instances/
 AUTHENTICATION_AUDIT.md
+update_manifest.json
+updater-python.log
+*-update.zip
 
-# OS
+# Generated asset/cache data
+assets/CustomSkinLoader/caches/
+assets/CustomSkinLoader/*.log
+assets/CustomSkinLoader/CustomSkinAPIPlus-ClientID
+assets/default-musics/.Fireflies.ogg
+
+# OS files
 .DS_Store
 Thumbs.db
-
-NOTG-Launcher.spec
+desktop.ini
