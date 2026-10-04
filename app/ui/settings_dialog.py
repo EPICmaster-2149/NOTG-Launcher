@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
@@ -21,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.launcher import LauncherService, VIDEO_SUFFIXES
+from ui.errors import QMessageBox
 from ui.app_icon import application_icon
 from ui.background_selector_dialog import BackgroundSelectorDialog
 from ui.responsive import fitted_window_size, scaled_px
@@ -235,6 +235,10 @@ class SettingsNavButton(QAbstractButton):
 
 
 class ThemeColorWheel(QWidget):
+    # Preview is deliberately separate from the persisted colour.  A drag can
+    # produce dozens of mouse events per second, while a full app stylesheet
+    # update is comparatively expensive.
+    color_previewed = Signal(str)
     color_changed = Signal(str)
 
     def __init__(self, color: str, parent: QWidget | None = None):
@@ -528,7 +532,7 @@ class ThemeColorWheel(QWidget):
             return
 
         self._dragging = True
-        self._set_color_from_point(event.position(), emit=False)
+        self._set_color_from_point(event.position(), preview=True)
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
@@ -538,7 +542,7 @@ class ThemeColorWheel(QWidget):
         self._hover_pin = self._pin_hit(event.position())
 
         if event.buttons() & Qt.LeftButton:
-            self._set_color_from_point(event.position(), emit=False)
+            self._set_color_from_point(event.position(), preview=True)
         else:
             self.update()
 
@@ -557,7 +561,7 @@ class ThemeColorWheel(QWidget):
 
         super().leaveEvent(event)
 
-    def _set_color_from_point(self, point: QPointF, *, emit: bool) -> None:
+    def _set_color_from_point(self, point: QPointF, *, emit: bool = False, preview: bool = False) -> None:
         center = QPointF(
             self.width() / 2,
             self.height() / 2
@@ -570,12 +574,16 @@ class ThemeColorWheel(QWidget):
 
         hue = ((angle + 180.0) % 360.0) / 360.0
 
-        self._color = QColor.fromHsvF(
+        next_color = QColor.fromHsvF(
             hue,
             0.82,
             1.0
         )
+        changed = next_color.name() != self._color.name()
+        self._color = next_color
 
+        if preview and changed:
+            self.color_previewed.emit(self._color.name())
         if emit:
             self.color_changed.emit(self._color.name())
 
@@ -638,10 +646,12 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.service = service
         self._pending_theme_color = self.service.get_theme_accent_color()
-        self._manual_theme_timer = QTimer(self)
-        self._manual_theme_timer.setSingleShot(True)
-        self._manual_theme_timer.setInterval(0)
-        self._manual_theme_timer.timeout.connect(self._commit_manual_theme_color)
+        self._theme_preview_timer = QTimer(self)
+        self._theme_preview_timer.setSingleShot(True)
+        # Cap global stylesheet rebuilds while the wheel is dragged. This is
+        # fast enough to feel immediate, without scheduling one per pixel.
+        self._theme_preview_timer.setInterval(75)
+        self._theme_preview_timer.timeout.connect(self._apply_manual_theme_preview)
 
         self.setObjectName("settingsDialog")
         self.setWindowTitle("Settings")
@@ -813,7 +823,8 @@ class SettingsDialog(QDialog):
         wheel_row.setSpacing(16)
         self.theme_color_wheel = ThemeColorWheel(self.service.get_theme_accent_color())
         self.theme_color_wheel.set_adaptive(False)
-        self.theme_color_wheel.color_changed.connect(self._schedule_manual_theme_color)
+        self.theme_color_wheel.color_previewed.connect(self._schedule_manual_theme_preview)
+        self.theme_color_wheel.color_changed.connect(self._commit_manual_theme_color)
         wheel_row.addWidget(self.theme_color_wheel, 0, Qt.AlignCenter | Qt.AlignVCenter)
         theme_layout.addLayout(wheel_row)
         page_layout.addWidget(theme_card)
@@ -990,12 +1001,20 @@ class SettingsDialog(QDialog):
             self._commit_manual_theme_color()
         self.theme_changed.emit()
 
-    def _schedule_manual_theme_color(self, color: str) -> None:
+    def _schedule_manual_theme_preview(self, color: str) -> None:
         self._pending_theme_color = color
-        self._manual_theme_timer.stop()
-        self._manual_theme_timer.start()
+        if not self._theme_preview_timer.isActive():
+            self._theme_preview_timer.start()
+
+    def _apply_manual_theme_preview(self) -> None:
+        if self.service.get_theme_adapt_to_music():
+            return
+        app = QApplication.instance()
+        if app is not None:
+            set_theme_accent(app, self._pending_theme_color, refresh_widgets=False)
 
     def _commit_manual_theme_color(self) -> None:
+        self._theme_preview_timer.stop()
         try:
             saved = self.service.set_theme_accent_color(self._pending_theme_color)
         except Exception as exc:  # noqa: BLE001

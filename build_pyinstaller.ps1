@@ -33,6 +33,7 @@ $mainDistDir    = Join-Path $distDir $appName
 $mainExePath    = Join-Path $mainDistDir "$appName.exe"
 $updaterDistDir = Join-Path $distDir "_updater_build"
 $python         = "python"
+$nodeExecutable = $null
 
 # Locate a virtual-environment Python first.
 foreach ($candidate in @(
@@ -42,6 +43,16 @@ foreach ($candidate in @(
         $python = $candidate
         break
     }
+}
+
+# yt-dlp requires a JavaScript runtime to solve modern YouTube challenges.
+# Bundle Node so remote music works on an end user's PC without a separate
+# runtime installation.
+$nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+if ($nodeCommand -and (Test-Path -LiteralPath $nodeCommand.Source)) {
+    $nodeExecutable = $nodeCommand.Source
+} else {
+    throw "Node.js 20+ is required to build YouTube music support. Install Node.js, then run this build again."
 }
 
 Write-Host "Using Python: $python"
@@ -164,6 +175,9 @@ $mainArgs = @(
     "--hidden-import", "pypresence",
     "--hidden-import", "spotipy.oauth2",
     "--hidden-import", "yt_dlp",
+    "--collect-all", "yt_dlp",
+    "--collect-all", "yt_dlp_ejs",
+    "--add-binary", "$nodeExecutable;.",
     "--hidden-import", "PIL",
     "--hidden-import", "PIL.Image",
 
@@ -333,9 +347,6 @@ Copy-Item -LiteralPath $builtUpdaterExe -Destination (Join-Path $mainDistDir "$u
 # Clean up the temporary one-file build artifacts.
 Remove-Item -LiteralPath $updaterDistDir -Recurse -Force -ErrorAction SilentlyContinue
 
-# ============================================================================
-# Cleanup
-# ============================================================================
 if (-not $KeepSpec) {
     Remove-Item -LiteralPath "$appName.spec" -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$updaterName.spec" -Force -ErrorAction SilentlyContinue

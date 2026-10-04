@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QMessageBox,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -18,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.launcher import IconRecord, LauncherService
+from ui.errors import QMessageBox
 from ui.icon_utils import load_scaled_icon
 from ui.responsive import fitted_window_size, scaled_px, screen_scale
 from ui.theme import theme_palette

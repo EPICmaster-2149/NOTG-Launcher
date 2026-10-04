@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QRadioButton,
@@ -59,6 +58,7 @@ from PySide6.QtWidgets import (
 import psutil
 
 from core.launcher import LauncherService
+from ui.errors import QMessageBox
 from ui.icon_selector_dialog import IconSelectorDialog
 from ui.modrinth_modpack_browser import ModrinthModpackBrowser
 from ui.icon_utils import load_scaled_icon

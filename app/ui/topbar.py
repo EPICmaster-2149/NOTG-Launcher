@@ -21,6 +21,20 @@ def blend_colors(start: QColor, end: QColor, factor: float) -> QColor:
     )
 
 
+def _help_icon(size: int = 24) -> QIcon:
+    """Return a crisp, theme-neutral question-mark icon for the toolbar."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QColor("#eaf2ff"))
+    font = QFont("Segoe UI", max(12, int(size * 0.74)), QFont.DemiBold)
+    painter.setFont(font)
+    painter.drawText(QRectF(0, -1, size, size), Qt.AlignCenter, "?")
+    painter.end()
+    return QIcon(pixmap)
+
+
 class ModernButton(QPushButton):
     def __init__(
         self,
@@ -88,7 +102,7 @@ class ModernButton(QPushButton):
     def sizeHint(self):
         font = self._button_font()
         metrics = QFontMetrics(font)
-        gap = 12 if not self.icon().isNull() else 0
+        gap = 12 if not self.icon().isNull() and self.text().strip() else 0
         icon_width = self._icon_size if not self.icon().isNull() else 0
         horizontal_padding = self._horizontal_padding if self._horizontal_padding is not None else (
             44 if self._role == "toolbar" else 34
@@ -257,7 +271,7 @@ class ModernButton(QPushButton):
         painter.drawRoundedRect(rect, self._radius, self._radius)
 
         content_rect = rect.adjusted(18, 0, -18, 0)
-        gap = 12 if not self.icon().isNull() else 0
+        gap = 12 if not self.icon().isNull() and self.text().strip() else 0
         available_width = max(0.0, content_rect.width())
         icon_width = self._icon_size if not self.icon().isNull() else 0
         reserved_width = icon_width + gap if not self.icon().isNull() else 0
@@ -517,6 +531,22 @@ class TopBar(QWidget):
             button.clicked.connect(lambda _, action=name: self._handle_click(action))
             layout.addWidget(button)
             self.buttons[name] = button
+
+        self.help_button = ModernButton(
+            "",
+            icon=_help_icon(),
+            role="toolbar",
+            height=46,
+            icon_size=22,
+            radius=10,
+            minimum_width=46,
+            horizontal_padding=0,
+        )
+        self.help_button.setToolTip("NOTG Launcher help")
+        self.help_button.setAccessibleName("NOTG Launcher help")
+        self.help_button.clicked.connect(lambda: self._handle_click("Help"))
+        layout.addWidget(self.help_button)
+        self.buttons["Help"] = self.help_button
 
         layout.addStretch()
 

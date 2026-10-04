@@ -15,10 +15,11 @@ from PySide6.QtGui import QFont, QImage, QTextCursor, QTextDocument
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QTextBrowser, QMessageBox
+    QTextBrowser
 )
 
 from core.updater import UpdateChecker, UpdateInstaller, UpdateState
+from ui.errors import QMessageBox
 from ui.topbar import ModernButton
 from ui.responsive import scaled_px
 from ui.theme import theme_palette

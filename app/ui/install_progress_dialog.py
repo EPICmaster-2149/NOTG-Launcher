@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QVBoxLayout,
@@ -21,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.launcher import InstallRequest, InstallResult, LauncherService, run_install_task
+from ui.errors import QMessageBox
 from ui.topbar import ModernButton
 
 # Braille spinner frames (matches modrinth browser style)

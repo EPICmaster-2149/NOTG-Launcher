@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, QThread, QTimer, Signal, QVariantAnimation
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -23,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.launcher import InstanceRecord, LauncherService
+from ui.errors import QMessageBox
 from ui.responsive import fitted_window_size
 
 # ---------------------------------------------------------------------------
@@ -39,15 +39,15 @@ class Mr:
     BG_ELEVATED = QColor("#21262d")
     BG_INPUT = QColor("#0d1117")
 
-    GREEN = QColor("#1bd96a")
-    GREEN_BRIGHT = QColor("#2eeb7a")
-    GREEN_DIM = QColor("#17b559")
-    GREEN_GLOW = QColor(27, 217, 106, 42)
-    GREEN_SOFT = QColor(27, 217, 106, 22)
+    GREEN = QColor("#73c99a")
+    GREEN_BRIGHT = QColor("#91d8b2")
+    GREEN_DIM = QColor("#4d9d73")
+    GREEN_GLOW = QColor(115, 201, 154, 42)
+    GREEN_SOFT = QColor(115, 201, 154, 22)
 
-    TEXT = QColor("#f0f6fc")
-    TEXT_MUTED = QColor("#8b949e")
-    TEXT_SUBTLE = QColor("#6e7681")
+    TEXT = QColor("#f8fafc")
+    TEXT_MUTED = QColor("#e2e8f0")
+    TEXT_SUBTLE = QColor("#cbd5e1")
 
     BORDER = QColor(48, 54, 61, 180)
     BORDER_LIGHT = QColor(48, 54, 61, 100)
@@ -90,7 +90,7 @@ def _mr_css(c: QColor) -> str:
 
 _ICON_SIZE = 40
 _LARGE_ICON_SIZE = 80
-_CARD_HEIGHT = 84
+_CARD_HEIGHT = 68
 _CARD_RADIUS = 10
 _CAT_BADGE_H = 26
 _CAT_BADGE_PAD_H = 14
@@ -102,6 +102,8 @@ _SECTION_PX = 18
 _PRIMARY_PX = 14
 _META_PX = 12
 _SMALL_PX = 11
+_PAGE_SIZE = 24
+_LOAD_MORE_THRESHOLD = 180
 
 # ---------------------------------------------------------------------------
 # Icon helpers (identical to modrinth_modpack_browser)
@@ -211,6 +213,10 @@ class RemoteContentWorker(QThread):
         *,
         content_type: str,
         query: str = "",
+        offset: int = 0,
+        category: str = "",
+        sort: str = "relevance",
+        generation: int = 0,
         project: dict[str, Any] | None = None,
         parent: QWidget | None = None,
     ):
@@ -220,6 +226,10 @@ class RemoteContentWorker(QThread):
         self._job = job
         self._content_type = content_type
         self._query = query
+        self._offset = offset
+        self._category = category
+        self._sort = sort
+        self._generation = generation
         self._project = dict(project or {})
 
     def run(self) -> None:
@@ -227,10 +237,11 @@ class RemoteContentWorker(QThread):
             if self._job == "search":
                 projects = self._service.search_remote_content(
                     self._instance, provider="modrinth",
-                    content_type=self._content_type, query=self._query, limit=24,
+                    content_type=self._content_type, query=self._query, limit=_PAGE_SIZE,
+                    offset=self._offset, category=self._category, sort=self._sort,
                 )
                 installed = self._service.remote_content_installed_index(self._instance, self._content_type)
-                payload = {"projects": projects, "installed": list(installed)}
+                payload = {"projects": projects, "installed": list(installed), "offset": self._offset, "generation": self._generation}
             elif self._job == "details":
                 payload = self._service.get_remote_content_details(self._instance, self._project)
             elif self._job == "install":
@@ -339,8 +350,9 @@ class ModCard(QWidget):
 
         bg = Mr.blend(Mr.BG_CARD, Mr.BG_CARD_HOVER, self._hover)
         bg = Mr.blend(bg, Mr.BG_CARD_ACTIVE, self._selected)
-        border_col = Mr.blend(Mr.BORDER, Mr.GREEN, (self._hover + self._selected * 0.5) * 0.6)
-        border_w = 1.0 + self._selected
+        # Keep list cards borderless until the current selection needs a cue.
+        border_col = Mr.blend(Mr.with_alpha(Mr.BORDER, 0), Mr.with_alpha(Mr.GREEN, 150), self._selected)
+        border_w = 1.0
 
         p.setPen(QPen(border_col, border_w))
         p.setBrush(bg)
@@ -367,10 +379,9 @@ class ModCard(QWidget):
             p.setPen(Mr.TEXT_MUTED)
             p.drawText(icon_rect, Qt.AlignCenter, (self.project.get("title") or "M")[0].upper())
 
-        # Text area
+        # Text area: the sidebar remains scannable with title and creator only.
         text_left = icon_rect.right() + 12
-        install_btn_w = 72
-        text_right = w - install_btn_w - 16
+        text_right = w - 14
         text_width = text_right - text_left
 
         # Title (14px DemiBold)
@@ -380,89 +391,24 @@ class ModCard(QWidget):
         title_font.setWeight(QFont.DemiBold)
         p.setFont(title_font)
         p.setPen(Mr.TEXT)
-        title_rect = QRectF(text_left, rect.top() + 10, text_width, 20)
+        title_rect = QRectF(text_left, rect.top() + 12, text_width, 20)
         p.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, _truncate(title, 50))
 
-        # Author + downloads (11px)
+        # Creator (no download count, categories, or duplicate install affordance).
         author = str(self.project.get("author") or "Unknown")
-        downloads = int(self.project.get("downloads") or 0)
         meta_font = QFont(self.font())
         meta_font.setPixelSize(11)
         p.setFont(meta_font)
-        p.setPen(Mr.TEXT_SUBTLE)
-        meta_text = f"{author}  ·  {_format_count(downloads)}"
-        meta_rect = QRectF(text_left, rect.top() + 32, text_width, 16)
-        p.drawText(meta_rect, Qt.AlignLeft | Qt.AlignVCenter, _truncate(meta_text, 45))
-
-        # Category chips (bottom row)
-        categories = self.project.get("categories") or self.project.get("display_categories") or []
-        if isinstance(categories, list) and categories:
-            badge_font = QFont(self.font())
-            badge_font.setPixelSize(10)
-            badge_font.setWeight(QFont.Medium)
-            p.setFont(badge_font)
-            bx = text_left
-            by = rect.top() + 50
-            gap = 4
-            for cat in categories[:2]:
-                cat_str = str(cat).strip()
-                if not cat_str:
-                    continue
-                metrics = QFontMetrics(badge_font)
-                bw = metrics.horizontalAdvance(cat_str) + 10
-                bh = 16
-                if bx + bw > text_right:
-                    break
-                badge_rect = QRectF(bx, by, bw, bh)
-                _draw_chip(p, cat_str, badge_rect, Mr.with_alpha(Mr.GREEN, 60), Mr.with_alpha(Mr.GREEN, 15), Mr.GREEN, 8)
-                bx += bw + gap
-
-        # Install / Installed badge (right side, vertically centered)
-        btn_h = 26
-        btn_x = w - install_btn_w - 12
-        btn_y = rect.top() + (rect.height() - btn_h) / 2
-        btn_rect = QRectF(btn_x, btn_y, install_btn_w, btn_h)
-
-        if self._install_state == "installed":
-            p.setPen(QPen(Mr.INSTALLED, 1.0))
-            p.setBrush(Mr.with_alpha(Mr.INSTALLED, 30))
-            p.drawRoundedRect(btn_rect, 8, 8)
-            btn_font = QFont(self.font())
-            btn_font.setPixelSize(11)
-            btn_font.setWeight(QFont.Medium)
-            p.setFont(btn_font)
-            p.setPen(Mr.INSTALLED)
-            p.drawText(btn_rect, Qt.AlignCenter, "Installed")
-        elif self._install_state == "installing":
-            p.setPen(QPen(Mr.WARNING, 1.0))
-            p.setBrush(Mr.with_alpha(Mr.WARNING, 22))
-            p.drawRoundedRect(btn_rect, 8, 8)
-            btn_font = QFont(self.font())
-            btn_font.setPixelSize(11)
-            btn_font.setWeight(QFont.Medium)
-            p.setFont(btn_font)
-            p.setPen(Mr.WARNING)
-            p.drawText(btn_rect, Qt.AlignCenter, "...")
-        else:
-            hover_alpha = min(60, int(60 * self._hover * 1.5))
-            btn_bg = Mr.blend(Mr.with_alpha(Mr.GREEN, 0), Mr.with_alpha(Mr.GREEN, 60), self._hover)
-            p.setPen(QPen(Mr.with_alpha(Mr.GREEN, 180), 1.0))
-            p.setBrush(btn_bg)
-            p.drawRoundedRect(btn_rect, 8, 8)
-            btn_font = QFont(self.font())
-            btn_font.setPixelSize(11)
-            btn_font.setWeight(QFont.Medium)
-            p.setFont(btn_font)
-            p.setPen(Mr.GREEN)
-            p.drawText(btn_rect, Qt.AlignCenter, "Install")
+        p.setPen(Mr.TEXT_MUTED)
+        meta_rect = QRectF(text_left, rect.top() + 33, text_width, 16)
+        p.drawText(meta_rect, Qt.AlignLeft | Qt.AlignVCenter, f"by {author}")
 
     def sizeHint(self) -> QSize:
         return QSize(0, _CARD_HEIGHT)
 
     def is_install_hit(self, pos: QPoint) -> bool:
         w = self.width()
-        btn_rect = QRectF(w - 72 - 12, (self.height() - 26) / 2, 72, 26)
-        return btn_rect.contains(pos)
+        return False
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton and self.is_install_hit(event.position()):
@@ -502,6 +448,8 @@ class CategoryBadge(QWidget):
 # ===================================================================
 
 class InstallModsDialog(QDialog):
+    content_installed = Signal()
+
     def __init__(self, service: LauncherService, instance: InstanceRecord, parent: QWidget | None = None):
         super().__init__(parent)
         self.service = service
@@ -512,6 +460,7 @@ class InstallModsDialog(QDialog):
         self._installed: set[str] = set()
         self._worker: RemoteContentWorker | None = None
         self._icon_worker: RemoteIconWorker | None = None
+        self._detail_image_workers: list[RemoteIconWorker] = []
         self._active_job: str | None = None
         self._selected_project: dict[str, Any] | None = None
         self._installing_project_key: str | None = None
@@ -520,6 +469,12 @@ class InstallModsDialog(QDialog):
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self._run_search)
         self._search_query = ""
+        self._page_offset = 0
+        self._has_more_pages = True
+        self._loading_page = False
+        self._search_generation = 0
+        # Updated synchronously so rapid repeated clicks cannot enqueue duplicates.
+        self._intent_states: dict[str, str] = {}
         self._icon_cache_dir = self.service.cache_root / "remote-content-icons"
 
         mc_ver = self.instance.vanilla_version or "?"
@@ -529,6 +484,9 @@ class InstallModsDialog(QDialog):
         self.setModal(False)
         self.setMinimumSize(1100, 720)
         self.resize(fitted_window_size(self.parentWidget() or self, 1280, 840, minimum_width=1100, minimum_height=720))
+        self.setFont(QFont("Segoe UI", 10))
+        self.footer_info = QLabel("", self)
+        self.footer_info.hide()
         self._build_ui()
         self._apply_styles()
         QTimer.singleShot(0, self._run_search)
@@ -540,6 +498,10 @@ class InstallModsDialog(QDialog):
         if self._icon_worker is not None and self._icon_worker.isRunning():
             self._icon_worker.requestInterruption()
             self._icon_worker.wait()
+        for worker in self._detail_image_workers:
+            if worker.isRunning():
+                worker.requestInterruption()
+                worker.wait()
         super().closeEvent(event)
 
     # ================================================================
@@ -565,7 +527,6 @@ class InstallModsDialog(QDialog):
         cl.addWidget(divider)
         cl.addWidget(self._build_right_panel(), 5)
         root.addWidget(content, 1)
-        root.addWidget(self._build_footer())
 
     def _build_header(self) -> QWidget:
         h = QWidget()
@@ -589,16 +550,6 @@ class InstallModsDialog(QDialog):
 
         layout.addStretch()
 
-        # Compact info badges
-        loader = self.instance.loader_name or "?"
-        mc_ver = self.instance.vanilla_version or "?"
-        loader_badge = QLabel(loader.capitalize())
-        loader_badge.setObjectName("infoBadge")
-        layout.addWidget(loader_badge)
-        mc_badge = QLabel(f"MC {mc_ver}")
-        mc_badge.setObjectName("infoBadge")
-        layout.addWidget(mc_badge)
-
         return h
 
     def _build_left_panel(self) -> QWidget:
@@ -608,27 +559,17 @@ class InstallModsDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        # Search row
+        # A single, aligned toolbar combines query and filters.
         search_row = QHBoxLayout()
         search_row.setContentsMargins(0, 0, 0, 0)
-        search_row.setSpacing(6)
+        search_row.setSpacing(8)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search mods…")
         self.search_input.setObjectName("modSearchField")
+        self.search_input.addAction(QAction("⌕", self.search_input), QLineEdit.LeadingPosition)
         self.search_input.textChanged.connect(self._schedule_search)
         self.search_input.returnPressed.connect(self._run_search)
         search_row.addWidget(self.search_input, 1)
-        search_btn = QPushButton("Search")
-        search_btn.setObjectName("searchBtn")
-        search_btn.clicked.connect(self._run_search)
-        search_row.addWidget(search_btn)
-        layout.addLayout(search_row)
-
-        # Filter bar: category dropdown + sort
-        filter_bar = QHBoxLayout()
-        filter_bar.setContentsMargins(0, 0, 0, 0)
-        filter_bar.setSpacing(6)
-
         self.category_combo = QComboBox()
         self.category_combo.setObjectName("filterCombo")
         self.category_combo.addItem("All Categories", "")
@@ -644,7 +585,7 @@ class InstallModsDialog(QDialog):
         self.category_combo.addItem("Mobs", "mobs")
         self.category_combo.setMinimumWidth(130)
         self.category_combo.currentIndexChanged.connect(self._run_search)
-        filter_bar.addWidget(self.category_combo)
+        search_row.addWidget(self.category_combo)
 
         self.sort_combo = QComboBox()
         self.sort_combo.setObjectName("filterCombo")
@@ -653,16 +594,12 @@ class InstallModsDialog(QDialog):
         self.sort_combo.addItem("Updated", "updated")
         self.sort_combo.setMinimumWidth(100)
         self.sort_combo.currentIndexChanged.connect(self._run_search)
-        filter_bar.addWidget(self.sort_combo)
+        search_row.addWidget(self.sort_combo)
+        layout.addLayout(search_row)
 
-        filter_bar.addStretch()
-        layout.addLayout(filter_bar)
-
-        # Status
-        self.list_status = QLabel("")
-        self.list_status.setObjectName("listStatus")
-        self.list_status.setFixedHeight(16)
-        layout.addWidget(self.list_status)
+        # The toolbar owns feedback; the redundant result counter is removed.
+        self.list_status = QLabel("", self)
+        self.list_status.hide()
 
         # Card scroll area
         self.card_scroll = QScrollArea()
@@ -670,6 +607,7 @@ class InstallModsDialog(QDialog):
         self.card_scroll.setWidgetResizable(True)
         self.card_scroll.setFrameShape(QFrame.NoFrame)
         self.card_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.card_scroll.verticalScrollBar().valueChanged.connect(self._maybe_load_next_page)
         self.card_container = QWidget()
         self.card_container.setObjectName("cardContainer")
         self.card_layout = QVBoxLayout(self.card_container)
@@ -967,6 +905,7 @@ class InstallModsDialog(QDialog):
         self.setStyleSheet(f"""
         QDialog#installModsDialog {{
             background-color: {_mr_css(Mr.BG)};
+            font-family: "Segoe UI", "Inter", sans-serif;
         }}
         QWidget#browserHeader {{
             background-color: {_mr_css(Mr.BG_PANEL)};
@@ -974,7 +913,7 @@ class InstallModsDialog(QDialog):
         }}
         QLabel#browserTitle {{
             color: {_mr_css(Mr.TEXT)};
-            font-size: 16px;
+            font-size: 18px;
             font-weight: 700;
             background: transparent;
         }}
@@ -1012,16 +951,16 @@ class InstallModsDialog(QDialog):
         }}
         QWidget#leftPanel {{
             background-color: {_mr_css(Mr.BG_CARD)};
-            border: 1px solid {_mr_css(Mr.BORDER)};
-            border-radius: 10px;
+            border: none;
+            border-radius: 12px;
         }}
         QWidget#rightPanel {{
             background-color: {_mr_css(Mr.BG_SURFACE)};
-            border: 1px solid {_mr_css(Mr.BORDER)};
-            border-radius: 10px;
+            border: none;
+            border-radius: 12px;
         }}
         QFrame#panelDivider {{
-            background-color: {_mr_css(Mr.SEPARATOR)};
+            background-color: transparent;
             max-width: 1px;
             border: none;
         }}
@@ -1033,13 +972,13 @@ class InstallModsDialog(QDialog):
             background: transparent;
         }}
         QLineEdit#modSearchField {{
-            background-color: {_mr_css(Mr.BG_INPUT)};
-            border: 1px solid {_mr_css(Mr.BORDER)};
-            border-radius: 7px;
+            background-color: {_mr_css(Mr.BG_ELEVATED)};
+            border: none;
+            border-radius: 10px;
             color: {_mr_css(Mr.TEXT)};
-            font-size: 12px;
-            padding: 5px 10px;
-            min-height: 28px;
+            font-size: 13px;
+            padding: 6px 12px;
+            min-height: 30px;
         }}
         QLineEdit#modSearchField:focus {{
             border: 1px solid {_mr_css(Mr.GREEN_BRIGHT)};
@@ -1061,10 +1000,10 @@ class InstallModsDialog(QDialog):
             background-color: {_mr_css(Mr.GREEN)};
         }}
         QPushButton#detailInstallBtn {{
-            background-color: {_mr_css(Mr.GREEN_DIM)};
-            border: 1px solid {_mr_css(Mr.GREEN)};
-            border-radius: 6px;
-            color: {_mr_css(Mr.BG)};
+            background-color: {_mr_css(Mr.with_alpha(Mr.GREEN, 72))};
+            border: 1px solid {_mr_css(Mr.with_alpha(Mr.GREEN, 180))};
+            border-radius: 16px;
+            color: {_mr_css(Mr.TEXT)};
             font-size: 13px;
             font-weight: 700;
             padding: 6px 20px;
@@ -1072,7 +1011,7 @@ class InstallModsDialog(QDialog):
             min-width: 90px;
         }}
         QPushButton#detailInstallBtn:hover {{
-            background-color: {_mr_css(Mr.GREEN)};
+            background-color: {_mr_css(Mr.with_alpha(Mr.GREEN, 120))};
         }}
         QPushButton#detailInstallBtn:disabled {{
             background-color: {_mr_css(Mr.BG_ELEVATED)};
@@ -1106,7 +1045,7 @@ class InstallModsDialog(QDialog):
             background: transparent;
         }}
         QLabel#detailStats {{
-            color: {_mr_css(Mr.TEXT_SUBTLE)};
+            color: {_mr_css(Mr.TEXT_MUTED)};
             font-size: {_META_PX}px;
             font-weight: 400;
             background: transparent;
@@ -1145,14 +1084,15 @@ class InstallModsDialog(QDialog):
             border-radius: 10px;
         }}
         QComboBox#contentTypeCombo, QComboBox#filterCombo {{
-            background-color: {_mr_css(Mr.BG_INPUT)};
-            border: 1px solid {_mr_css(Mr.BORDER)};
-            border-radius: 6px;
+            background-color: {_mr_css(Mr.BG_ELEVATED)};
+            border: none;
+            border-radius: 10px;
             color: {_mr_css(Mr.TEXT)};
-            font-size: 11px;
-            padding: 3px 8px;
-            min-height: 24px;
+            font-size: 12px;
+            padding: 4px 10px;
+            min-height: 30px;
         }}
+        QComboBox#filterCombo:hover {{ background-color: {_mr_css(Mr.BG_CARD_HOVER)}; color: {_mr_css(Mr.GREEN_BRIGHT)}; }}
         QComboBox#contentTypeCombo::drop-down, QComboBox#filterCombo::drop-down {{
             border: none;
             width: 16px;
@@ -1204,38 +1144,91 @@ class InstallModsDialog(QDialog):
             return
         self._search_timer.stop()
         self._search_query = self.search_input.text().strip()
+        self._search_generation += 1
+        self._page_offset = 0
+        self._has_more_pages = True
+        self._loading_page = True
         self.list_status.setText("Searching…")
         self._clear_cards()
         self._hide_details()
         self.detail_placeholder.setText("Searching for mods…")
         self.detail_placeholder.setVisible(True)
-        self._start_worker("search", query=self._search_query)
+        self._start_worker("search", query=self._search_query, offset=0, generation=self._search_generation)
 
-    def _start_worker(self, job: str, *, query: str = "", project: dict[str, Any] | None = None) -> None:
+    def _maybe_load_next_page(self, value: int) -> None:
+        """Native Qt equivalent of an intersection observer at the list sentinel."""
+        if (
+            self._active_job is not None
+            or self._loading_page
+            or not self._has_more_pages
+            or value < self.card_scroll.verticalScrollBar().maximum() - _LOAD_MORE_THRESHOLD
+        ):
+            return
+        self._loading_page = True
+        self._start_worker(
+            "search", query=self._search_query, offset=self._page_offset,
+            generation=self._search_generation,
+        )
+
+    def _start_worker(
+        self, job: str, *, query: str = "", offset: int = 0,
+        generation: int = 0, project: dict[str, Any] | None = None,
+    ) -> None:
         if self._worker is not None and self._worker.isRunning():
             if self._active_job == "install":
                 return
             self._worker.requestInterruption()
-            self._worker.wait()
         self._active_job = job
-        self._worker = RemoteContentWorker(
+        worker = RemoteContentWorker(
             self.service, self.instance, job,
-            content_type=self._content_type, query=query, project=project, parent=self,
+            content_type=self._content_type, query=query, offset=offset,
+            category=str(self.category_combo.currentData() or ""),
+            sort=str(self.sort_combo.currentData() or "relevance"), generation=generation,
+            project=project, parent=self,
         )
-        self._worker.loaded.connect(self._on_worker_loaded)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._worker.progress.connect(self._on_install_progress)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.start()
+        self._worker = worker
+        worker.loaded.connect(lambda loaded_job, payload, w=worker: self._on_worker_loaded_for(w, loaded_job, payload))
+        worker.failed.connect(lambda message, w=worker: self._on_worker_failed_for(w, message))
+        worker.progress.connect(lambda message, w=worker: self._on_install_progress_for(w, message))
+        worker.finished.connect(lambda w=worker: self._on_worker_finished_for(w))
+        worker.start()
+
+    def _on_worker_loaded_for(self, worker: RemoteContentWorker, job: str, payload: object) -> None:
+        if worker is self._worker:
+            self._on_worker_loaded(job, payload)
+
+    def _on_worker_failed_for(self, worker: RemoteContentWorker, message: str) -> None:
+        if worker is self._worker:
+            self._on_worker_failed(message)
+
+    def _on_install_progress_for(self, worker: RemoteContentWorker, message: str) -> None:
+        if worker is self._worker:
+            self._on_install_progress(message)
+
+    def _on_worker_finished_for(self, worker: RemoteContentWorker) -> None:
+        if worker is self._worker:
+            self._on_worker_finished()
 
     def _on_worker_loaded(self, job: str, payload: object) -> None:
         if job == "search":
             if isinstance(payload, dict):
-                self._projects = list(payload.get("projects")) if isinstance(payload.get("projects"), list) else []
-                self._installed = {str(item) for item in payload.get("installed", []) if item}
+                if int(payload.get("generation") or 0) != self._search_generation:
+                    return
+                projects = list(payload.get("projects")) if isinstance(payload.get("projects"), list) else []
+                offset = int(payload.get("offset") or 0)
+                self._installed.update(str(item) for item in payload.get("installed", []) if item)
             else:
-                self._projects = list(payload) if isinstance(payload, list) else []
-            self._populate_results()
+                projects = list(payload) if isinstance(payload, list) else []
+                offset = 0
+            self._loading_page = False
+            self._has_more_pages = len(projects) >= _PAGE_SIZE
+            self._page_offset = offset + len(projects)
+            if offset == 0:
+                self._projects = projects
+                self._populate_results()
+            else:
+                self._projects.extend(projects)
+                self._append_results(projects)
             return
         if job == "details":
             if isinstance(payload, dict):
@@ -1245,17 +1238,20 @@ class InstallModsDialog(QDialog):
             key = self._installing_project_key
             if key:
                 self._installed.add(key)
+                self._intent_states[key] = "installed"
                 if self._selected_project is not None:
                     self._installed.update(self._project_key_candidates(self._selected_project))
                 self._set_card_state(key, "installed")
                 if self._selected_project is not None and self._project_key(self._selected_project) == key:
                     self._set_detail_install_state("installed")
+                self.content_installed.emit()
 
     def _on_worker_failed(self, message: str) -> None:
         self.list_status.setText("Search failed")
         QMessageBox.warning(self, "Error", message)
         failed_key = self._installing_project_key
         if failed_key:
+            self._intent_states[failed_key] = "ready"
             self._set_card_state(failed_key, "ready")
         if self._selected_project is not None and self._project_key(self._selected_project) == failed_key:
             self._set_detail_install_state("ready")
@@ -1265,11 +1261,14 @@ class InstallModsDialog(QDialog):
         self._active_job = None
         if finished_job == "install":
             self._installing_project_key = None
-            self._set_controls_enabled(True)
+        elif finished_job in {"search", "details"}:
+            QTimer.singleShot(0, lambda: self._maybe_load_next_page(self.card_scroll.verticalScrollBar().value()))
 
     def _on_install_progress(self, message: str) -> None:
-        if message and self._selected_project:
-            self.detail_title.setText(message)
+        # Progress must never replace the mod title.  Apart from looking like
+        # a broken name, long "Downloading ..." strings clip in this label.
+        # The install button is the single, stable status affordance.
+        del message
 
     # ================================================================
     # Results
@@ -1283,19 +1282,25 @@ class InstallModsDialog(QDialog):
             self.detail_placeholder.setVisible(True)
             return
 
-        n = len(self._projects)
-        self.list_status.setText(f"{n} mod{'s' if n != 1 else ''} found")
+        self._append_results(self._projects, select_first=True)
 
-        for project in self._projects:
+    def _append_results(self, projects: list[dict[str, Any]], *, select_first: bool = False) -> None:
+        """Append one page without rebuilding the existing Qt widgets."""
+        added: list[dict[str, Any]] = []
+        for project in projects:
+            key = self._project_key(project)
+            if key in self._cards:
+                continue
             card = ModCard(project)
             card.clicked.connect(self._on_card_clicked)
             card.install_clicked.connect(self._install_project)
-            state = "installed" if self._is_project_installed(project) else "ready"
+            state = self._intent_states.get(key, "installed" if self._is_project_installed(project) else "ready")
             card.set_state(state)
             self.card_layout.insertWidget(self.card_layout.count() - 1, card)
-            self._cards[self._project_key(project)] = card
+            self._cards[key] = card
+            added.append(project)
 
-        if self._projects:
+        if select_first and self._projects:
             first = self._projects[0]
             card = self._cards.get(self._project_key(first))
             if card:
@@ -1303,7 +1308,7 @@ class InstallModsDialog(QDialog):
                 self._selected_project = first
                 self._start_worker("details", project=first)
 
-        self._start_icon_worker()
+        self._start_icon_worker(added)
 
     def _clear_cards(self) -> None:
         for i in reversed(range(self.card_layout.count())):
@@ -1315,9 +1320,9 @@ class InstallModsDialog(QDialog):
         self._cards.clear()
         self.card_layout.addStretch()
 
-    def _start_icon_worker(self) -> None:
+    def _start_icon_worker(self, projects: list[dict[str, Any]] | None = None) -> None:
         targets: list[tuple[str, str]] = []
-        for project in self._projects:
+        for project in projects if projects is not None else self._projects:
             url = str(project.get("icon_url") or "")
             if url.startswith(("http://", "https://")):
                 targets.append((self._project_key(project), url))
@@ -1342,6 +1347,10 @@ class InstallModsDialog(QDialog):
                 self.detail_icon.setPixmap(scaled)
 
     def _on_card_clicked(self, project: dict[str, Any]) -> None:
+        # Keep the active install's detail state stable; clicks are still safe
+        # because the local intent cache has already claimed its project key.
+        if self._active_job == "install":
+            return
         for card in self._cards.values():
             card.set_selected(False)
         key = self._project_key(project)
@@ -1351,8 +1360,6 @@ class InstallModsDialog(QDialog):
         self._selected_project = project
         self._hide_details()
         self.detail_loading.setVisible(True)
-        if self._active_job == "install":
-            return
         self._start_worker("details", project=project)
 
     def _hide_details(self) -> None:
@@ -1514,9 +1521,13 @@ class InstallModsDialog(QDialog):
         desc = str(project.get("description") or "No description available.")
         self.detail_description.setText(desc)
 
-        # Screenshots
+        # Screenshots and the large icon are fetched off the UI thread.
         self.detail_screenshots_section.setVisible(False)
         gallery = project.get("gallery") or []
+        image_targets: list[tuple[str, str]] = []
+        icon_url = str(project.get("icon_url") or "")
+        if icon_url.startswith(("http://", "https://")):
+            image_targets.append(("__detail_icon__", icon_url))
         if isinstance(gallery, list) and gallery:
             self.detail_screenshots_section.setVisible(True)
             self._clear_screenshots()
@@ -1524,23 +1535,18 @@ class InstallModsDialog(QDialog):
                 if isinstance(img, dict):
                     img_url = str(img.get("url") or "")
                     if img_url.startswith(("http://", "https://")):
-                        data = _load_icon_bytes(img_url, self._icon_cache_dir)
-                        if data:
-                            self._on_screenshot_loaded(img_url, data)
+                        image_targets.append((img_url, img_url))
 
         # Install state
         state = "installed" if self._is_project_installed(project) else "ready"
         self._set_detail_install_state(state)
 
-        # Large icon
-        icon_url = str(project.get("icon_url") or "")
-        if icon_url.startswith(("http://", "https://")):
-            data = _load_icon_bytes(icon_url, self._icon_cache_dir)
-            if data:
-                pix = QPixmap()
-                if pix.loadFromData(data):
-                    scaled = pix.scaled(_LARGE_ICON_SIZE, _LARGE_ICON_SIZE, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                    self.detail_icon.setPixmap(scaled)
+        if image_targets:
+            worker = RemoteIconWorker(image_targets, self._icon_cache_dir, self)
+            worker.icon_loaded.connect(self._on_detail_image_loaded)
+            worker.finished.connect(lambda w=worker: self._detail_image_workers.remove(w) if w in self._detail_image_workers else None)
+            self._detail_image_workers.append(worker)
+            worker.start()
 
         self.footer_info.setText(f"Viewing: {project.get('title') or 'Untitled'}")
 
@@ -1562,23 +1568,32 @@ class InstallModsDialog(QDialog):
             label.setStyleSheet(f"border:1px solid {_mr_css(Mr.with_alpha(Mr.TEXT, 16))}; border-radius:6px;")
             self.screenshots_layout.insertWidget(self.screenshots_layout.count() - 1, label)
 
+    def _on_detail_image_loaded(self, key: str, data: object) -> None:
+        if key == "__detail_icon__":
+            if isinstance(data, (bytes, bytearray)):
+                pix = QPixmap()
+                if pix.loadFromData(bytes(data)):
+                    self.detail_icon.setPixmap(pix.scaled(_LARGE_ICON_SIZE, _LARGE_ICON_SIZE, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
+            return
+        self._on_screenshot_loaded(key, data)
+
     # ================================================================
     # Installation
     # ================================================================
 
     def _install_project(self, project: dict[str, Any] | None) -> None:
-        if self._active_job == "install":
-            return
         if not project:
             return
         self._selected_project = project
         key = self._project_key(project)
-        if self._is_project_installed(project):
+        if self._intent_states.get(key) in {"installing", "installed"} or self._is_project_installed(project):
+            return
+        if self._active_job == "install":
             return
         self._installing_project_key = key
+        self._intent_states[key] = "installing"
         self._set_card_state(key, "installing")
         self._set_detail_install_state("installing")
-        self._set_controls_enabled(False)
         self._start_worker("install", project=project)
 
     def _on_detail_install(self) -> None:
@@ -1597,10 +1612,10 @@ class InstallModsDialog(QDialog):
 
     def _set_detail_install_state(self, state: str) -> None:
         if state == "installing":
-            self.detail_install_btn.setText("Installing…")
+            self.detail_install_btn.setText("Installing")
             self.detail_install_btn.setEnabled(False)
         elif state == "installed":
-            self.detail_install_btn.setText("Installed ✓")
+            self.detail_install_btn.setText("Installed")
             self.detail_install_btn.setEnabled(False)
         else:
             self.detail_install_btn.setText("Install")

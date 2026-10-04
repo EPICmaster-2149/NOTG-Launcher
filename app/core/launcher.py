@@ -175,6 +175,8 @@ ELY_AUTH_SERVER = "https://authserver.ely.by"
 ELY_SKIN_SYSTEM = "https://skinsystem.ely.by"
 CUSTOM_SKIN_LOADER_PROJECT = "customskinloader"
 CUSTOM_SKIN_LOADER_SUPPORTED_LOADERS = {"fabric", "forge", "neoforge"}
+COSMETICA_PROJECT = "cosmetica"
+COSMETICA_SUPPORTED_LOADERS = {"fabric", "forge", "neoforge", "quilt"}
 REMOTE_USER_AGENT = f"NOTG-Launcher/{APP_NAME.replace(' ', '-')}"
 CURSEFORGE_API_KEY_REQUIRED_MESSAGE = "Set CURSEFORGE_API_KEY or add curseforge-api-key.txt next to the launcher to use CurseForge content."
 BACKGROUND_FILE_NAME = "active-background"
@@ -1179,14 +1181,34 @@ class LauncherService:
         installed: list[str] = []
         target_dir = _remote_content_target_dir(instance, "mods")
         target_dir.mkdir(parents=True, exist_ok=True)
-        version = _modrinth_pick_version(instance, "mods", CUSTOM_SKIN_LOADER_PROJECT)
+        try:
+            # This resolves the newest compatible release on every launch.
+            version = _modrinth_pick_version(instance, "mods", CUSTOM_SKIN_LOADER_PROJECT)
+        except RuntimeError as exc:
+            if "No compatible Modrinth version was found" not in str(exc):
+                raise
+            # CustomSkinLoader is an optional launcher enhancement. Quarantine
+            # an older incompatible jar and allow the instance itself to start.
+            self._remove_incompatible_custom_skin_loader(target_dir, "")
+            logger.info(
+                "Skipping CustomSkinLoader for %s: no compatible release for %s/%s.",
+                instance.name, instance.vanilla_version, instance.mod_loader_id,
+            )
+            return []
         file_info = _modrinth_primary_file(version)
         expected_name = _required_str(file_info.get("filename"), "CustomSkinLoader file name")
         expected_target = target_dir / (_slugify_filename(expected_name) or expected_name)
         if expected_target.is_file() and expected_target.stat().st_size > 0:
-            _verify_downloaded_remote_file(expected_target, file_info)
-            self._install_custom_skin_loader_config(instance, account)
-            return []
+            try:
+                _verify_downloaded_remote_file(expected_target, file_info)
+            except RuntimeError:
+                # A jar with the current filename can still be from a broken or
+                # interrupted old download. Move it out of the boot path before
+                # fetching the exact loader/game-version match again.
+                self._disable_custom_skin_loader_jar(expected_target)
+            else:
+                self._install_custom_skin_loader_config(instance, account)
+                return []
         self._remove_incompatible_custom_skin_loader(target_dir, expected_target.name)
         _install_modrinth_project(
             instance,
@@ -1218,6 +1240,7 @@ class LauncherService:
                 continue
             try:
                 installed = self.ensure_custom_skin_loader(instance, account)
+                installed.extend(self.ensure_cosmetica(instance))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("CustomSkinLoader check failed for %s: %s", instance.name, exc)
                 continue
@@ -1225,19 +1248,75 @@ class LauncherService:
                 results[instance.instance_id] = installed
         return results
 
+    def ensure_cosmetica(self, instance: InstanceRecord) -> list[str]:
+        """Install or upgrade Cosmetica's newest stable compatible release.
+
+        Like CustomSkinLoader, Cosmetica is optional: an unavailable release
+        must never prevent an otherwise valid Minecraft instance from starting.
+        """
+        if not instance.mod_loader_id or instance.mod_loader_id not in COSMETICA_SUPPORTED_LOADERS:
+            return []
+        target_dir = _remote_content_target_dir(instance, "mods")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            version = _modrinth_pick_version(instance, "mods", COSMETICA_PROJECT)
+        except RuntimeError as exc:
+            if "No compatible Modrinth version was found" not in str(exc):
+                raise
+            self._remove_incompatible_managed_mod(target_dir, "cosmetica", "")
+            logger.info(
+                "Skipping Cosmetica for %s: no compatible release for %s/%s.",
+                instance.name, instance.vanilla_version, instance.mod_loader_id,
+            )
+            return []
+
+        file_info = _modrinth_primary_file(version)
+        expected_name = _required_str(file_info.get("filename"), "Cosmetica file name")
+        expected_target = target_dir / (_slugify_filename(expected_name) or expected_name)
+        if expected_target.is_file() and expected_target.stat().st_size > 0:
+            try:
+                _verify_downloaded_remote_file(expected_target, file_info)
+            except RuntimeError:
+                self._disable_managed_mod_jar(expected_target)
+            else:
+                return []
+
+        self._remove_incompatible_managed_mod(target_dir, "cosmetica", expected_target.name)
+        installed: list[str] = []
+        _install_modrinth_project(
+            instance, "mods",
+            {"provider": "modrinth", "content_type": "mods", "project_id": COSMETICA_PROJECT, "title": "Cosmetica"},
+            target_dir, installed, set(), set(), None, version,
+        )
+        if not expected_target.is_file() or expected_target.stat().st_size <= 0:
+            raise RuntimeError("Cosmetica installation verification failed: expected mod file was not created.")
+        _verify_downloaded_remote_file(expected_target, file_info)
+        return installed
+
     def _remove_incompatible_custom_skin_loader(self, target_dir: Path, expected_name: str) -> None:
+        self._remove_incompatible_managed_mod(target_dir, "customskinloader", expected_name)
+
+    def _remove_incompatible_managed_mod(self, target_dir: Path, project_marker: str, expected_name: str) -> None:
         expected_lower = expected_name.lower()
         for path in target_dir.glob("*.jar"):
-            if "customskinloader" not in path.name.lower():
+            if project_marker not in path.name.lower():
                 continue
             if path.name.lower() == expected_lower:
                 continue
-            disabled = path.with_name(f"{path.name}.disabled")
-            counter = 2
-            while disabled.exists():
-                disabled = path.with_name(f"{path.name}.disabled-{counter}")
-                counter += 1
-            path.rename(disabled)
+            self._disable_managed_mod_jar(path)
+
+    @staticmethod
+    def _disable_custom_skin_loader_jar(path: Path) -> None:
+        LauncherService._disable_managed_mod_jar(path)
+
+    @staticmethod
+    def _disable_managed_mod_jar(path: Path) -> None:
+        disabled = path.with_name(f"{path.name}.disabled")
+        counter = 2
+        while disabled.exists():
+            disabled = path.with_name(f"{path.name}.disabled-{counter}")
+            counter += 1
+        path.rename(disabled)
 
     def get_default_icon_path(self) -> str:
         return str((self.project_root / self.default_icon).resolve())
@@ -1692,6 +1771,10 @@ class LauncherService:
     def get_instance_mods_dir(self, instance: InstanceRecord) -> Path:
         return instance.minecraft_dir / "mods"
 
+    def get_instance_disabled_mods_dir(self, instance: InstanceRecord) -> Path:
+        """Storage outside ``mods`` so a disabled jar is never loader-visible."""
+        return instance.minecraft_dir / "disabled-mods"
+
     def get_instance_configs_dir(self, instance: InstanceRecord) -> Path:
         return instance.minecraft_dir / "config"
 
@@ -1772,11 +1855,14 @@ class LauncherService:
         content_type: str,
         query: str = "",
         limit: int = 20,
+        offset: int = 0,
+        category: str = "",
+        sort: str = "relevance",
     ) -> list[dict[str, Any]]:
         content_type = _normalize_remote_content_type(content_type)
         provider_key = provider.strip().lower()
         if provider_key == "modrinth":
-            return _search_modrinth_content(instance, content_type, query, limit)
+            return _search_modrinth_content(instance, content_type, query, limit, offset, category, sort)
         if provider_key == "curseforge":
             api_key = self.get_curseforge_api_key()
             if not api_key:
@@ -2547,64 +2633,71 @@ class LauncherService:
 
     def list_mods(self, instance: InstanceRecord) -> list[dict[str, Any]]:
         mods_dir = self.get_instance_mods_dir(instance)
-        if not mods_dir.is_dir():
+        disabled_dir = self.get_instance_disabled_mods_dir(instance)
+        self._quarantine_legacy_disabled_mods(instance)
+        if not mods_dir.is_dir() and not disabled_dir.is_dir():
             return []
 
         rows: list[dict[str, Any]] = []
-        for path in sorted(mods_dir.iterdir(), key=lambda item: item.name.lower()):
-            if not path.is_file():
+        for directory, enabled in ((mods_dir, True), (disabled_dir, False)):
+            if not directory.is_dir():
                 continue
-            lowered = path.name.lower()
-            if lowered.endswith(".disabled"):
-                archive_name = path.name[:-9]
-            else:
-                archive_name = path.name
-
-            if Path(archive_name).suffix.lower() not in {".jar", ".zip"}:
-                continue
-
-            metadata = _read_mod_metadata(path, self.generated_icons_root)
-            rows.append(
-                {
-                    "file_name": path.name,
-                    "path": str(path.resolve()),
-                    "enabled": not lowered.endswith(".disabled"),
-                    "icon_path": metadata.get("icon_path"),
-                    "name": metadata.get("name") or _friendly_archive_name(path.name),
-                    "version": metadata.get("version") or "Unknown",
-                    "last_modified": _format_file_timestamp(path),
-                    "provider": metadata.get("provider") or "Unknown",
-                }
-            )
+            for path in sorted(directory.iterdir(), key=lambda item: item.name.lower()):
+                if not path.is_file() or path.suffix.lower() not in {".jar", ".zip"}:
+                    continue
+                metadata = _read_mod_metadata(path, self.generated_icons_root)
+                rows.append(
+                    {
+                        "file_name": path.name,
+                        "path": str(path.resolve()),
+                        "enabled": enabled,
+                        "icon_path": metadata.get("icon_path"),
+                        "name": metadata.get("name") or _friendly_archive_name(path.name),
+                        "version": metadata.get("version") or "Unknown",
+                        "last_modified": _format_file_timestamp(path),
+                        "provider": metadata.get("provider") or "Unknown",
+                    }
+                )
         return rows
 
     def set_mod_enabled(self, instance: InstanceRecord, file_name: str, enabled: bool) -> Path:
-        source = _safe_local_path_join(self.get_instance_mods_dir(instance), file_name)
+        self._quarantine_legacy_disabled_mods(instance)
+        source_dir = self.get_instance_disabled_mods_dir(instance) if enabled else self.get_instance_mods_dir(instance)
+        target_dir = self.get_instance_mods_dir(instance) if enabled else self.get_instance_disabled_mods_dir(instance)
+        source = _safe_local_path_join(source_dir, file_name)
         if not source.is_file():
             raise FileNotFoundError(f"Mod file not found: {file_name}")
-
-        is_enabled = not source.name.lower().endswith(".disabled")
-        if is_enabled == enabled:
-            return source
-
-        if enabled:
-            if not source.name.lower().endswith(".disabled"):
-                return source
-            target_name = re.sub(r"\.disabled$", "", source.name, flags=re.IGNORECASE)
-        else:
-            target_name = f"{source.name}.disabled"
-
-        target = source.with_name(target_name)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = _safe_local_path_join(target_dir, source.name)
         if target.exists():
             raise FileExistsError(f"A mod file named '{target.name}' already exists.")
-
         source.rename(target)
         return target
 
+    def _quarantine_legacy_disabled_mods(self, instance: InstanceRecord) -> None:
+        """Migrate old ``*.jar.disabled`` files out of the active mods path."""
+        mods_dir = self.get_instance_mods_dir(instance)
+        if not mods_dir.is_dir():
+            return
+        disabled_dir = self.get_instance_disabled_mods_dir(instance)
+        for source in mods_dir.glob("*.disabled"):
+            if not source.is_file() or Path(source.stem).suffix.lower() not in {".jar", ".zip"}:
+                continue
+            target_name = re.sub(r"\.disabled$", "", source.name, flags=re.IGNORECASE)
+            target = disabled_dir / target_name
+            if target.exists():
+                logger.warning("Leaving duplicate legacy disabled mod in place: %s", source)
+                continue
+            disabled_dir.mkdir(parents=True, exist_ok=True)
+            source.rename(target)
+
     def remove_mods(self, instance: InstanceRecord, file_names: list[str]) -> None:
         mods_dir = self.get_instance_mods_dir(instance)
+        disabled_dir = self.get_instance_disabled_mods_dir(instance)
         for file_name in file_names:
             target = _safe_local_path_join(mods_dir, file_name)
+            if not target.is_file():
+                target = _safe_local_path_join(disabled_dir, file_name)
             if target.is_file():
                 target.unlink()
 
@@ -3086,11 +3179,15 @@ class LauncherService:
 
     def launch_instance(self, instance: InstanceRecord, player_name: str) -> subprocess.Popen[Any]:
         minecraft_directory = instance.minecraft_dir
+        # Never leave old in-place ``*.disabled`` jars where a loader might
+        # inspect them; this is safe to run on every launch.
+        self._quarantine_legacy_disabled_mods(instance)
         java_runtime = self.select_instance_java_runtime(instance)
         account_session = self.get_account_launch_session(player_name)
         active_account = self.get_account_by_id(account_session.account_id)
         if active_account is not None:
             self.ensure_custom_skin_loader(instance, active_account)
+            self.ensure_cosmetica(instance)
         command = minecraft_launcher_lib.command.get_minecraft_command(
             instance.installed_version,
             minecraft_directory,
@@ -6202,14 +6299,24 @@ def _search_modrinth_content(
     content_type: str,
     query: str,
     limit: int,
+    offset: int = 0,
+    category: str = "",
+    sort: str = "relevance",
 ) -> list[dict[str, Any]]:
+    facets = json.loads(_modrinth_facets(instance, content_type))
+    if category.strip():
+        facets.append([f"categories:{category.strip().lower()}"])
+    index = sort.strip().lower()
+    if index not in {"relevance", "downloads", "updated"}:
+        index = "relevance"
     payload = _request_json(
         f"{MODRINTH_API_BASE}/search",
         params={
             "query": query.strip(),
-            "facets": _modrinth_facets(instance, content_type),
-            "index": "relevance" if query.strip() else "downloads",
+            "facets": json.dumps(facets),
+            "index": "downloads" if not query.strip() and index == "relevance" else index,
             "limit": max(1, min(100, int(limit))),
+            "offset": max(0, int(offset)),
         },
     )
     hits = payload.get("hits") if isinstance(payload, dict) else []
@@ -6339,6 +6446,18 @@ def _modrinth_pick_version(instance: InstanceRecord, content_type: str, project_
     return releases[0] if releases else versions[0]
 
 
+def _modrinth_version_is_compatible(instance: InstanceRecord, content_type: str, version: dict[str, Any]) -> bool:
+    """Guard explicit dependency version IDs against a mismatched instance."""
+    game_versions = {str(item) for item in version.get("game_versions") or []}
+    if instance.vanilla_version not in game_versions:
+        return False
+    loader = _remote_loader(instance, content_type)
+    if not loader:
+        return True
+    loaders = {str(item).lower() for item in version.get("loaders") or []}
+    return loader.lower() in loaders
+
+
 def _modrinth_primary_file(version: dict[str, Any]) -> dict[str, Any]:
     files = version.get("files")
     if not isinstance(files, list) or not files:
@@ -6436,7 +6555,9 @@ def _install_modrinth_project(
         elif dependency_project_id:
             dependency_version = _modrinth_pick_version(instance, content_type, dependency_project_id)
         if dependency_version is None or not dependency_project_id:
-            continue
+            raise RuntimeError(f"Could not resolve required dependency for {project_id}.")
+        if not _modrinth_version_is_compatible(instance, content_type, dependency_version):
+            dependency_version = _modrinth_pick_version(instance, content_type, dependency_project_id)
         _install_modrinth_project(
             instance,
             content_type,

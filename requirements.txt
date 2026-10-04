@@ -22,7 +22,9 @@ pillow==12.1.1
 python-dotenv==1.2.2
 pypresence==4.6.1
 spotipy==2.25.2
-yt-dlp==2026.3.17
+# ``default`` includes yt-dlp's matching EJS challenge scripts. Current
+# YouTube playback is deprecated by yt-dlp without these scripts.
+yt-dlp[default]==2026.8.19
 mutagen==1.47.0
 
 # =============================================================================

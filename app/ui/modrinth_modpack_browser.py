@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -33,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.launcher import LauncherService
+from ui.errors import QMessageBox
 from ui.responsive import fitted_window_size
 
 # ---------------------------------------------------------------------------
@@ -53,17 +53,17 @@ class Mr:
     BG_INPUT = QColor("#0d1117")
     BG_MODAL = QColor("#0d1117")
 
-    # Accent – Modrinth green
-    GREEN = QColor("#1bd96a")
-    GREEN_BRIGHT = QColor("#2eeb7a")
-    GREEN_DIM = QColor("#17b559")
-    GREEN_GLOW = QColor(27, 217, 106, 42)
-    GREEN_SOFT = QColor(27, 217, 106, 22)
+    # A restrained emerald accent keeps controls clear without a neon glare.
+    GREEN = QColor("#73c99a")
+    GREEN_BRIGHT = QColor("#91d8b2")
+    GREEN_DIM = QColor("#4d9d73")
+    GREEN_GLOW = QColor(115, 201, 154, 42)
+    GREEN_SOFT = QColor(115, 201, 154, 22)
 
     # Text
     TEXT = QColor("#f0f6fc")
-    TEXT_MUTED = QColor("#8b949e")
-    TEXT_SUBTLE = QColor("#6e7681")
+    TEXT_MUTED = QColor("#e0e0e0")
+    TEXT_SUBTLE = QColor("#b8c1c8")
 
     # Borders
     BORDER = QColor(48, 54, 61, 180)
@@ -112,7 +112,7 @@ _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧")
 
 _ICON_SIZE = 44
 _LARGE_ICON_SIZE = 80
-_CARD_HEIGHT = 96
+_CARD_HEIGHT = 68
 _PAGE_SIZE = 30
 
 # Font sizes (px)
@@ -140,7 +140,7 @@ _CHIP_PAD_H = 16
 _CHIP_RADIUS = 8
 
 # Version row height
-_VERSION_ROW_H = 82
+_VERSION_ROW_H = 46
 
 # Card corner radius
 _CARD_RADIUS = 10
@@ -453,8 +453,9 @@ class ModpackCard(QWidget):
         # Background with hover/select blending
         bg = Mr.blend(Mr.BG_CARD, Mr.BG_CARD_HOVER, self._hover)
         bg = Mr.blend(bg, Mr.BG_CARD_ACTIVE, self._selected)
-        border_col = Mr.blend(Mr.BORDER, Mr.GREEN, (self._hover + self._selected * 0.5) * 0.6)
-        border_w = 1.0 + self._selected
+        # Only the active pack receives a quiet accent outline.
+        border_col = Mr.blend(Mr.with_alpha(Mr.BORDER, 0), Mr.with_alpha(Mr.GREEN, 150), self._selected)
+        border_w = 1.0
 
         p.setPen(QPen(border_col, border_w))
         p.setBrush(bg)
@@ -481,10 +482,10 @@ class ModpackCard(QWidget):
             letter = (self._project.get("title") or "M")[0].upper()
             p.drawText(icon_rect, Qt.AlignCenter, letter)
 
-        # Title – prominent, bold
+        # A quiet two-line card: title and creator only.
         title = str(self._project.get("title") or "Untitled")
         text_left = icon_rect.right() + 14
-        text_top = rect.top() + 14
+        text_top = rect.top() + 12
         text_width = rect.width() - text_left + rect.left() - 14
 
         title_font = QFont(self.font())
@@ -495,48 +496,14 @@ class ModpackCard(QWidget):
         title_rect = QRectF(text_left, text_top, text_width, 20)
         p.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, _truncate(title, 42))
 
-        # Description – smaller, muted
-        desc = str(self._project.get("description") or "")
-        desc_font = QFont(self.font())
-        desc_font.setPixelSize(11)
-        p.setFont(desc_font)
-        p.setPen(Mr.TEXT_MUTED)
-        desc_rect = QRectF(text_left, text_top + 22, text_width, 16)
-        p.drawText(desc_rect, Qt.AlignLeft | Qt.AlignVCenter, _truncate(desc, 70))
-
-        # Author + downloads
+        # Creator is deliberately the only secondary metadata in the sidebar.
         author = str(self._project.get("author") or "Unknown")
-        downloads = int(self._project.get("downloads") or 0)
         meta_font = QFont(self.font())
         meta_font.setPixelSize(11)
         p.setFont(meta_font)
-        p.setPen(Mr.TEXT_SUBTLE)
-        meta_text = f"{author}  ·  {_format_count(downloads)}"
-        meta_rect = QRectF(text_left, text_top + 40, text_width, 16)
-        p.drawText(meta_rect, Qt.AlignLeft | Qt.AlignVCenter, meta_text)
-
-        # Category chips – right-aligned, compact
-        categories = self._project.get("categories") or self._project.get("display_categories") or []
-        if isinstance(categories, list) and categories:
-            badge_font = QFont(self.font())
-            badge_font.setPixelSize(_META_PX)
-            badge_font.setWeight(QFont.Medium)
-            p.setFont(badge_font)
-            bx = rect.right() - 10
-            by = rect.top() + 8
-            gap = 5
-            for cat in reversed(categories[:3]):
-                cat_str = str(cat).strip()
-                if not cat_str:
-                    continue
-                metrics = QFontMetrics(badge_font)
-                bw = metrics.horizontalAdvance(cat_str) + _CAT_BADGE_PAD_H
-                bh = 22
-                bx -= bw + gap
-                badge_rect = QRectF(bx, by, bw, bh)
-                c = Mr.GREEN
-                bg_cat = Mr.with_alpha(c, 20)
-                _draw_chip(p, cat_str, badge_rect, Mr.with_alpha(Mr.GREEN, 80), bg_cat, Mr.GREEN, _CAT_BADGE_RADIUS)
+        p.setPen(Mr.TEXT_MUTED)
+        meta_rect = QRectF(text_left, text_top + 22, text_width, 16)
+        p.drawText(meta_rect, Qt.AlignLeft | Qt.AlignVCenter, f"by {author}")
 
     def sizeHint(self) -> QSize:
         return QSize(0, _CARD_HEIGHT)
@@ -619,75 +586,36 @@ class VersionRow(QWidget):
         p.setBrush(bg)
         p.drawRoundedRect(rect, 8, 8)
 
-        left = 16
-        install_btn_w = 88
-        install_btn_h = 32
-        install_btn_x = w - 16 - install_btn_w
-        content_max_x = install_btn_x - 12
+        left = 14
+        install_btn_w = 72
+        install_btn_h = 26
+        install_btn_x = w - 12 - install_btn_w
+        content_max_x = install_btn_x - 10
 
-        # -- Version Name (top, prominent) --
+        # Compact table columns: version | game | loader | channel | install.
         name = str(self._version.get("name") or self._version.get("version_number") or "Unknown")
         name_font = QFont(self.font())
         name_font.setPixelSize(14)
         name_font.setWeight(QFont.Bold)
         p.setFont(name_font)
         p.setPen(Mr.TEXT)
-        name_rect = QRectF(left, 8, content_max_x - left, 18)
-        p.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, _truncate(name, 60))
+        name_rect = QRectF(left, 0, max(100, (content_max_x - left) * .38), h)
+        p.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, _truncate(name, 32))
 
-        # -- Badge row (middle) --
         loaders: list[str] = self._version.get("loaders") or []
         game_versions: list[str] = self._version.get("game_versions") or []
         version_type = str(self._version.get("version_type") or "release")
 
-        badge_data: list[tuple[str, QColor, QColor, QColor]] = []
-        for loader in loaders[:2]:
-            bc, bgc, tc = _loader_badge(loader)
-            badge_data.append((loader.capitalize(), bc, bgc, tc))
-        for mc_v in game_versions[:2]:
-            c = Mr.GREEN
-            bgc = Mr.with_alpha(c, 20)
-            badge_data.append((f"{mc_v}", Mr.with_alpha(Mr.GREEN, 100), bgc, c))
-        c, bgc, tc = _channel_badge(version_type)
-        badge_data.append((version_type.capitalize(), c, bgc, tc))
-
-        badge_font = QFont(self.font())
-        badge_font.setPixelSize(_META_PX)
-        badge_font.setWeight(QFont.Medium)
-        p.setFont(badge_font)
-
-        bx = left
-        by = 30
-        badge_h = _BADGE_H
-        badge_gap = 6
-        max_badge_x = content_max_x
-
-        for text, bc, bgc, tc in badge_data:
-            metrics = QFontMetrics(badge_font)
-            bw = metrics.horizontalAdvance(text) + _BADGE_PAD_H
-            if bx + bw > max_badge_x:
-                remaining = len(badge_data) - badge_data.index((text, bc, bgc, tc))
-                more_text = f"+{remaining}"
-                bw_more = metrics.horizontalAdvance(more_text) + _BADGE_PAD_H
-                if bx + bw_more <= max_badge_x:
-                    badge_rect = QRectF(bx, by, bw_more, badge_h)
-                    _draw_chip(p, more_text, badge_rect, Mr.TEXT_SUBTLE, Mr.BG_ELEVATED, Mr.TEXT_MUTED)
-                break
-            badge_rect = QRectF(bx, by, bw, badge_h)
-            _draw_chip(p, text, badge_rect, bc, bgc, tc)
-            bx += bw + badge_gap
-
-        # -- Published date (bottom-left) --
-        date_str = str(self._version.get("date_published") or "")
-        if date_str:
-            date_font = QFont(self.font())
-            date_font.setPixelSize(_SMALL_PX)
-            p.setFont(date_font)
-            p.setPen(Mr.TEXT_SUBTLE)
-            relative = _date_relative(date_str)
-            published = f"Published {relative}"
-            date_rect = QRectF(left, 62, content_max_x - left, 14)
-            p.drawText(date_rect, Qt.AlignLeft | Qt.AlignVCenter, published)
+        cell_font = QFont(self.font())
+        cell_font.setPixelSize(11)
+        p.setFont(cell_font)
+        p.setPen(Mr.TEXT_MUTED)
+        available = content_max_x - name_rect.right()
+        cell_w = available / 3
+        cells = (", ".join(game_versions[:2]) or "—", ", ".join(loaders[:1]).capitalize() or "—", version_type.capitalize())
+        for index, text in enumerate(cells):
+            cell = QRectF(name_rect.right() + index * cell_w, 0, cell_w, h)
+            p.drawText(cell, Qt.AlignLeft | Qt.AlignVCenter, _truncate(text, 16))
 
         # -- Install button (right side, vertically centered) --
         btn_rect = QRectF(install_btn_x, (h - install_btn_h) / 2, install_btn_w, install_btn_h)
@@ -706,7 +634,7 @@ class VersionRow(QWidget):
         btn_font.setPixelSize(13)
         btn_font.setWeight(QFont.DemiBold)
         p.setFont(btn_font)
-        p.setPen(QColor("#0d1117"))
+        p.setPen(QColor("#102018"))
         p.drawText(btn_rect, Qt.AlignCenter, "Install")
 
         # Bottom separator
@@ -719,7 +647,7 @@ class VersionRow(QWidget):
 
     def is_install_button_at(self, pos: QPoint) -> bool:
         w = self.width()
-        btn_rect = QRectF(w - 16 - 88, (self.height() - 32) / 2, 88, 32)
+        btn_rect = QRectF(w - 12 - 72, (self.height() - 26) / 2, 72, 26)
         return btn_rect.contains(pos)
 
     def mousePressEvent(self, event) -> None:
@@ -884,6 +812,10 @@ class ModrinthModpackBrowser(QDialog):
         self.setModal(True)
         self.setMinimumSize(1100, 760)
         self.resize(fitted_window_size(self.parentWidget() or self, 1280, 860, minimum_width=1100, minimum_height=760))
+        self.setFont(QFont("Segoe UI", 10))
+        # Retained as an internal progress sink; the former bottom status bar is gone.
+        self.footer_status = QLabel("", self)
+        self.footer_status.hide()
         self._build_ui()
         QTimer.singleShot(0, self._load_initial)
 
@@ -918,7 +850,6 @@ class ModrinthModpackBrowser(QDialog):
 
         cl.addWidget(self._build_right_panel(), 2)
         root.addWidget(content, 1)
-        root.addWidget(self._build_footer())
 
         self._apply_styles()
 
@@ -1167,13 +1098,6 @@ class ModrinthModpackBrowser(QDialog):
         self.sort_combo.currentIndexChanged.connect(self._apply_version_filters)
         row1.addWidget(self.sort_combo)
 
-        self.version_search_field = QLineEdit()
-        self.version_search_field.setObjectName("versionSearchField")
-        self.version_search_field.setPlaceholderText("Search versions…")
-        self.version_search_field.setMinimumWidth(140)
-        self.version_search_field.textChanged.connect(self._apply_version_filters)
-        row1.addWidget(self.version_search_field, 1)
-
         row1.addStretch()
         fw_layout.addLayout(row1)
 
@@ -1196,6 +1120,11 @@ class ModrinthModpackBrowser(QDialog):
         fw_layout.addLayout(row2)
 
         vs_layout.addWidget(fw)
+
+        table_header = QLabel("VERSION                                      GAME VERSION                 LOADER                  STATUS")
+        table_header.setObjectName("versionTableHeader")
+        table_header.setFixedHeight(24)
+        vs_layout.addWidget(table_header)
 
         # Version list – takes remaining space
         self.version_scroll = QScrollArea()
@@ -1244,9 +1173,7 @@ class ModrinthModpackBrowser(QDialog):
         layout = QHBoxLayout(footer)
         layout.setContentsMargins(14, 0, 14, 0)
         layout.setSpacing(8)
-        self.footer_status = QLabel("")
-        self.footer_status.setObjectName("footerStatus")
-        layout.addWidget(self.footer_status, 1)
+        layout.addWidget(QLabel(""), 1)
         self.cancel_button = QPushButton("Close")
         self.cancel_button.setObjectName("footerCloseButton")
         self.cancel_button.clicked.connect(self.reject)
@@ -1261,6 +1188,7 @@ class ModrinthModpackBrowser(QDialog):
         self.setStyleSheet(f"""
         QDialog#modrinthBrowser {{
             background-color: {_mr_css(Mr.BG)};
+            font-family: "Segoe UI", "Inter", sans-serif;
         }}
         QWidget#browserHeader {{
             background-color: {_mr_css(Mr.BG_PANEL)};
@@ -1297,16 +1225,16 @@ class ModrinthModpackBrowser(QDialog):
         }}
         QWidget#browserLeftPanel {{
             background-color: {_mr_css(Mr.BG_CARD)};
-            border: 1px solid {_mr_css(Mr.BORDER)};
-            border-radius: 10px;
+            border: none;
+            border-radius: 12px;
         }}
         QWidget#browserRightPanel {{
             background-color: {_mr_css(Mr.BG_SURFACE)};
-            border: 1px solid {_mr_css(Mr.BORDER)};
-            border-radius: 10px;
+            border: none;
+            border-radius: 12px;
         }}
         QFrame#browserDivider {{
-            background-color: {_mr_css(Mr.SEPARATOR)};
+            background-color: transparent;
             max-width: 1px;
             border: none;
         }}
@@ -1402,7 +1330,7 @@ class ModrinthModpackBrowser(QDialog):
             background: transparent;
         }}
         QLabel#detailStats {{
-            color: {_mr_css(Mr.TEXT_SUBTLE)};
+            color: {_mr_css(Mr.TEXT_MUTED)};
             font-size: {_META_PX}px;
             font-weight: 400;
             background: transparent;
@@ -1421,6 +1349,14 @@ class ModrinthModpackBrowser(QDialog):
             font-size: {_META_PX}px;
             line-height: 1.5;
             background: transparent;
+        }}
+        QLabel#versionTableHeader {{
+            color: {_mr_css(Mr.TEXT_SUBTLE)};
+            background-color: {_mr_css(Mr.BG_CARD)};
+            border-radius: 8px;
+            padding-left: 14px;
+            font-size: 10px;
+            font-weight: 700;
         }}
         QWidget#versionSection, QWidget#versionFilters {{
             background: transparent;
@@ -1763,7 +1699,8 @@ class ModrinthModpackBrowser(QDialog):
         mc = self.mc_filter_combo.currentData()
         loader = self.loader_filter_combo.currentData()
         sort = self.sort_combo.currentData()
-        search_text = self.version_search_field.text().strip().lower()
+        # The table deliberately has no redundant per-version search field.
+        search_text = ""
 
         filtered = []
         for v in self._versions:
@@ -1858,11 +1795,9 @@ class ModrinthModpackBrowser(QDialog):
         self._spinner_timer.stop()
         project = self._project_by_id.get(self._selected_project_id or "", {})
         suggested = str(project.get("title") or "Modrinth Modpack")
-        if self._selected_version:
-            vn = str(self._selected_version.get("name") or self._selected_version.get("version_number") or "")
-            if vn:
-                suggested = f"{suggested} {vn}"
         self.footer_status.setText("Download complete")
+        # Emit before accepting so the parent can create the install request;
+        # accepting this browser then closes both selection surfaces at once.
         self.install_ready.emit(suggested, path)
         self.accept()
 

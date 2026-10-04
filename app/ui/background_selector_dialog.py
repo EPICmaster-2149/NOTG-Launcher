@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QMessageBox,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -26,6 +25,7 @@ except ImportError:  # pragma: no cover - depends on the local Qt build
     QVideoSink = None
 
 from core.launcher import BACKGROUND_SUFFIXES, BackgroundRecord, LauncherService, VIDEO_SUFFIXES
+from ui.errors import QMessageBox
 from ui.responsive import fitted_window_size, scaled_px, screen_scale
 from ui.theme import current_theme_mode, theme_palette
 from ui.topbar import ModernButton, blend_colors

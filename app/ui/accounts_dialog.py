@@ -11,7 +11,7 @@ import urllib.parse
 import webbrowser
 import time
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRectF, QSize, Qt, QTimer, QUrl, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRectF, QSize, Qt, QThread, QTimer, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QCursor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QImage, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressBar,
     QScrollArea,
     QSizePolicy,
@@ -35,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.launcher import AccountAuthenticationError, AccountConfigurationError, AccountRecord, ElyTwoFactorRequired, LauncherService
+from ui.errors import QMessageBox
 from ui.responsive import fitted_window_size, scaled_px
 from ui.theme import theme_palette
 from ui.topbar import ModernButton
@@ -237,7 +237,7 @@ class AccountCard(QFrame):
         self._active = False
         self._selected = False
         self._hover = 0.0
-        self.setFixedHeight(80)
+        self.setFixedHeight(70)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
@@ -249,7 +249,7 @@ class AccountCard(QFrame):
         self._select_anim.valueChanged.connect(lambda _value: self.update())
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 14, 12, 14)
+        layout.setContentsMargins(14, 10, 12, 10)
         layout.setSpacing(12)
 
         self.avatar = AccountAvatar(46)
@@ -456,6 +456,12 @@ class ModelChoiceLabel(QLabel):
 
 
 class SkinPreviewWidget(QFrame):
+    """Interactive textured 3D skin viewport with a stable native Qt canvas.
+
+    The renderer intentionally avoids requiring an OpenGL context: Qt can
+    fail context creation on some Windows drivers, which otherwise terminates
+    the whole launcher when this dialog is opened.
+    """
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._skin = QImage()
@@ -465,7 +471,10 @@ class SkinPreviewWidget(QFrame):
         self._drag_start: QPoint | None = None
         self._drag_yaw = 0.0
         self._auto_rotate = False
-        self.setMinimumSize(240, 260)
+        # A rigid allocation prevents Qt from collapsing/reflowing the dialog
+        # while the model switches between 3px and 4px arms.
+        self.setFixedSize(300, 330)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setCursor(Qt.OpenHandCursor)
         self._timer = QTimer(self)
         self._timer.setInterval(33)
@@ -476,6 +485,13 @@ class SkinPreviewWidget(QFrame):
         self._cape = QImage(cape_path or "")
         self._model = model or "classic"
         self.update()
+
+    def set_model(self, model: str) -> None:
+        """Swap mesh proportions in-place; never recreate the GL canvas."""
+        normalized = "slim" if model == "slim" else "classic"
+        if self._model != normalized:
+            self._model = normalized
+            self.update()
 
     def set_auto_rotate(self, enabled: bool) -> None:
         self._auto_rotate = enabled
@@ -650,6 +666,37 @@ class SkinPreviewWidget(QFrame):
 
         for _depth, points, texture, shade in sorted(faces, key=lambda item: item[0]):
             draw_textured(points, texture, shade)
+
+
+class AccountAppearanceWorker(QThread):
+    """Fetch/cache account textures without holding up the dialog event loop."""
+
+    loaded = Signal(str, object)
+
+    def __init__(self, service: LauncherService, account: AccountRecord, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._service = service
+        self._account = account
+
+    def run(self) -> None:
+        skin_path: str | None = None
+        cape_path: str | None = None
+        skin_error = ""
+        cape_error = ""
+        try:
+            skin_path = self._service.cache_account_skin_texture(self._account.account_id)
+        except Exception as exc:  # noqa: BLE001
+            skin_error = str(exc)
+        if not self.isInterruptionRequested():
+            try:
+                cape_path = self._service.cache_account_cape_texture(self._account.account_id)
+            except Exception as exc:  # noqa: BLE001
+                cape_error = str(exc)
+        if not self.isInterruptionRequested():
+            self.loaded.emit(
+                self._account.account_id,
+                {"skin_path": skin_path, "cape_path": cape_path, "skin_error": skin_error, "cape_error": cape_error},
+            )
 
 
 class OAuthLoginDialog(QDialog):
@@ -1422,10 +1469,10 @@ class AddAccountDialog(QDialog):
 
         self.microsoft_card = AccountTypeCard(
             "Microsoft Account",
-            "Sign in with Microsoft",
+            "Coming soon",
             _brand_icon("microsoft", service, 46),
         )
-        self.microsoft_card.clicked.connect(lambda: self._open_oauth("microsoft"))
+        self.microsoft_card.clicked.connect(self._show_microsoft_login_unavailable)
         root.addWidget(self.microsoft_card)
 
         self.ely_card = AccountTypeCard(
@@ -1517,6 +1564,13 @@ class AddAccountDialog(QDialog):
         dialog.account_added.connect(self.account_added)
         if dialog.exec() == QDialog.Accepted:
             self.accept()
+
+    def _show_microsoft_login_unavailable(self) -> None:
+        QMessageBox.information(
+            self,
+            "Microsoft Login",
+            "Mojang hasnt given the API for you to login you microsoft account with this launcher yet, it will be there soon!",
+        )
 
     def _open_ely_login(self) -> None:
         dialog = ElyLoginDialog(self.service, self)
@@ -1721,6 +1775,7 @@ class AccountsDialog(QDialog):
         self._cards: dict[str, AccountCard] = {}
         self._ely_appearance_syncing_accounts: set[str] = set()
         self._ely_appearance_synced_accounts: set[str] = set()
+        self._appearance_worker: AccountAppearanceWorker | None = None
         self._ely_appearance_synced.connect(self._handle_accounts_changed)
         self._fade_anim = QVariantAnimation(self, duration=200, easingCurve=QEasingCurve.OutCubic)
         self._fade_anim.valueChanged.connect(lambda value: self.right_panel.setWindowOpacity(float(value)))
@@ -1738,6 +1793,12 @@ class AccountsDialog(QDialog):
     def showEvent(self, event) -> None:
         self._apply_theme()
         super().showEvent(event)
+
+    def closeEvent(self, event) -> None:
+        if self._appearance_worker is not None and self._appearance_worker.isRunning():
+            self._appearance_worker.requestInterruption()
+            self._appearance_worker.wait(800)
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)
@@ -1762,17 +1823,18 @@ class AccountsDialog(QDialog):
         _set_label_font(title, size=15, weight=QFont.DemiBold)
         title_row.addWidget(title)
         title_row.addStretch()
+        sidebar_layout.addLayout(title_row)
         self.add_button = ModernButton(
             "Add Account",
             icon=_button_icon("plus", theme_palette(self)),
             role="accent",
-            height=40,
+            height=70,
             icon_size=20,
-            minimum_width=142,
+            minimum_width=0,
         )
         self.add_button.clicked.connect(self._open_add_account)
-        title_row.addWidget(self.add_button)
-        sidebar_layout.addLayout(title_row)
+        self.add_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        sidebar_layout.addWidget(self.add_button)
 
         self.account_scroll = QScrollArea()
         self.account_scroll.setObjectName("accountScroll")
@@ -1800,7 +1862,7 @@ class AccountsDialog(QDialog):
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(26, 24, 26, 24)
         header_layout.setSpacing(18)
-        self.header_avatar = AccountAvatar(70)
+        self.header_avatar = AccountAvatar(104)
         header_layout.addWidget(self.header_avatar)
         header_text = QVBoxLayout()
         header_text.setSpacing(6)
@@ -1815,8 +1877,8 @@ class AccountsDialog(QDialog):
         header_layout.addLayout(header_text, 1)
         self.use_button = ModernButton(
             "Use Account",
-            icon=_button_icon("check", theme_palette(self)),
-            role="accent",
+            icon=_button_icon("check", theme_palette(self), role="success"),
+            role="success",
             height=44,
             icon_size=20,
             minimum_width=150,
@@ -1854,6 +1916,7 @@ class AccountsDialog(QDialog):
         self.profile_grid.setContentsMargins(0, 2, 0, 0)
         self.profile_grid.setHorizontalSpacing(22)
         self.profile_grid.setVerticalSpacing(10)
+        self.profile_grid.setColumnStretch(1, 1)
         self.profile_panel.layout().addLayout(self.profile_grid)
         overview_layout.addWidget(self.profile_panel)
         overview_layout.addStretch()
@@ -1881,24 +1944,23 @@ class AccountsDialog(QDialog):
         self.open_ely_button = ModernButton("Open Ely.by", role="sidebar", height=42, icon_size=0, minimum_width=134)
         self.open_ely_button.clicked.connect(self._open_ely_browser)
         skin_header_row.addWidget(self.open_ely_button)
-        skin_panel_layout.addLayout(skin_header_row)
-
         skin_row = QHBoxLayout()
         skin_row.setSpacing(22)
         self.skin_preview = SkinPreviewWidget()
-        self.skin_preview.setMinimumSize(260, 220)
-        skin_row.addWidget(self.skin_preview, 2)
+        skin_row.addWidget(self.skin_preview, 0, Qt.AlignCenter)
         info_col = QVBoxLayout()
         info_col.setSpacing(12)
         self.skin_name = QLabel("Current Skin")
         self.skin_name.setObjectName("accountsPrimaryText")
         _set_label_font(self.skin_name, size=12, weight=QFont.DemiBold)
         self.skin_resolution = QLabel("")
-        self.skin_resolution.setObjectName("accountsSubtitle")
+        self.skin_resolution.setObjectName("appearanceValue")
         self.skin_model = QLabel("")
-        self.skin_model.setObjectName("accountsSubtitle")
+        self.skin_model.setObjectName("appearanceValue")
         self.auto_rotate = QCheckBox("Auto rotate")
+        self.auto_rotate.setObjectName("autoRotateToggle")
         self.auto_rotate.stateChanged.connect(lambda state: self.skin_preview.set_auto_rotate(state == Qt.Checked.value))
+        self.auto_rotate.setChecked(True)
         model_label = QLabel("Model Type")
         model_label.setObjectName("accountsSubtitle")
         self.model_classic = ModelChoiceLabel("classic", "Classic")
@@ -1920,6 +1982,7 @@ class AccountsDialog(QDialog):
         info_col.addStretch()
         skin_row.addLayout(info_col, 1)
         skin_panel_layout.addLayout(skin_row)
+        skin_panel_layout.addLayout(skin_header_row)
         cosmetics_layout.addWidget(self.skin_panel)
 
         self.cape_panel = self._panel("Cape")
@@ -1935,7 +1998,6 @@ class AccountsDialog(QDialog):
         cape_header_row.addWidget(self.upload_cape_button)
         cape_header_row.addWidget(self.remove_cape_button)
         cape_header_row.addWidget(self.refresh_cape_button)
-        cape_layout.addLayout(cape_header_row)
         cape_row = QHBoxLayout()
         cape_row.setSpacing(24)
         self.cape_preview = QLabel("No cape")
@@ -1946,14 +2008,15 @@ class AccountsDialog(QDialog):
         cape_info = QVBoxLayout()
         cape_info.setSpacing(10)
         self.cape_status = QLabel("")
-        self.cape_status.setObjectName("accountsSubtitle")
+        self.cape_status.setObjectName("appearanceValue")
         self.cape_type = QLabel("")
-        self.cape_type.setObjectName("accountsSubtitle")
+        self.cape_type.setObjectName("appearanceValue")
         cape_info.addWidget(self.cape_status)
         cape_info.addWidget(self.cape_type)
         cape_info.addStretch()
         cape_row.addLayout(cape_info, 1)
         cape_layout.addLayout(cape_row)
+        cape_layout.addLayout(cape_header_row)
         cosmetics_layout.addWidget(self.cape_panel)
         cosmetics_layout.addStretch()
         self.cosmetics_scroll.setWidget(self.cosmetics_body)
@@ -2000,8 +2063,8 @@ class AccountsDialog(QDialog):
             }}
             QFrame#accountSidebar, QFrame#accountContent {{
                 background-color: {_rgba(roles['surface_1'], 224)};
-                border: 1px solid {_rgba(roles['outline_variant'])};
-                border-radius: 8px;
+                border: none;
+                border-radius: 12px;
             }}
             QFrame#accountHeader {{
                 background-color: transparent;
@@ -2010,9 +2073,9 @@ class AccountsDialog(QDialog):
                 border-top-right-radius: 8px;
             }}
             QFrame#accountPanel {{
-                background-color: transparent;
-                border: 1px solid {_rgba(roles['outline_variant'])};
-                border-radius: 8px;
+                background-color: {_rgba(roles['surface_2'], 136)};
+                border: none;
+                border-radius: 12px;
             }}
             QTabWidget#accountTabs::pane {{
                 border: none;
@@ -2020,19 +2083,18 @@ class AccountsDialog(QDialog):
             }}
             QTabBar::tab {{
                 color: {_hex(roles['text_muted'])};
-                background-color: {_rgba(roles['surface_1'], 190)};
-                border: 1px solid {_rgba(roles['outline_variant'])};
-                border-bottom: none;
-                padding: 9px 18px;
-                margin-right: 6px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
+                background-color: transparent;
+                border: none;
+                border-bottom: 2px solid transparent;
+                padding: 11px 18px 9px 18px;
+                margin-right: 4px;
             }}
             QTabBar::tab:selected {{
                 color: {_hex(roles['text'])};
-                background-color: {_rgba(roles['accent_soft'])};
-                border-color: {_rgba(roles['accent_bright'], 170)};
+                background-color: {_rgba(roles['accent_soft'], 92)};
+                border-bottom-color: {_rgba(roles['accent_bright'], 220)};
             }}
+            QTabBar::tab:hover {{ background-color: {_rgba(roles['hover'], 132)}; }}
             QScrollArea#accountScroll {{
                 background-color: {_rgba(roles['surface_1'], 214)};
                 border: none;
@@ -2055,6 +2117,11 @@ class AccountsDialog(QDialog):
             QLabel#profileValue {{
                 color: {_hex(roles['text'])};
                 background: transparent;
+            }}
+            QLabel#appearanceValue {{
+                color: {_hex(roles['text'])};
+                background: transparent;
+                font-size: 11px;
             }}
             QLabel#modelChoice {{
                 color: {_hex(roles['text'])};
@@ -2088,6 +2155,17 @@ class AccountsDialog(QDialog):
                 color: {_hex(roles['text_muted'])};
                 spacing: 8px;
             }}
+            QCheckBox#autoRotateToggle::indicator {{
+                width: 34px;
+                height: 18px;
+                border-radius: 9px;
+                background-color: {_rgba(roles['surface_3'])};
+                border: 1px solid {_rgba(roles['outline_variant'])};
+            }}
+            QCheckBox#autoRotateToggle::indicator:checked {{
+                background-color: {_rgba(roles['accent'])};
+                border-color: {_rgba(roles['accent_bright'])};
+            }}
             QSplitter::handle {{
                 background-color: {_rgba(roles['separator'])};
                 width: 4px;
@@ -2096,6 +2174,10 @@ class AccountsDialog(QDialog):
         )
         for card in self._cards.values():
             card.refresh_theme()
+
+    def refresh_theme(self) -> None:
+        """Called by the application's central theme refresh dispatcher."""
+        self._apply_theme()
 
     def refresh(self) -> None:
         accounts = self.service.list_account_records()
@@ -2142,10 +2224,51 @@ class AccountsDialog(QDialog):
             avatar = self.service.account_avatar_path(account.account_id)
         except Exception:
             avatar = self.service.resolve_icon_path("assets/default-instance-icons/Grass Block.png")
-        self.header_avatar.set_avatar(avatar, _brand_icon(account.account_type, self.service, 70))
+        self.header_avatar.set_avatar(avatar, _brand_icon(account.account_type, self.service, 104))
         self.use_button.setEnabled(account.account_id != active_id)
         self.remove_button.setEnabled(True)
         self._render_profile(account)
+        self._load_appearance_async(account)
+
+    def _load_appearance_async(self, account: AccountRecord) -> None:
+        if self._appearance_worker is not None and self._appearance_worker.isRunning():
+            self._appearance_worker.requestInterruption()
+        self.skin_preview.set_skin(None)
+        self.skin_name.setText("Loading skin…")
+        self.skin_resolution.setText("Fetching account texture in the background")
+        self.skin_model.setText("")
+        worker = AccountAppearanceWorker(self.service, account, self)
+        self._appearance_worker = worker
+        worker.loaded.connect(lambda account_id, payload, w=worker: self._apply_appearance_result(w, account_id, payload))
+        worker.finished.connect(lambda w=worker: setattr(self, "_appearance_worker", None) if self._appearance_worker is w else None)
+        worker.start()
+
+    def _apply_appearance_result(self, worker: AccountAppearanceWorker, account_id: str, payload: object) -> None:
+        if worker is not self._appearance_worker or account_id != self._selected_account_id or not isinstance(payload, dict):
+            return
+        account = self._selected_account()
+        if account is None:
+            return
+        skin_path = payload.get("skin_path") if isinstance(payload.get("skin_path"), str) else None
+        cape_path = payload.get("cape_path") if isinstance(payload.get("cape_path"), str) else None
+        skin_error = str(payload.get("skin_error") or "")
+        cape_error = str(payload.get("cape_error") or "")
+        model = (account.skin.model if account.skin else None) or "classic"
+        self.skin_preview.set_skin(skin_path, model, cape_path)
+        self._set_model_selection(model)
+        self.skin_name.setText("Current Skin")
+        self.skin_resolution.setText(f"Resolution: {self.skin_preview.skin_resolution()}" if skin_path else (skin_error or "No skin available"))
+        self.skin_model.setText(f"Model Type: {model.title()}" if skin_path else "")
+        self.manage_skin_button.setEnabled(True)
+        self.open_ely_button.setVisible(account.account_type == "ely")
+        self._render_cape_result(account, cape_path, cape_error)
+
+    def _set_model_selection(self, model: str) -> None:
+        self.model_classic.setProperty("selected", model == "classic")
+        self.model_slim.setProperty("selected", model == "slim")
+        for choice in (self.model_classic, self.model_slim):
+            choice.style().unpolish(choice)
+            choice.style().polish(choice)
     def _render_profile(self, account: AccountRecord) -> None:
         while self.profile_grid.count():
             item = self.profile_grid.takeAt(0)
@@ -2236,6 +2359,25 @@ class AccountsDialog(QDialog):
             self.cape_status.setText(f"Cape Status: {cape_error or 'None'}")
             self.cape_type.setText(f"Cape Type: {account.display_type}")
 
+    def _render_cape_result(self, account: AccountRecord, cape_path: str | None, cape_error: str = "") -> None:
+        """Apply a worker result on the GUI thread without triggering I/O."""
+        offline = account.account_type == "offline"
+        self.upload_cape_button.setEnabled(offline)
+        self.remove_cape_button.setEnabled(offline and bool(cape_path))
+        self.refresh_cape_button.setEnabled(account.account_type != "offline")
+        if cape_path:
+            pixmap = QPixmap(cape_path)
+            if not pixmap.isNull():
+                self.cape_preview.setPixmap(pixmap.scaled(120, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.cape_status.setText("Cape Status: Available")
+            cape_type = (account.cape.source if account.cape else account.account_type) or account.account_type
+            self.cape_type.setText(f"Cape Type: {cape_type.title()}")
+        else:
+            self.cape_preview.setPixmap(QPixmap())
+            self.cape_preview.setText("No cape")
+            self.cape_status.setText(f"Cape Status: {cape_error or 'None'}")
+            self.cape_type.setText(f"Cape Type: {account.display_type}")
+
     def _set_skin_model(self, model: str) -> None:
         account = self._selected_account()
         if account is None:
@@ -2245,7 +2387,12 @@ class AccountsDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Skin Model", str(exc))
             return
-        self._render_selected()
+        # Keep the current texture/context alive. Re-rendering the selected
+        # account here used to clear the viewport, start I/O again, and let the
+        # layout momentarily snap to a zero-size surface.
+        self.skin_preview.set_model(model)
+        self._set_model_selection(model)
+        self.skin_model.setText(f"Model Type: {model.title()}")
 
     def _upload_cape(self) -> None:
         account = self._selected_account()

@@ -202,13 +202,29 @@ def current_theme_accent(widget: QWidget | None = None) -> QColor:
     return QColor(normalize_theme_accent(app.property(THEME_ACCENT_PROPERTY)))
 
 
-def set_theme_accent(app: QApplication, color: QColor | str) -> str:
+def set_theme_accent(
+    app: QApplication,
+    color: QColor | str,
+    *,
+    refresh_widgets: bool = True,
+) -> str:
+    """Apply an accent colour.
+
+    Live colour-wheel previews intentionally skip custom-widget refreshes. Qt
+    already repolishes regular widgets when the application style sheet
+    changes; refreshing every specialised widget on every mouse move makes
+    the wheel feel stalled. The final committed value still performs the full
+    refresh.
+    """
     normalized = normalize_theme_accent(color.name() if isinstance(color, QColor) else color)
     if normalize_theme_accent(app.property(THEME_ACCENT_PROPERTY)) == normalized and app.styleSheet():
+        if refresh_widgets:
+            refresh_theme(app)
         return normalized
     app.setProperty(THEME_ACCENT_PROPERTY, normalized)
     _set_application_stylesheet(app)
-    refresh_theme(app)
+    if refresh_widgets:
+        refresh_theme(app)
     return normalized
 
 
@@ -614,6 +630,17 @@ def _accented_palette(base: dict[str, Any], mode: str) -> dict[str, Any]:
         "border_active": _with_alpha(roles["accent_bright"], 255 if light_mode else 238),
         "text": roles["on_accent"],
         "shadow": _with_alpha(roles["accent_press"], 48 if light_mode else 80),
+    }
+    buttons["success"] = {
+        "bg": _with_alpha(roles["success"], 226 if light_mode else 122),
+        "hover": _with_alpha(roles["success"], 242 if light_mode else 156),
+        "press": _with_alpha(roles["success"], 252 if light_mode else 182),
+        "active": _with_alpha(roles["success"], 255 if light_mode else 202),
+        "border": _with_alpha(roles["success"], 208 if light_mode else 158),
+        "border_hover": _with_alpha(roles["success"], 244 if light_mode else 218),
+        "border_active": _with_alpha(roles["success"], 255),
+        "text": _readable_text_for(roles["success"], light_mode=light_mode),
+        "shadow": _with_alpha(roles["success"], 50 if light_mode else 78),
     }
     buttons["danger"]["bg"] = _with_alpha(roles["danger"], 222 if light_mode else 116)
     buttons["danger"]["hover"] = _with_alpha(roles["danger"], 238 if light_mode else 148)
@@ -1185,4 +1212,3 @@ def refresh_theme(app: QApplication | None = None) -> None:
         refresh = getattr(widget, "refresh_theme", None)
         if callable(refresh):
             refresh()
-        widget.update()

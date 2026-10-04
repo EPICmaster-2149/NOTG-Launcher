@@ -23,11 +23,12 @@ from PySide6.QtCore import (
     QThread,
     QTimer,
     QUrl,
+    QPropertyAnimation,
     Signal,
     QVariantAnimation,
     QObject,
 )
-from PySide6.QtGui import QColor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -41,7 +42,6 @@ from PySide6.QtWidgets import (
     QListView,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -63,6 +63,7 @@ except ImportError:  # pragma: no cover - depends on the local Qt build
 
 from core.config import FEATURE_NOT_IMPLEMENTED_MESSAGE, get_env_value, load_local_env
 from core.launcher import MUSIC_SUFFIXES, LauncherService, MusicPlaylistRecord, MusicRecord
+from ui.errors import QMessageBox
 from ui.app_icon import application_icon
 from ui.responsive import fitted_window_size, scaled_px
 from ui.theme import current_theme_mode, theme_palette
@@ -74,14 +75,18 @@ DEFAULT_ACCENT = QColor("#2E45FF")
 UNSET_ICON = object()
 PLAYLIST_ICON_PREFIX = "assets/Playlist-Default-Icons"
 MUSIC_ICON_PREFIX = "assets/Music-Icons"
-YTDLP_AUDIO_FORMAT = "bestaudio[acodec^=opus]/bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]"
+# AAC/M4A is the most consistently supported remote format by Qt Multimedia on
+# Windows.  Opus remains the fallback for sources that do not publish AAC.
+YTDLP_AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio[acodec^=opus]"
 _PIXMAP_CACHE: dict[tuple[str, int], QPixmap] = {}
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class MediaResolveWorker(QThread):
     resolved = Signal(object)
     failed = Signal(object)
     progress = Signal(object)
+    artwork_cached = Signal(object)
 
     def __init__(
         self,
@@ -92,6 +97,7 @@ class MediaResolveWorker(QThread):
         music_id: str | None = None,
         autoplay: bool = False,
         artwork_cache_dir: Path | None = None,
+        stream_cache_dir: Path | None = None,
         config_roots: list[Path] | None = None,
         parent: QObject | None = None,
     ):
@@ -102,7 +108,11 @@ class MediaResolveWorker(QThread):
         self._music_id = music_id
         self._autoplay = autoplay
         self._artwork_cache_dir = artwork_cache_dir
+        self._stream_cache_dir = stream_cache_dir
         self._config_roots = list(config_roots or [])
+        self._artwork_session: requests.Session | None = None
+        self._last_download_progress_at = 0.0
+        self._last_download_percent = -1
 
     def run(self) -> None:
         try:
@@ -118,6 +128,13 @@ class MediaResolveWorker(QThread):
                     "autoplay": self._autoplay,
                 }
             )
+            # Cover art is cosmetic and must not delay the usable resolver
+            # result. Cache it after the track has reached the model; the UI
+            # draws its existing fallback until this signal repaints it.
+            try:
+                self._cache_artwork_for_tracks(tracks)
+            except Exception:  # noqa: BLE001 - artwork must never fail playback
+                pass
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(
                 {
@@ -125,7 +142,7 @@ class MediaResolveWorker(QThread):
                     "playlist_id": self._playlist_id,
                     "music_id": self._music_id,
                     "url": self._url,
-                    "error": str(exc),
+                    "error": _clean_media_error(str(exc)),
                     "autoplay": self._autoplay,
                 }
             )
@@ -161,6 +178,13 @@ class MediaResolveWorker(QThread):
         if _is_youtube_playlist_url(url):
             return self._resolve_youtube_playlist(url, source_url=source_url)
 
+        # A bare signed YouTube URL is not a reliable QMediaPlayer source:
+        # yt-dlp also provides request headers and the URL expires.  On first
+        # playback we use yt-dlp's downloader in this worker and hand Qt a
+        # local audio file instead.  This works with the same request details
+        # yt-dlp used to validate the media.
+        cache_audio = self._mode == "refresh" and platform in {"youtube", "spotify"}
+        cached_audio = self._cached_audio_file(source_url) if cache_audio else None
         options = {
             "quiet": True,
             "no_warnings": True,
@@ -169,11 +193,50 @@ class MediaResolveWorker(QThread):
             "noplaylist": True,
             "extract_flat": False,
         }
+        if _is_youtube_url(url) or platform == "youtube":
+            # Let the current yt-dlp choose its supported fallback clients.
+            # Pinning Android is unreliable because it can itself require a
+            # PO token for media delivery. Node is used if installed; its EJS
+            # solver is required by modern YouTube extraction.
+            node_path = _yt_dlp_node_path(self._config_roots)
+            if node_path:
+                options["js_runtimes"] = {"node": {"path": str(node_path)}}
+        if cache_audio and cached_audio is None:
+            if self._stream_cache_dir is None:
+                raise RuntimeError("Music cache is unavailable.")
+            self._stream_cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_key = hashlib.sha256(source_url.encode("utf-8")).hexdigest()
+            options.update(
+                {
+                    "skip_download": False,
+                    "outtmpl": str(self._stream_cache_dir / f"{cache_key}.%(ext)s"),
+                    "overwrites": False,
+                    "continuedl": True,
+                    # yt-dlp defaults to a single HLS/DASH fragment. Two is a
+                    # conservative speed-up that avoids saturating the
+                    # connection or destabilising YouTube playback.
+                    "concurrent_fragment_downloads": 2,
+                    "buffersize": 1024 * 1024,
+                    "retries": 3,
+                    "fragment_retries": 3,
+                    "progress_hooks": [self._handle_download_progress],
+                }
+            )
+            self.progress.emit({"type": "status", "text": "Preparing YouTube audio..."})
         with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=cache_audio and cached_audio is None)
             if not isinstance(info, dict):
                 raise RuntimeError("Could not read media metadata.")
+            if cache_audio and cached_audio is None:
+                cached_audio = self._downloaded_audio_file(info, ydl)
             payload = self._payload_from_info(info, source_url=source_url, platform=platform)
+            if cache_audio and cached_audio is not None:
+                payload["stream_url"] = QUrl.fromLocalFile(str(cached_audio.resolve())).toString()
+            elif platform == "youtube":
+                # Resolve immediately before first play instead of saving a
+                # signed URL that may already be invalid by the time it is
+                # selected in the player.
+                payload["stream_url"] = None
             if display_name:
                 payload["name"] = display_name
             if artist:
@@ -182,11 +245,59 @@ class MediaResolveWorker(QThread):
                 payload["album"] = album
             if artwork_url:
                 payload["artwork_url"] = artwork_url
-                payload["artwork_path"] = self._cache_artwork(artwork_url)
+                payload["artwork_path"] = None
             if duration_ms:
                 payload["duration_ms"] = duration_ms
             self.progress.emit({"type": "progress", "value": 1, "maximum": 1, "text": f"Added {payload['name']}"})
             return [payload]
+
+    def _cached_audio_file(self, source_url: str) -> Path | None:
+        if self._stream_cache_dir is None or not self._stream_cache_dir.is_dir():
+            return None
+        cache_key = hashlib.sha256(source_url.encode("utf-8")).hexdigest()
+        candidates = [path for path in self._stream_cache_dir.glob(f"{cache_key}.*") if path.is_file() and path.stat().st_size > 0]
+        return candidates[0] if candidates else None
+
+    @staticmethod
+    def _downloaded_audio_file(info: dict[str, object], ydl) -> Path:
+        requested = info.get("requested_downloads")
+        if isinstance(requested, list):
+            for item in requested:
+                if not isinstance(item, dict):
+                    continue
+                file_name = _optional_text(item.get("filepath"))
+                if file_name:
+                    path = Path(file_name)
+                    if path.is_file() and path.stat().st_size > 0:
+                        return path
+        path = Path(ydl.prepare_filename(info))
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+        raise RuntimeError("YouTube audio download did not create a playable file.")
+
+    def _handle_download_progress(self, status: dict[str, object]) -> None:
+        """Relay bounded download updates without flooding the GUI thread."""
+        if status.get("status") == "finished":
+            self.progress.emit({"type": "status", "text": "Finalising audio..."})
+            return
+        if status.get("status") != "downloading":
+            return
+        now = monotonic()
+        total = status.get("total_bytes") or status.get("total_bytes_estimate") or 0
+        downloaded = status.get("downloaded_bytes") or 0
+        try:
+            percent = int((float(downloaded) * 100) / float(total)) if float(total) > 0 else -1
+        except (TypeError, ValueError, ZeroDivisionError):
+            percent = -1
+        if now - self._last_download_progress_at < 0.2 and percent == self._last_download_percent:
+            return
+        self._last_download_progress_at = now
+        self._last_download_percent = percent
+        text = f"Downloading audio... {percent}%" if percent >= 0 else "Downloading audio..."
+        payload: dict[str, object] = {"type": "status", "text": text}
+        if percent >= 0:
+            payload.update({"type": "progress", "value": percent, "maximum": 100})
+        self.progress.emit(payload)
 
     def _resolve_youtube_playlist(self, url: str, *, source_url: str) -> list[dict[str, object]]:
         import yt_dlp
@@ -300,7 +411,7 @@ class MediaResolveWorker(QThread):
                 payload["album"] = album_name
                 artwork_url = _optional_text(images[0].get("url")) if images else None
                 payload["artwork_url"] = artwork_url
-                payload["artwork_path"] = self._cache_artwork(artwork_url)
+                payload["artwork_path"] = None
                 tracks.append(payload)
             if self.isInterruptionRequested() or not results.get("next"):
                 break
@@ -326,7 +437,7 @@ class MediaResolveWorker(QThread):
             "artist": primary_artist,
             "album": album.get("name") if isinstance(album, dict) else None,
             "artwork_url": artwork_url,
-            "artwork_path": self._cache_artwork(artwork_url),
+            "artwork_path": None,
             "duration_ms": track.get("duration_ms") or 0,
         }
 
@@ -357,7 +468,7 @@ class MediaResolveWorker(QThread):
             "source_url": entry_url,
             "stream_url": None,
             "artwork_url": artwork_url,
-            "artwork_path": self._cache_artwork(artwork_url),
+            "artwork_path": None,
             "date_added": datetime.now(timezone.utc).isoformat(),
             "duration_ms": duration_ms,
             "platform": "youtube",
@@ -366,7 +477,7 @@ class MediaResolveWorker(QThread):
         }
 
     def _payload_from_info(self, info: dict[str, object], *, source_url: str, platform: str) -> dict[str, object]:
-        stream_url = _best_stream_url(info)
+        stream_url = _best_stream_url(info, prefer_qt_compatible=(platform == "youtube"))
         if not stream_url:
             raise RuntimeError("No playable audio stream was found.")
         artwork_url = _thumbnail_url_from_info(info)
@@ -375,7 +486,7 @@ class MediaResolveWorker(QThread):
             "source_url": source_url,
             "stream_url": stream_url,
             "artwork_url": artwork_url,
-            "artwork_path": self._cache_artwork(artwork_url),
+            "artwork_path": None,
             "date_added": datetime.now(timezone.utc).isoformat(),
             "duration_ms": int(float(info.get("duration") or 0) * 1000),
             "platform": platform,
@@ -390,7 +501,9 @@ class MediaResolveWorker(QThread):
         if target.is_file():
             return str(target.resolve())
         try:
-            response = requests.get(url, timeout=15)
+            if self._artwork_session is None:
+                self._artwork_session = requests.Session()
+            response = self._artwork_session.get(url, timeout=(3.05, 8))
         except requests.RequestException:
             return None
         if not response.ok or not response.content:
@@ -401,6 +514,26 @@ class MediaResolveWorker(QThread):
         except OSError:
             return None
         return str(target.resolve())
+
+    def _cache_artwork_for_tracks(self, tracks: list[dict[str, object]]) -> None:
+        """Warm image cache after emitting tracks, never on the UI path."""
+        if self._artwork_cache_dir is None:
+            return
+        cached_any = False
+        seen_urls: set[str] = set()
+        for track in tracks:
+            if self.isInterruptionRequested():
+                return
+            url = _optional_text(track.get("artwork_url"))
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            if _artwork_cache_path(self._artwork_cache_dir, url).is_file():
+                continue
+            if self._cache_artwork(url):
+                cached_any = True
+        if cached_any:
+            self.artwork_cached.emit({"playlist_id": self._playlist_id})
 
 
 class MusicController(QObject):
@@ -443,6 +576,10 @@ class MusicController(QObject):
         self._checkpoint_saved_for_stop = False
         self._started = False
         self._workers: set[MediaResolveWorker] = set()
+        # A direct stream refresh downloads to a source-hash cache filename.
+        # Keep at most one active owner for each source so rapid Play clicks
+        # cannot make yt-dlp contend for the same .part file on Windows.
+        self._stream_resolution_sources: set[str] = set()
         self._shuffle_queue: list[str] = []
         self._stream_retry_counts: dict[str, int] = {}
         self._last_network_error_at = 0.0
@@ -635,7 +772,14 @@ class MusicController(QObject):
         if track is None or not track.enabled:
             return False
 
-        if track.is_stream and not track.stream_url:
+        # Old playlists may contain an expired direct YouTube URL. Always
+        # refresh YouTube into the managed local cache unless it already has a
+        # local cached file, rather than asking Qt to open that network URL.
+        has_local_youtube_cache = bool(track.stream_url and QUrl(track.stream_url).isLocalFile())
+        if track.is_stream and (
+            not track.stream_url
+            or (track.platform == "youtube" and not has_local_youtube_cache)
+        ):
             self.resolve_track_stream(track, autoplay=True)
             return True
 
@@ -761,6 +905,10 @@ class MusicController(QObject):
         source = track.source_url or track.relative_path
         if not source:
             return
+        source_key = source.strip()
+        if source_key in self._stream_resolution_sources:
+            return
+        self._stream_resolution_sources.add(source_key)
         self._start_resolver(mode="refresh", playlist_id=self._current_playlist_id, url=source, music_id=track.music_id, autoplay=autoplay)
 
     def delete_music(self, music_id: str) -> bool:
@@ -891,16 +1039,24 @@ class MusicController(QObject):
             music_id=music_id,
             autoplay=autoplay,
             artwork_cache_dir=self.service.cache_root / "music-artwork",
+            stream_cache_dir=self.service.data_root / "music-stream-cache",
             config_roots=[self.service.install_root, self.service.project_root, self.service.config_root],
             parent=self,
         )
         worker.resolved.connect(self._handle_resolved_media)
         worker.failed.connect(self._handle_resolve_failed)
         worker.progress.connect(self.resolve_progress)
-        worker.finished.connect(lambda worker=worker: self._workers.discard(worker))
+        worker.artwork_cached.connect(self._handle_artwork_cached)
+        stream_source = url.strip() if mode == "refresh" else None
+        worker.finished.connect(lambda worker=worker, stream_source=stream_source: self._handle_resolver_finished(worker, stream_source))
         self._workers.add(worker)
         self.resolving_changed.emit(True, url)
         worker.start()
+
+    def _handle_resolver_finished(self, worker: MediaResolveWorker, stream_source: str | None) -> None:
+        self._workers.discard(worker)
+        if stream_source:
+            self._stream_resolution_sources.discard(stream_source)
 
     def _handle_resolved_media(self, payload: dict[str, object]) -> None:
         playlist_id = str(payload.get("playlist_id") or self._current_playlist_id)
@@ -921,6 +1077,17 @@ class MusicController(QObject):
         if payload.get("autoplay") and first_id:
             self._stream_retry_counts.pop(first_id, None)
             self.play_track(first_id)
+
+    def _handle_artwork_cached(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        # Artwork is resolved by URL from the cache, so no playlist data needs
+        # rewriting. Repaint once after the background worker finishes rather
+        # than blocking track import/playback for thumbnail HTTP requests.
+        self.playlists_changed.emit()
+        self.current_playlist_changed.emit(self.current_playlist())
+        self.tracks_changed.emit()
+        self.current_track_changed.emit(self.current_track())
 
     def _handle_resolve_failed(self, payload: dict[str, object]) -> None:
         self.resolving_changed.emit(False, "")
@@ -1140,7 +1307,8 @@ class IconButton(QPushButton):
             icon_color.setAlpha(130)
         painter.setPen(QPen(border, 1.0))
         painter.setBrush(bg)
-        painter.drawRoundedRect(rect, 8, 8)
+        # Secondary controls deliberately use a restrained rounded rectangle.
+        painter.drawRoundedRect(rect, 6, 6)
         painter.setPen(QPen(icon_color, max(1.5, self._button_size / 18), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.setBrush(icon_color)
         padding = 7 if self._icon_kind == "burger" else 8 if self._icon_kind in {"volume", "dots", "shuffle", "loop", "trash", "play", "pause", "plus", "edit", "window_play"} else 10
@@ -1480,7 +1648,12 @@ class ArtworkLabel(QLabel):
             painter.setPen(QPen(QColor(125, 164, 224), 2))
             painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 8, 8)
             return
-        scaled = self._pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        # Artwork is already loaded at this widget's size in the shared pixmap
+        # cache. Avoid allocating a new scaled pixmap on every repaint.
+        if self._pixmap.size() == self.size():
+            scaled = self._pixmap
+        else:
+            scaled = self._pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         x = int((self.width() - scaled.width()) / 2)
         y = int((self.height() - scaled.height()) / 2)
         painter.drawPixmap(x, y, scaled)
@@ -1754,6 +1927,18 @@ class MusicTrackListModel(QAbstractListModel):
             return record.music_id == self._current_music_id and self._current_playing
         return None
 
+    def flags(self, index: QModelIndex):
+        """Mark rows as movable.
+
+        QListView will not initiate a drag from a custom model unless the model
+        explicitly advertises drag/drop support.  The delegate draws a handle,
+        but before this the view treated every row as selection-only.
+        """
+        base = super().flags(index)
+        if not index.isValid():
+            return base | Qt.ItemIsDropEnabled
+        return base | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled
+
     def set_tracks(self, records: list[MusicRecord]) -> None:
         self.beginResetModel()
         self._records = list(records)
@@ -1777,10 +1962,14 @@ class MusicTrackListModel(QAbstractListModel):
         if source_row == target_row or source_row < 0 or source_row >= len(self._records):
             return
         target_row = max(0, min(target_row, len(self._records) - 1))
-        self.beginResetModel()
+        # Preserve model indexes and avoid relaying out every visible row
+        # while dragging through a large playlist.
+        destination_row = target_row + 1 if target_row > source_row else target_row
+        if not self.beginMoveRows(QModelIndex(), source_row, source_row, QModelIndex(), destination_row):
+            return
         record = self._records.pop(source_row)
         self._records.insert(target_row, record)
-        self.endResetModel()
+        self.endMoveRows()
 
     def ordered_ids(self) -> list[str]:
         return [record.music_id for record in self._records]
@@ -1855,7 +2044,9 @@ class MusicTrackDelegate(QStyledItemDelegate):
             right_reserved += 76
         name_rect = QRect(x, content.top(), max(40, content.right() - x - right_reserved), content.height())
         name_font = QFont(option.font)
-        name_font.setWeight(QFont.Bold if active else QFont.DemiBold)
+        # Track metadata stays readable without competing with the playlist
+        # heading. Selected tracks get a modest emphasis only.
+        name_font.setWeight(QFont.Medium if active else QFont.Normal)
         painter.setFont(name_font)
         painter.setPen(QColor("#f7fbff"))
         painter.drawText(name_rect, Qt.AlignVCenter | Qt.AlignLeft, QFontMetrics(name_font).elidedText(record.name, Qt.ElideRight, name_rect.width()))
@@ -1863,7 +2054,7 @@ class MusicTrackDelegate(QStyledItemDelegate):
         date_rect = QRect(name_rect.right() + 12, content.top(), 118, content.height())
         meta_font = QFont(option.font)
         meta_font.setPointSize(max(8, meta_font.pointSize() - 1))
-        meta_font.setWeight(QFont.DemiBold)
+        meta_font.setWeight(QFont.Normal)
         painter.setFont(meta_font)
         painter.setPen(QColor(220, 232, 250, 170))
         painter.drawText(date_rect, Qt.AlignVCenter | Qt.AlignLeft, _format_date_label(record.date_added))
@@ -1874,7 +2065,16 @@ class MusicTrackDelegate(QStyledItemDelegate):
         if self._editor:
             playing = bool(index.data(MusicTrackListModel.PlayingRole))
             self._paint_round_button(painter, self.preview_rect(option.rect), "pause" if playing else "play", QColor(accent))
-            self._paint_round_button(painter, self.delete_rect(option.rect), "trash", QColor("#d85f6f"))
+            view = self.parent()
+            pointer = view.viewport().mapFromGlobal(QCursor.pos()) if isinstance(view, QListView) else QPoint(-1, -1)
+            self._paint_round_button(
+                painter,
+                self.delete_rect(option.rect),
+                "trash",
+                QColor("#d85f6f"),
+                hovered=self.delete_rect(option.rect).contains(pointer),
+                flat=True,
+            )
         painter.restore()
 
     def drag_handle_rect(self, item_rect: QRect) -> QRect:
@@ -1896,16 +2096,26 @@ class MusicTrackDelegate(QStyledItemDelegate):
             for row in range(3):
                 painter.drawEllipse(QRectF(rect.left() + 4 + (column * 7), rect.top() + 6 + (row * 7), 3.2, 3.2))
 
-    def _paint_round_button(self, painter: QPainter, rect: QRect, icon_kind: str, color: QColor) -> None:
+    def _paint_round_button(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        icon_kind: str,
+        color: QColor,
+        *,
+        hovered: bool = False,
+        flat: bool = False,
+    ) -> None:
         fill = QColor(color)
-        fill.setAlpha(160)
+        fill.setAlpha(118 if flat and hovered else 160)
         border = QColor(color)
-        border.setAlpha(220)
-        painter.setPen(QPen(border, 1.0))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(QRectF(rect).adjusted(1, 1, -1, -1), 8, 8)
+        border.setAlpha(200 if not flat or hovered else 0)
+        if not flat or hovered:
+            painter.setPen(QPen(border, 1.0))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(QRectF(rect).adjusted(1, 1, -1, -1), 6, 6)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#f7fbff"))
+        painter.setBrush(QColor("#ff7b8d") if flat and hovered else QColor("#b6c3d7"))
         icon_rect = QRectF(rect).adjusted(10, 9, -10, -9)
         if icon_kind == "play":
             painter.drawPolygon(
@@ -2055,7 +2265,9 @@ class AnimatedTrackList(QListView):
         drag.setMimeData(mime)
         drag.setPixmap(pixmap)
         drag.setHotSpot(QPoint(18, max(1, pixmap.height() // 2)))
-        drag.exec(Qt.MoveAction if supported_actions & Qt.MoveAction else supported_actions)
+        # Some platform styles pass CopyAction here even though this is an
+        # internal reorder.  Always request Move so our drop handler runs.
+        drag.exec(Qt.MoveAction)
         self._drag_allowed = False
         self._drag_candidate_id = None
 
@@ -2131,6 +2343,7 @@ class PlaylistRowWidget(QFrame):
         self._selected = False
         self._compact = False
         self.setObjectName("musicPlaylistRow")
+        self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setMinimumHeight(46)
         self._layout = QHBoxLayout(self)
@@ -2155,7 +2368,7 @@ class PlaylistRowWidget(QFrame):
         if compact:
             self._layout.setContentsMargins(1, 6, 1, 6)
             self._layout.setAlignment(self.icon_label, Qt.AlignCenter)
-            self.setFixedWidth(width or 50)
+            self.setFixedWidth(width or 64)
         else:
             self._layout.setContentsMargins(8, 6, 8, 6)
             self._layout.setAlignment(self.icon_label, Qt.Alignment())
@@ -2171,15 +2384,23 @@ class PlaylistRowWidget(QFrame):
         rect = QRectF(self.contentsRect()).adjusted(2, 1, -2, -1)
         accent = self.property("accentColor")
         accent = QColor(accent) if isinstance(accent, QColor) else DEFAULT_ACCENT
-        bg = QColor(accent)
-        bg.setAlpha(52 if self._selected else 0)
-        if self.underMouse() and not self._selected:
-            bg.setAlpha(28)
-        border = QColor(accent)
-        border.setAlpha(90 if self._selected else 0)
-        painter.setPen(QPen(border, 1.0))
-        painter.setBrush(bg)
-        painter.drawRoundedRect(rect, 8, 8)
+        if self._selected:
+            gradient = QLinearGradient(rect.topLeft(), rect.topRight())
+            gradient.setColorAt(0.0, QColor(255, 255, 255, 26))
+            gradient.setColorAt(1.0, QColor(255, 255, 255, 5))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(gradient)
+        else:
+            bg = QColor(255, 255, 255, 18 if self.underMouse() else 0)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 6, 6)
+        if self._selected:
+            indicator = QColor(accent)
+            indicator.setAlpha(245)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(indicator)
+            painter.drawRoundedRect(QRectF(rect.left(), rect.top() + 7, 3, rect.height() - 14), 1.5, 1.5)
 
 
 class PlaylistIconSelectorDialog(QDialog):
@@ -2369,6 +2590,7 @@ class MusicPlaylistEditorDialog(QDialog):
         self._rename_timer.timeout.connect(self._commit_rename)
         self.setObjectName("musicPlaylistEditorDialog")
         self.setWindowTitle("Playlist Editor")
+        self.setFont(_music_ui_font())
         self.setWindowIcon(application_icon(self.controller.service.project_root))
         self.setModal(False)
         self.setMinimumSize(720, 560)
@@ -2424,7 +2646,7 @@ class MusicPlaylistEditorDialog(QDialog):
         self.delete_playlist_button.clicked.connect(self._delete_playlist)
         footer.addWidget(self.delete_playlist_button)
         footer.addStretch()
-        self.close_button = ModernButton("Done", role="accent", height=38, icon_size=0, minimum_width=92, horizontal_padding=22, font_point_size=10)
+        self.close_button = ModernButton("Done", role="accent", height=38, icon_size=0, minimum_width=92, horizontal_padding=22, font_point_size=10, radius=15)
         self.close_button.clicked.connect(self.accept)
         footer.addWidget(self.close_button)
         root.addLayout(footer)
@@ -2554,6 +2776,7 @@ class MusicManagerDialog(QDialog):
         self._bubble_hide_timer.timeout.connect(self._hide_time_bubble)
         self.setObjectName("musicManagerDialog")
         self.setWindowTitle("Music Manager")
+        self.setFont(_music_ui_font())
         self.setWindowIcon(application_icon(self.controller.service.project_root))
         self.setModal(False)
         self.setMinimumSize(860, 620)
@@ -2630,6 +2853,9 @@ class MusicManagerDialog(QDialog):
         self.playlist_list.setFrameShape(QFrame.NoFrame)
         self.playlist_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.playlist_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # A scrollbar steals enough space to clip compact playlist tiles. The
+        # list remains scrollable by wheel/touchpad without showing one.
+        self.playlist_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.playlist_list.setUniformItemSizes(True)
         self.playlist_list.setSpacing(6)
         self.playlist_list.setContentsMargins(0, 0, 0, 0)
@@ -2664,7 +2890,7 @@ class MusicManagerDialog(QDialog):
 
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
-        self.play_playlist_button = ModernButton("Play", role="accent", height=40, icon_size=0, minimum_width=96, horizontal_padding=22, font_point_size=11)
+        self.play_playlist_button = ModernButton("Play", role="accent", height=40, icon_size=0, minimum_width=96, horizontal_padding=22, font_point_size=11, radius=15)
         self.play_playlist_button.clicked.connect(lambda: self.controller.play_playlist(self.controller.current_playlist().playlist_id))
         action_row.addWidget(self.play_playlist_button)
         self.shuffle_button = IconButton("shuffle", role="accent", button_size=40)
@@ -2800,11 +3026,11 @@ class MusicManagerDialog(QDialog):
         for playlist in self.controller.playlists():
             item = QListWidgetItem()
             item.setData(Qt.UserRole, playlist.playlist_id)
-            item.setSizeHint(QSize(50 if self._sidebar_collapsed else 204, 48))
+            item.setSizeHint(QSize(64 if self._sidebar_collapsed else 204, 48))
             self.playlist_list.addItem(item)
             row = PlaylistRowWidget(playlist, self.controller.service)
             row.setProperty("accentColor", self._accent)
-            row.set_compact(self._sidebar_collapsed, width=50 if self._sidebar_collapsed else 204)
+            row.set_compact(self._sidebar_collapsed, width=64 if self._sidebar_collapsed else 204)
             row.set_selected(playlist.playlist_id == current_id)
             self.playlist_list.setItemWidget(item, row)
             if playlist.playlist_id == current_id:
@@ -2817,7 +3043,8 @@ class MusicManagerDialog(QDialog):
         pixmap = _playlist_pixmap(playlist, self.controller.service, 132)
         self.playlist_art.set_artwork(pixmap)
         self._apply_accent(_dominant_color(_track_pixmap(self.controller.current_track(), self.controller.service, 96) if self.controller.current_track() else pixmap))
-        self._sync_playlists()
+        # ``playlists_changed`` owns rebuilding the sidebar. Rebuilding it
+        # here as well doubles layout work for every playlist update.
 
     def _sync_tracks(self) -> None:
         current = self.controller.current_track()
@@ -2884,14 +3111,19 @@ class MusicManagerDialog(QDialog):
             existing.stop()
         self._sidebar_collapsed = not self._sidebar_collapsed
         start = self.sidebar.maximumWidth()
-        end = 66 if self._sidebar_collapsed else 232
+        end = 80 if self._sidebar_collapsed else 232
         if self._sidebar_collapsed:
             self._refresh_sidebar_layout_state(animated=True)
         else:
             self.add_playlist_button.setVisible(False)
             self.background_play_button.setVisible(False)
-            self.playlist_list.setFixedWidth(50)
-        animation = QVariantAnimation(self, duration=320, easingCurve=QEasingCurve.OutCubic)
+            self.playlist_list.setFixedWidth(64)
+        # Geometry animation lets Qt perform the layout interpolation instead
+        # of repeatedly rebuilding playlist widgets during the transition.
+        self.sidebar.setMinimumWidth(0)
+        animation = QPropertyAnimation(self.sidebar, b"maximumWidth", self)
+        animation.setDuration(280)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
         animation.setStartValue(start)
         animation.setEndValue(end)
         animation.valueChanged.connect(self._set_sidebar_width_for_animation)
@@ -2901,10 +3133,11 @@ class MusicManagerDialog(QDialog):
 
     def _set_sidebar_width_for_animation(self, value) -> None:
         width = int(round(float(value)))
+        # maximumWidth is the animated property. Only mirror it to the
+        # minimum here, so the layout follows every native animation frame.
         self.sidebar.setMinimumWidth(width)
-        self.sidebar.setMaximumWidth(width)
         if self._sidebar_collapsed:
-            list_width = 50
+            list_width = 64
         else:
             list_width = max(50, width - 20)
         self.playlist_list.setFixedWidth(list_width)
@@ -2918,13 +3151,13 @@ class MusicManagerDialog(QDialog):
         self.side_header.setContentsMargins(9 if compact else 0, 0, 9 if compact else 0, 0)
         self.side_header.setSpacing(0 if compact else 8)
         self.side_header.setAlignment(self.burger_button, Qt.AlignCenter if compact else Qt.AlignLeft | Qt.AlignVCenter)
-        self.playlist_list.setFixedWidth(50 if compact else 212)
+        self.playlist_list.setFixedWidth(64 if compact else 212)
         self.add_playlist_button.setVisible(not compact)
         self.background_play_button.setVisible(not compact)
         if not animated:
-            self.sidebar.setMinimumWidth(66 if compact else 232)
-            self.sidebar.setMaximumWidth(66 if compact else 232)
-        row_width = 50 if compact else 204
+            self.sidebar.setMinimumWidth(80 if compact else 232)
+            self.sidebar.setMaximumWidth(80 if compact else 232)
+        row_width = 64 if compact else 204
         for index in range(self.playlist_list.count()):
             item = self.playlist_list.item(index)
             item.setSizeHint(QSize(row_width, 48))
@@ -3004,6 +3237,13 @@ class MusicManagerDialog(QDialog):
                 row.setProperty("accentColor", self._accent)
                 row.update()
         self.update()
+
+
+def _music_ui_font() -> QFont:
+    """Use the native modern sans-serif UI face without a bundled font file."""
+    font = QFont("Segoe UI", 10)
+    font.setStyleStrategy(QFont.PreferAntialias)
+    return font
 
 
 def _manager_stylesheet(accent: str) -> str:
@@ -3112,6 +3352,9 @@ QLineEdit#musicEditorNameInput {{
 QLineEdit#musicUrlInput:focus, QLineEdit#musicEditorNameInput:focus {{
     border-color: {accent};
 }}
+QLineEdit#musicUrlInput::placeholder {{
+    color: rgba(220, 232, 250, 178);
+}}
 QSlider#musicVolumeSlider::groove:horizontal, QSlider#musicSeekSlider::groove:horizontal {{
     height: 6px;
     border-radius: 3px;
@@ -3180,6 +3423,9 @@ QLineEdit#musicUrlInput, QLineEdit#musicEditorNameInput {{
 }}
 QLineEdit#musicUrlInput:focus, QLineEdit#musicEditorNameInput:focus {{
     border-color: {rgba(accent_color, 226)};
+}}
+QLineEdit#musicUrlInput::placeholder {{
+    color: {rgba(roles["text_muted"], 208)};
 }}
 QSlider#musicVolumeSlider::groove:horizontal, QSlider#musicSeekSlider::groove:horizontal {{
     background-color: {rgba(roles["surface_3"], 174)};
@@ -3381,7 +3627,23 @@ def _format_date_label(value: str | None) -> str:
     return f"{parsed.strftime('%b')} {parsed.day}, {parsed.year}"
 
 
-def _best_stream_url(info: dict[str, object]) -> str | None:
+def _clean_media_error(message: str) -> str:
+    """Make yt-dlp failures readable when displayed by a Qt dialog."""
+    cleaned = _ANSI_ESCAPE_RE.sub("", message).strip()
+    return cleaned.removeprefix("ERROR: ").strip() or "Music could not be resolved."
+
+
+def _yt_dlp_node_path(roots: list[Path]) -> Path | None:
+    """Locate the Node runtime shipped with a frozen launcher or a dev PATH."""
+    for root in roots:
+        bundled = Path(root) / "node.exe"
+        if bundled.is_file():
+            return bundled
+    discovered = shutil.which("node")
+    return Path(discovered) if discovered else None
+
+
+def _best_stream_url(info: dict[str, object], *, prefer_qt_compatible: bool = False) -> str | None:
     direct = _optional_text(info.get("url"))
     if direct and _audio_format_score(info) >= 0:
         return direct
@@ -3399,7 +3661,17 @@ def _best_stream_url(info: dict[str, object]) -> str | None:
     ]
     if not audio_formats:
         return None
-    audio_formats.sort(key=lambda item: _audio_format_score(item), reverse=True)
+    def score(item: dict[str, object]) -> float:
+        base_score = _audio_format_score(item)
+        if not prefer_qt_compatible:
+            return base_score
+        acodec = str(item.get("acodec") or "").lower()
+        ext = str(item.get("ext") or "").lower()
+        # Native Windows media backends handle AAC in an MP4/M4A container far
+        # more reliably than a signed WebM/Opus URL from YouTube.
+        return base_score + (10_000 if ext == "m4a" or acodec.startswith("mp4a") else 0)
+
+    audio_formats.sort(key=score, reverse=True)
     return _optional_text(audio_formats[0].get("url"))
 
 

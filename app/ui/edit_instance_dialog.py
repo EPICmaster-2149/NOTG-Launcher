@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPlainTextEdit,
     QRadioButton,
     QScrollArea,
@@ -36,6 +35,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QDesktopServices
 
 from core.launcher import InstanceRecord, JavaCompatibilityError, LauncherService
+from ui.errors import QMessageBox
 from ui.add_instance_dialog import (
     AccentLineEdit,
     CatalogTableModel,
@@ -1197,11 +1197,21 @@ class EditInstanceDialog(QDialog):
 
         dialog = InstallModsDialog(self.service, self.instance, self)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
-        dialog.finished.connect(lambda *_: setattr(self, "_install_mods_dialog", None))
+        dialog.content_installed.connect(self._refresh_mods_after_remote_install)
+        dialog.finished.connect(self._handle_install_mods_dialog_finished)
         self._install_mods_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _handle_install_mods_dialog_finished(self, *_args) -> None:
+        """Reflect installs immediately instead of requiring a launcher restart."""
+        self._install_mods_dialog = None
+        self._refresh_mods_after_remote_install()
+
+    def _refresh_mods_after_remote_install(self) -> None:
+        self._mods_request_id += 1
+        self._start_asset_worker("mods", self._mods_request_id)
 
     def _resolved_rich_presence_state(self) -> str:
         text = self.rich_presence_state_input.text().strip()
@@ -1904,17 +1914,35 @@ class EditInstanceDialog(QDialog):
         row = self._find_mod_row(file_name)
         if row is None:
             return
-        row["enabled"] = bool(enabled)
+        if not self._persist_mod_enabled(row, enabled):
+            self._apply_mod_search(preserve_scroll=True)
+            return
         self._sync_mod_actions()
+
+    def _persist_mod_enabled(self, row: dict[str, Any], enabled: bool) -> bool:
+        """Persist the move immediately; a disabled jar must leave ``mods`` now."""
+        current = bool(row.get("original_enabled"))
+        if current == bool(enabled):
+            row["enabled"] = bool(enabled)
+            return True
+        try:
+            self.service.set_mod_enabled(self.instance, str(row["file_name"]), bool(enabled))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Mods", f"Failed to {'enable' if enabled else 'disable'} mod: {exc}")
+            return False
+        row["enabled"] = bool(enabled)
+        row["original_enabled"] = bool(enabled)
+        return True
 
     def _set_selected_mods_enabled(self, enabled: bool) -> None:
         selected = self._selected_mod_file_names()
         if not selected:
             return
         selected_names = set(selected)
+        changed = False
         for row in self._mods_cache:
             if str(row.get("file_name")) in selected_names:
-                row["enabled"] = bool(enabled)
+                changed = self._persist_mod_enabled(row, enabled) or changed
         for row_index in range(self.mods_table.rowCount()):
             item = self.mods_table.item(row_index, 2)
             if item is None or item.data(Qt.UserRole) not in selected_names:
@@ -1925,6 +1953,8 @@ class EditInstanceDialog(QDialog):
             checkbox.blockSignals(True)
             checkbox.setChecked(bool(enabled))
             checkbox.blockSignals(False)
+        if changed:
+            self._apply_mod_search(preserve_scroll=True)
         self._sync_mod_actions()
 
     def _remove_selected_mods(self) -> None:

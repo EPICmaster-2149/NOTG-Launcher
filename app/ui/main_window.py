@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -31,6 +30,7 @@ except ImportError:
 
 from core.global_hotkey import GlobalHotkeyManager
 from core.launcher import InstanceRecord, JavaCompatibilityError, LauncherService, VIDEO_SUFFIXES
+from ui.errors import QMessageBox
 from ui.instance_card import InstanceCard
 from ui.message_utils import show_java_error
 from ui.responsive import fitted_window_size, scaled_px
@@ -42,6 +42,9 @@ from ui.topbar import ActionPopup, PopupAction, TopBar
 from ui.startup_screen import DEVELOPER_ACCOUNT_NAME, run_startup_intro
 from ui.update_settings import CheckUpdateWorker
 from ui.version_display import format_launcher_version_label
+
+
+NOTG_HELP_URL = "https://github.com/EPICmaster-2149/NOTG-Launcher#readme"
 
 if TYPE_CHECKING:
     from ui.accounts_dialog import AccountsDialog
@@ -506,6 +509,10 @@ class MainWindow(QWidget):
 
         if action == "Settings":
             self._open_settings_dialog()
+            return
+
+        if action == "Help":
+            QDesktopServices.openUrl(QUrl(NOTG_HELP_URL))
             return
 
         if action == "Manage Accounts":
