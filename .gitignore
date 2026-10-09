@@ -16,6 +16,12 @@ env/
 .coverage
 htmlcov/
 
+# Local guides and test suite
+/guide-page-*.png
+/guide-preview.png
+/docs/USER_GUIDE copy.md
+/tests/
+
 # Local AI/editor workspace files
 .agents/
 .continue/

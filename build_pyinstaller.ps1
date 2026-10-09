@@ -150,6 +150,8 @@ $mainArgs = @(
     # ---- Assets & resources ----
     "--add-data", "assets;assets",
     "--add-data", "app/ui;ui",
+    "--add-data", "docs;docs",
+    "--add-data", "tutorial-video-thumbnail.jpg;.",
     "--icon", $iconPath,
 
     # ---- Core PySide6 modules (every file uses these) ----

@@ -1471,9 +1471,10 @@ class AddInstanceDialog(QDialog):
     PAGE_IMPORT = 1
     PAGE_MODRINTH = 2
 
-    def __init__(self, service: LauncherService, parent: QWidget | None = None):
+    def __init__(self, service: LauncherService, parent: QWidget | None = None, *, tutorial_preview: bool = False):
         super().__init__(parent)
         self.service = service
+        self._tutorial_preview = tutorial_preview
         self.selection: dict[str, Any] | None = None
         self._current_loader_id: str | None = None
         self._selected_icon_path = self.service.default_icon
@@ -1502,7 +1503,8 @@ class AddInstanceDialog(QDialog):
         self._update_ram_slider_range()
         self._set_ram_value(self._ram_default_mb, animate=False)
         self._update_page_state(self.PAGE_CREATE)
-        QTimer.singleShot(0, lambda: self._load_versions(force_refresh=False))
+        if not self._tutorial_preview:
+            QTimer.singleShot(0, lambda: self._load_versions(force_refresh=False))
 
     def showEvent(self, event) -> None:
         self._apply_responsive_layout()
@@ -1900,7 +1902,7 @@ class AddInstanceDialog(QDialog):
         page_name = self.nav_list.item(target_index).text()
         self.page_title.setText(page_name)
         self.header_title.setText(f"{page_name.upper()} A NEW INSTANCE")
-        if target_index == self.PAGE_MODRINTH:
+        if target_index == self.PAGE_MODRINTH and not self._tutorial_preview:
             QTimer.singleShot(0, self._open_modrinth_selector)
         self.ok_button.setVisible(target_index != self.PAGE_MODRINTH)
         self._update_name_placeholder()

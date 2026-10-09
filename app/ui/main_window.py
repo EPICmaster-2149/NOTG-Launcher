@@ -42,9 +42,8 @@ from ui.topbar import ActionPopup, PopupAction, TopBar
 from ui.startup_screen import DEVELOPER_ACCOUNT_NAME, run_startup_intro
 from ui.update_settings import CheckUpdateWorker
 from ui.version_display import format_launcher_version_label
+from ui.tutorial import TutorialHelpDialog, TutorialTour
 
-
-NOTG_HELP_URL = "https://github.com/EPICmaster-2149/NOTG-Launcher#readme"
 
 if TYPE_CHECKING:
     from ui.accounts_dialog import AccountsDialog
@@ -146,6 +145,8 @@ class MainWindow(QWidget):
         self._startup_update_worker: CheckUpdateWorker | None = None
         self._startup_update_check_started = False
         self._global_hotkey: GlobalHotkeyManager | None = None
+        self._tutorial_tour = TutorialTour(self)
+        self._tutorial_help_dialog: TutorialHelpDialog | None = None
 
         self.setObjectName("appRoot")
         self.setWindowTitle("NOTG Launcher")
@@ -176,6 +177,8 @@ class MainWindow(QWidget):
         QTimer.singleShot(1800, self._start_custom_skin_loader_check)
         QTimer.singleShot(1200, self._check_for_updates_on_startup)
         QTimer.singleShot(100, self._init_global_hotkey)
+        if not self._restore_request and not self._tutorial_tour.was_completed():
+            QTimer.singleShot(2600, lambda: self._tutorial_tour.start(first_run=True))
 
     def _init_global_hotkey(self) -> None:
         try:
@@ -512,7 +515,7 @@ class MainWindow(QWidget):
             return
 
         if action == "Help":
-            QDesktopServices.openUrl(QUrl(NOTG_HELP_URL))
+            self._open_tutorial_help()
             return
 
         if action == "Manage Accounts":
@@ -537,6 +540,17 @@ class MainWindow(QWidget):
                 QMessageBox.warning(self, "Accounts", str(exc))
                 return
             self._sync_accounts_ui()
+
+    def _open_tutorial_help(self) -> None:
+        if self._tutorial_help_dialog is None:
+            self._tutorial_help_dialog = TutorialHelpDialog(
+                self,
+                lambda: self._tutorial_tour.start(first_run=False),
+            )
+            self._tutorial_help_dialog.destroyed.connect(lambda *_: setattr(self, "_tutorial_help_dialog", None))
+        self._tutorial_help_dialog.show()
+        self._tutorial_help_dialog.raise_()
+        self._tutorial_help_dialog.activateWindow()
 
     def _open_add_instance_dialog(self) -> None:
         from ui.add_instance_dialog import AddInstanceDialog
